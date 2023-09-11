@@ -1,0 +1,11 @@
+var name = @COMPUTERNAME
+var age = @env_var2
+
+run (arg0, opt arg1) {
+    $ python run.py arg0 arg1 &name
+    $ python run.py &name arg1
+}
+
+_ {
+    $ echo Hello
+}
