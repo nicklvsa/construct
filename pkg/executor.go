@@ -33,10 +33,12 @@ func (e *Executor) EvaluateCommand(command *Command) error {
 
 			for pieceIdx, piece := range linePieces {
 				piece = strings.TrimSpace(piece)
-				variable, err := e.StructuredParse.GetVariable(piece, command.Name)
-				if err == nil && variable != nil {
-					linePieces[pieceIdx] = variable.Value
-					continue
+				if piece[0] == '&' {
+					variable, err := e.StructuredParse.GetVariable(piece[1:], command.Name)
+					if err == nil && variable != nil {
+						linePieces[pieceIdx] = variable.Value
+						continue
+					}
 				}
 
 				for _, arg := range command.Arguments {

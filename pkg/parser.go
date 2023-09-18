@@ -104,15 +104,40 @@ func (p *Parser) findVariable(varName string) (*Variable, error) {
 func (p *Parser) tryEvalExpression(expression string) string {
 	expression = strings.TrimSpace(expression)
 
-	if strings.HasPrefix(expression, "@") {
-		return os.Getenv(expression[1:])
+	var output string
+	for exprIdx, expr := range expression {
+		if expr == '@' {
+			output += os.Getenv(GetCharsUntilEnd(exprIdx, expression))
+		}
+
+		if expr == '&' {
+			name := GetCharsUntilEnd(exprIdx, expression)
+
+			if variable, err := p.findVariable(name); err == nil {
+				output += variable.Value
+			}
+		}
+		// if expr == '+' || expr == '-' || expr == '*' || expr == '/' {
+		// 	left, right := GetLeftRightOfChar(exprIdx, expression)
+		// 	left, right = simplestReplacers(left), simplestReplacers(right)
+		// }
 	}
 
-	if variable, err := p.findVariable(expression); err == nil {
-		return variable.Value
+	// if expression[0] == '@' {
+	// 	return os.Getenv(expression[1:])
+	// }
+
+	// if expression[0] == '&' {
+	// 	if variable, err := p.findVariable(expression[1:]); err == nil {
+	// 		return variable.Value
+	// 	}
+	// }
+
+	if len(output) <= 0 {
+		return expression
 	}
 
-	return expression
+	return output
 }
 
 func (p *Parser) parseVar(line string, scope string) error {
@@ -214,15 +239,19 @@ func (p *Parser) parseCommand(idx int, line string, isDefault bool) error {
 	}
 
 	if commandName != "" && len(commandBody) > 0 {
-		for cmdIdx, cmdLine := range commandBody {
+		var updatedCommandBody []string
+
+		for _, cmdLine := range commandBody {
 			cmdLine = strings.TrimSpace(cmdLine)
 			if strings.HasPrefix(cmdLine, "var") {
 				if err := p.parseVar(cmdLine, commandName); err != nil {
 					return err
 				}
 
-				commandBody = append(commandBody[:cmdIdx], commandBody[cmdIdx+1:]...)
+				continue
 			}
+
+			updatedCommandBody = append(updatedCommandBody, cmdLine)
 		}
 
 		for _, arg := range commandArgs {
@@ -234,7 +263,7 @@ func (p *Parser) parseCommand(idx int, line string, isDefault bool) error {
 			IsDefault: isDefault,
 			Arguments: commandArgs,
 			Name:      commandName,
-			Body:      commandBody,
+			Body:      updatedCommandBody,
 		})
 	}
 

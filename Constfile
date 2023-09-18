@@ -1,11 +1,15 @@
 var name = @COMPUTERNAME
-var age = @env_var2
+var example = 25
 
 run (arg0, opt arg1) {
+    var cool = &example
+    var test = &cool
     $ python run.py arg0 arg1 &name
-    $ python run.py &name arg1
+    $ python run.py &name &test
 }
 
 _ {
-    $ echo Hello
+    $ echo import sys > run.py
+    $ echo print('&name') >> run.py
+    $ echo print(sys.argv[1:]) >> run.py
 }
