@@ -21,80 +21,114 @@ func NewExecutor(data *ParsedData) *Executor {
 }
 
 func (e *Executor) EvaluateCommand(command *Command) error {
-	for lineIdx, line := range command.Body {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-
-		if line[0] == '$' {
-			executionLine := strings.TrimSpace(line[1:])
-			linePieces := strings.Split(executionLine, " ")
-
-			for pieceIdx, piece := range linePieces {
-				piece = strings.TrimSpace(piece)
-				if piece[0] == '&' {
-					variable, err := e.StructuredParse.GetVariable(piece[1:], command.Name)
-					if err == nil && variable != nil {
-						linePieces[pieceIdx] = variable.Value
-						continue
-					}
-				}
-
-				for _, arg := range command.Arguments {
-					pieceFlagName := fmt.Sprintf("%s:%s", command.Name, piece)
-					argFlagName := fmt.Sprintf("%s:%s", command.Name, arg.Name)
-					if pieceFlagName == argFlagName {
-						v, err := flag.CommandLine.GetString(argFlagName)
-						if err != nil || v == "" {
-							if !arg.IsOptional {
-								return fmt.Errorf("%s is not optional", argFlagName)
-							}
-						}
-
-						linePieces[pieceIdx] = v
-					}
-				}
+	execCommandBody := func(body []string) error {
+		for _, cmdLine := range body {
+			if cmdLine == "" {
+				continue
 			}
 
-			command.Body[lineIdx] = strings.Join(linePieces, " ")
-		}
-
-		for bodyIdx, bodyChar := range line {
-			if bodyChar == '&' {
-				var varName string
-				for _, varRef := range line[bodyIdx+1:] {
-					if !unicode.IsLetter(varRef) {
-						break
-					}
-
-					varName += string(varRef)
-				}
-
-				varDef, err := e.StructuredParse.GetVariable(varName, command.Name)
-				if err == nil && varDef != nil {
-					command.Body[lineIdx] = strings.Replace(command.Body[lineIdx], fmt.Sprintf("&%s", varName), varDef.Value, 1)
-				}
+			name, args := buildCommand(cmdLine)
+			cmd := exec.Command(name, args...)
+			output, err := cmd.Output()
+			if err != nil {
+				return err
 			}
+
+			fmt.Println(string(output))
 		}
+
+		return nil
 	}
 
-	for _, cmdLine := range command.Body {
-		if cmdLine == "" {
+	cleanCommandBody := func(uncleanedCommand *Command) error {
+		for lineIdx, line := range uncleanedCommand.Body {
+			line = strings.TrimSpace(line)
+			if line == "" {
+				continue
+			}
+
+			if line[0] == '$' {
+				executionLine := strings.TrimSpace(line[1:])
+				linePieces := strings.Split(executionLine, " ")
+
+				for pieceIdx, piece := range linePieces {
+					piece = strings.TrimSpace(piece)
+					if piece[0] == '&' {
+						variable, err := e.StructuredParse.GetVariable(piece[1:], uncleanedCommand.Name)
+						if err == nil && variable != nil {
+							linePieces[pieceIdx] = variable.Value
+							continue
+						}
+					}
+
+					for _, arg := range uncleanedCommand.Arguments {
+						pieceFlagName := fmt.Sprintf("%s:%s", uncleanedCommand.Name, piece)
+						argFlagName := fmt.Sprintf("%s:%s", uncleanedCommand.Name, arg.Name)
+						if pieceFlagName == argFlagName {
+							v, err := flag.CommandLine.GetString(argFlagName)
+							if err != nil || v == "" {
+								if !arg.IsOptional {
+									return fmt.Errorf("%s is not optional", argFlagName)
+								}
+							}
+
+							linePieces[pieceIdx] = v
+						}
+					}
+				}
+
+				uncleanedCommand.Body[lineIdx] = strings.Join(linePieces, " ")
+			}
+
+			for bodyIdx, bodyChar := range line {
+				if bodyChar == '&' {
+					var varName string
+					for _, varRef := range line[bodyIdx+1:] {
+						if !unicode.IsLetter(varRef) {
+							break
+						}
+
+						varName += string(varRef)
+					}
+
+					varDef, err := e.StructuredParse.GetVariable(varName, uncleanedCommand.Name)
+					if err == nil && varDef != nil {
+						uncleanedCommand.Body[lineIdx] = strings.Replace(uncleanedCommand.Body[lineIdx], fmt.Sprintf("&%s", varName), varDef.Value, 1)
+					}
+				}
+			}
+		}
+
+		return nil
+	}
+
+	for _, prereq := range command.Prereqs {
+		prereq = strings.TrimSpace(prereq)
+		if len(prereq) <= 0 {
 			continue
 		}
 
-		name, args := buildCommand(cmdLine)
-		cmd := exec.Command(name, args...)
-		output, err := cmd.Output()
+		preCmd, err := e.StructuredParse.GetCommand(prereq)
 		if err != nil {
 			return err
 		}
 
-		fmt.Println(string(output))
+		preCmd.IsPrereq = true
+
+		if err := cleanCommandBody(preCmd); err != nil {
+			return err
+		}
+
+		if err := execCommandBody(preCmd.Body); err != nil {
+			return err
+		}
 	}
 
-	return nil
+	if err := cleanCommandBody(command); err != nil {
+		return err
+	}
+
+	return execCommandBody(command.Body)
 }
 
 func (e *Executor) Exec(commands []string) error {

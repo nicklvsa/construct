@@ -74,7 +74,9 @@ type Variable struct {
 type Command struct {
 	Name      string     `json:"name"`
 	IsDefault bool       `json:"is_default"`
+	IsPrereq  bool       `json:"is_prereq"`
 	Arguments []Argument `json:"arguments"`
+	Prereqs   []string   `json:"prereqs"`
 	Body      []string   `json:"body"`
 }
 
@@ -156,6 +158,7 @@ func (p *Parser) parseVar(line string, scope string) error {
 
 func (p *Parser) parseCommand(idx int, line string, isDefault bool) error {
 	var commandName string
+	var prereqNames string
 	var commandBody []string
 	var commandArgs []Argument
 
@@ -210,8 +213,21 @@ func (p *Parser) parseCommand(idx int, line string, isDefault bool) error {
 		if char == '(' {
 			var argName string
 
-			for _, argChar := range line[chIdx+1:] {
+			for argCharIdx, argChar := range line[chIdx+1:] {
 				if argChar == ')' {
+					for nextCharIdx, nextChar := range line[chIdx+1:][argCharIdx+1:] {
+						if nextChar == '<' {
+							updatedLine := line[chIdx+1:][argCharIdx+1:][nextCharIdx+1:]
+							for _, namedNextChar := range updatedLine {
+								if namedNextChar == '{' {
+									break
+								}
+
+								prereqNames += string(namedNextChar)
+							}
+						}
+					}
+
 					argumentName, optional := parseArgName(argName)
 					commandArgs = append(commandArgs, Argument{
 						Name:       argumentName,
@@ -240,6 +256,7 @@ func (p *Parser) parseCommand(idx int, line string, isDefault bool) error {
 
 	if commandName != "" && len(commandBody) > 0 {
 		var updatedCommandBody []string
+		prereqList := strings.Split(strings.TrimSpace(prereqNames), ",")
 
 		for _, cmdLine := range commandBody {
 			cmdLine = strings.TrimSpace(cmdLine)
@@ -261,7 +278,9 @@ func (p *Parser) parseCommand(idx int, line string, isDefault bool) error {
 
 		p.Data.Commands = append(p.Data.Commands, Command{
 			IsDefault: isDefault,
+			IsPrereq:  false,
 			Arguments: commandArgs,
+			Prereqs:   prereqList,
 			Name:      commandName,
 			Body:      updatedCommandBody,
 		})

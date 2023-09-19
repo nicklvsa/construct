@@ -1,7 +1,12 @@
 var name = @COMPUTERNAME
 var example = 25
 
-run (arg0, opt arg1) {
+prerun {
+    var testing = &name
+    $ echo &testing
+}
+
+run (arg0, opt arg1) < prerun {
     var cool = &example
     var test = &cool
     $ python run.py arg0 arg1 &name
