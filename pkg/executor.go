@@ -34,13 +34,25 @@ func (e *Executor) EvaluateCommand(command *Command) error {
 				return err
 			}
 
-			fmt.Println(string(output))
+			strOutput := string(output)
+
+			if command.IsPrereq {
+				fmt.Printf("command %s is a prererq\n", command.Name)
+				command.PrereqOutput = append(command.PrereqOutput, strOutput)
+				continue
+			}
+
+			fmt.Println(strOutput)
 		}
 
 		return nil
 	}
 
 	cleanCommandBody := func(uncleanedCommand *Command) error {
+		if uncleanedCommand.PrereqCmds != nil && !uncleanedCommand.IsPrereq {
+			// TODO
+		}
+
 		for lineIdx, line := range uncleanedCommand.Body {
 			line = strings.TrimSpace(line)
 			if line == "" {
@@ -103,6 +115,10 @@ func (e *Executor) EvaluateCommand(command *Command) error {
 	}
 
 	for _, prereq := range command.Prereqs {
+		if command.PrereqCmds == nil {
+			command.PrereqCmds = []*Command{}
+		}
+
 		prereq = strings.TrimSpace(prereq)
 		if len(prereq) <= 0 {
 			continue
@@ -114,6 +130,8 @@ func (e *Executor) EvaluateCommand(command *Command) error {
 		}
 
 		preCmd.IsPrereq = true
+		preCmd.PrereqOutput = []string{}
+		command.PrereqCmds = append(command.PrereqCmds, preCmd)
 
 		if err := cleanCommandBody(preCmd); err != nil {
 			return err

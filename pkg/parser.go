@@ -72,12 +72,14 @@ type Variable struct {
 }
 
 type Command struct {
-	Name      string     `json:"name"`
-	IsDefault bool       `json:"is_default"`
-	IsPrereq  bool       `json:"is_prereq"`
-	Arguments []Argument `json:"arguments"`
-	Prereqs   []string   `json:"prereqs"`
-	Body      []string   `json:"body"`
+	Name         string     `json:"name"`
+	IsDefault    bool       `json:"is_default"`
+	IsPrereq     bool       `json:"is_prereq"`
+	PrereqOutput []string   `json:"prereq_output"`
+	Arguments    []Argument `json:"arguments"`
+	Prereqs      []string   `json:"prereqs"`
+	PrereqCmds   []*Command `json:"prereq_cmds"`
+	Body         []string   `json:"body"`
 }
 
 func NewParser(file string) *Parser {
@@ -277,12 +279,14 @@ func (p *Parser) parseCommand(idx int, line string, isDefault bool) error {
 		}
 
 		p.Data.Commands = append(p.Data.Commands, Command{
-			IsDefault: isDefault,
-			IsPrereq:  false,
-			Arguments: commandArgs,
-			Prereqs:   prereqList,
-			Name:      commandName,
-			Body:      updatedCommandBody,
+			IsDefault:    isDefault,
+			IsPrereq:     false,
+			PrereqOutput: nil,
+			PrereqCmds:   nil,
+			Arguments:    commandArgs,
+			Prereqs:      prereqList,
+			Name:         commandName,
+			Body:         updatedCommandBody,
 		})
 	}
 
