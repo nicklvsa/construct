@@ -21,8 +21,8 @@ func NewExecutor(data *ParsedData) *Executor {
 }
 
 func (e *Executor) EvaluateCommand(command *Command) error {
-	execCommandBody := func(body []string) error {
-		for _, cmdLine := range body {
+	execCommandBody := func(execCmd *Command) error {
+		for _, cmdLine := range execCmd.Body {
 			if cmdLine == "" {
 				continue
 			}
@@ -36,9 +36,8 @@ func (e *Executor) EvaluateCommand(command *Command) error {
 
 			strOutput := string(output)
 
-			if command.IsPrereq {
-				fmt.Printf("command %s is a prererq\n", command.Name)
-				command.PrereqOutput = append(command.PrereqOutput, strOutput)
+			if execCmd.IsPrereq {
+				execCmd.PrereqOutput = append(execCmd.PrereqOutput, strOutput)
 				continue
 			}
 
@@ -49,8 +48,19 @@ func (e *Executor) EvaluateCommand(command *Command) error {
 	}
 
 	cleanCommandBody := func(uncleanedCommand *Command) error {
-		if uncleanedCommand.PrereqCmds != nil && !uncleanedCommand.IsPrereq {
-			// TODO
+		if len(uncleanedCommand.Prereqs) > 0 {
+			for _, prereq := range uncleanedCommand.PrereqCmds {
+				for idx, arg := range prereq.PrereqOutput {
+					e.StructuredParse.Variables = append(
+						e.StructuredParse.Variables,
+						Variable{
+							Name:  fmt.Sprintf("%s.%d", prereq.Name, idx),
+							Scope: uncleanedCommand.Name,
+							Value: arg,
+						},
+					)
+				}
+			}
 		}
 
 		for lineIdx, line := range uncleanedCommand.Body {
@@ -131,22 +141,23 @@ func (e *Executor) EvaluateCommand(command *Command) error {
 
 		preCmd.IsPrereq = true
 		preCmd.PrereqOutput = []string{}
-		command.PrereqCmds = append(command.PrereqCmds, preCmd)
 
 		if err := cleanCommandBody(preCmd); err != nil {
 			return err
 		}
 
-		if err := execCommandBody(preCmd.Body); err != nil {
+		if err := execCommandBody(preCmd); err != nil {
 			return err
 		}
+
+		command.PrereqCmds = append(command.PrereqCmds, preCmd)
 	}
 
 	if err := cleanCommandBody(command); err != nil {
 		return err
 	}
 
-	return execCommandBody(command.Body)
+	return execCommandBody(command)
 }
 
 func (e *Executor) Exec(commands []string) error {
