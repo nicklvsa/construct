@@ -217,6 +217,7 @@ func (p *Parser) parseCommand(idx int, line string, isDefault bool) error {
 
 			for argCharIdx, argChar := range line[chIdx+1:] {
 				if argChar == ')' {
+					// TODO: support non-argument constructs with prereqs
 					for nextCharIdx, nextChar := range line[chIdx+1:][argCharIdx+1:] {
 						if nextChar == '<' {
 							updatedLine := line[chIdx+1:][argCharIdx+1:][nextCharIdx+1:]

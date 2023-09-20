@@ -6,8 +6,8 @@ another {
     echo &name
 }
 
-prerun {
-    echo world
+prerun (arg0) {
+    $ python run.py arg0 abc 123
 }
 
 run (arg0, opt arg1) < prerun, another {

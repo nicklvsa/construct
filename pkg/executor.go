@@ -84,6 +84,7 @@ func (e *Executor) EvaluateCommand(command *Command) error {
 						}
 					}
 
+					// for now, arguments can ONLY be used in $ expressions
 					for _, arg := range uncleanedCommand.Arguments {
 						pieceFlagName := fmt.Sprintf("%s:%s", uncleanedCommand.Name, piece)
 						argFlagName := fmt.Sprintf("%s:%s", uncleanedCommand.Name, arg.Name)
