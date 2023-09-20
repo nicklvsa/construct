@@ -3,6 +3,7 @@ var example = 25
 
 another {
     echo test
+    echo 123
 }
 
 prerun {
@@ -12,8 +13,7 @@ prerun {
 run (arg0, opt arg1) < prerun, another {
     var cool = &example
     var test = &cool
-    $ echo &prerun.0
-    $ echo &another.0
+    $ echo &prerun.0 &another.0 &another.1
     $ python run.py arg0 arg1 &name &test
 }
 

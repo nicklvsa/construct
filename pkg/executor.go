@@ -5,7 +5,6 @@ import (
 	"os/exec"
 	"runtime"
 	"strings"
-	"unicode"
 
 	flag "github.com/spf13/pflag"
 )
@@ -51,12 +50,13 @@ func (e *Executor) EvaluateCommand(command *Command) error {
 		if len(uncleanedCommand.Prereqs) > 0 {
 			for _, prereq := range uncleanedCommand.PrereqCmds {
 				for idx, arg := range prereq.PrereqOutput {
+					varName := fmt.Sprintf("%s.%d", prereq.Name, idx)
 					e.StructuredParse.Variables = append(
 						e.StructuredParse.Variables,
 						Variable{
-							Name:  fmt.Sprintf("%s.%d", prereq.Name, idx),
+							Name:  strings.TrimSpace(varName),
+							Value: strings.TrimSpace(arg),
 							Scope: uncleanedCommand.Name,
-							Value: arg,
 						},
 					)
 				}
@@ -102,23 +102,25 @@ func (e *Executor) EvaluateCommand(command *Command) error {
 				uncleanedCommand.Body[lineIdx] = strings.Join(linePieces, " ")
 			}
 
-			for bodyIdx, bodyChar := range line {
-				if bodyChar == '&' {
-					var varName string
-					for _, varRef := range line[bodyIdx+1:] {
-						if !unicode.IsLetter(varRef) {
-							break
-						}
+			// fmt.Println(uncleanedCommand.Body)
 
-						varName += string(varRef)
-					}
+			// for bodyIdx, bodyChar := range line {
+			// 	if bodyChar == '&' {
+			// 		var varName string
+			// 		for _, varRef := range line[bodyIdx+1:] {
+			// 			if !unicode.IsLetter(varRef) {
+			// 				break
+			// 			}
 
-					varDef, err := e.StructuredParse.GetVariable(varName, uncleanedCommand.Name)
-					if err == nil && varDef != nil {
-						uncleanedCommand.Body[lineIdx] = strings.Replace(uncleanedCommand.Body[lineIdx], fmt.Sprintf("&%s", varName), varDef.Value, 1)
-					}
-				}
-			}
+			// 			varName += string(varRef)
+			// 		}
+
+			// 		varDef, err := e.StructuredParse.GetVariable(varName, uncleanedCommand.Name)
+			// 		if err == nil && varDef != nil {
+			// 			uncleanedCommand.Body[lineIdx] = strings.Replace(uncleanedCommand.Body[lineIdx], fmt.Sprintf("&%s", varName), varDef.Value, 1)
+			// 		}
+			// 	}
+			// }
 		}
 
 		return nil
