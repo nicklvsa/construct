@@ -3,7 +3,7 @@ var example = 25
 
 another {
     echo test
-    echo 123
+    echo &name
 }
 
 prerun {

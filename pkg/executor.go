@@ -5,6 +5,7 @@ import (
 	"os/exec"
 	"runtime"
 	"strings"
+	"unicode"
 
 	flag "github.com/spf13/pflag"
 )
@@ -102,25 +103,23 @@ func (e *Executor) EvaluateCommand(command *Command) error {
 				uncleanedCommand.Body[lineIdx] = strings.Join(linePieces, " ")
 			}
 
-			// fmt.Println(uncleanedCommand.Body)
+			for bodyIdx, bodyChar := range line {
+				if bodyChar == '&' {
+					var varName string
+					for _, varRef := range line[bodyIdx+1:] {
+						if !unicode.IsLetter(varRef) {
+							break
+						}
 
-			// for bodyIdx, bodyChar := range line {
-			// 	if bodyChar == '&' {
-			// 		var varName string
-			// 		for _, varRef := range line[bodyIdx+1:] {
-			// 			if !unicode.IsLetter(varRef) {
-			// 				break
-			// 			}
+						varName += string(varRef)
+					}
 
-			// 			varName += string(varRef)
-			// 		}
-
-			// 		varDef, err := e.StructuredParse.GetVariable(varName, uncleanedCommand.Name)
-			// 		if err == nil && varDef != nil {
-			// 			uncleanedCommand.Body[lineIdx] = strings.Replace(uncleanedCommand.Body[lineIdx], fmt.Sprintf("&%s", varName), varDef.Value, 1)
-			// 		}
-			// 	}
-			// }
+					varDef, err := e.StructuredParse.GetVariable(varName, uncleanedCommand.Name)
+					if err == nil && varDef != nil {
+						uncleanedCommand.Body[lineIdx] = strings.Replace(uncleanedCommand.Body[lineIdx], fmt.Sprintf("&%s", varName), varDef.Value, 1)
+					}
+				}
+			}
 		}
 
 		return nil
