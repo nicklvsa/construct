@@ -8,6 +8,7 @@ another {
 
 prerun (arg0) {
     $ python run.py arg0 abc 123
+    $ explorer https://google.com
 }
 
 run (arg0, opt arg1) < prerun, another {

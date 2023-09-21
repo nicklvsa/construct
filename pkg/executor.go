@@ -31,7 +31,7 @@ func (e *Executor) EvaluateCommand(command *Command) error {
 			cmd := exec.Command(name, args...)
 			output, err := cmd.Output()
 			if err != nil {
-				return err
+				output = []byte(err.Error())
 			}
 
 			strOutput := string(output)
