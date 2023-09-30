@@ -72,14 +72,15 @@ type Variable struct {
 }
 
 type Command struct {
-	Name         string     `json:"name"`
-	IsDefault    bool       `json:"is_default"`
-	IsPrereq     bool       `json:"is_prereq"`
-	PrereqOutput []string   `json:"prereq_output"`
-	Arguments    []Argument `json:"arguments"`
-	Prereqs      []string   `json:"prereqs"`
-	PrereqCmds   []*Command `json:"prereq_cmds"`
-	Body         []string   `json:"body"`
+	Name            string     `json:"name"`
+	CloudAccessible bool       `json:"cloud_accessible"`
+	IsDefault       bool       `json:"is_default"`
+	IsPrereq        bool       `json:"is_prereq"`
+	PrereqOutput    []string   `json:"prereq_output"`
+	Arguments       []Argument `json:"arguments"`
+	Prereqs         []string   `json:"prereqs"`
+	PrereqCmds      []*Command `json:"prereq_cmds"`
+	Body            []string   `json:"body"`
 }
 
 func NewParser(file string) *Parser {
@@ -279,15 +280,24 @@ func (p *Parser) parseCommand(idx int, line string, isDefault bool) error {
 			flag.String(flagName, "", flagName)
 		}
 
+		cloudAccessible := false
+		if commandName[0] == '|' && commandName[len(commandName)-1] == '|' {
+			cloudAccessible = true
+			commandName = commandName[1 : len(commandName)-1]
+		}
+
+		fmt.Println(commandName)
+
 		p.Data.Commands = append(p.Data.Commands, Command{
-			IsDefault:    isDefault,
-			IsPrereq:     false,
-			PrereqOutput: nil,
-			PrereqCmds:   nil,
-			Arguments:    commandArgs,
-			Prereqs:      prereqList,
-			Name:         commandName,
-			Body:         updatedCommandBody,
+			IsDefault:       isDefault,
+			IsPrereq:        false,
+			PrereqOutput:    nil,
+			PrereqCmds:      nil,
+			Arguments:       commandArgs,
+			Prereqs:         prereqList,
+			Name:            commandName,
+			CloudAccessible: cloudAccessible,
+			Body:            updatedCommandBody,
 		})
 	}
 
