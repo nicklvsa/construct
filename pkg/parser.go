@@ -15,6 +15,8 @@ type ParsedData struct {
 }
 
 func (p *ParsedData) GetVariable(variableName, scope string) (*Variable, error) {
+	variableName = strings.ReplaceAll(variableName, `"`, "")
+
 	if scope == "" {
 		scope = "global"
 	}
@@ -285,8 +287,6 @@ func (p *Parser) parseCommand(idx int, line string, isDefault bool) error {
 			cloudAccessible = true
 			commandName = commandName[1 : len(commandName)-1]
 		}
-
-		fmt.Println(commandName)
 
 		p.Data.Commands = append(p.Data.Commands, Command{
 			IsDefault:       isDefault,
