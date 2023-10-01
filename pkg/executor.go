@@ -107,10 +107,6 @@ func (e *Executor) EvaluateCommand(command *Command) error {
 			}
 
 			for bodyIdx, bodyChar := range line {
-				if bodyChar == '"' {
-					continue
-				}
-
 				if bodyChar == '&' {
 					var varName string
 					for _, varRef := range line[bodyIdx+1:] {
