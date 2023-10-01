@@ -2,7 +2,7 @@ var name = @USER
 var example = 25
 
 |testfunc| {
-    echo hello
+    echo "yoyoyo"
 }
 
 another {
@@ -15,9 +15,10 @@ prerun (arg0) {
     $ open https://google.com
 }
 
-run (arg0, opt arg1) < prerun, another {
+run (arg0, opt arg1) < prerun, another, testfunc {
     var cool = &example
     var test = &cool
+    $ echo "&testfunc.0"
     $ echo "&prerun.0 &another.0 &another.1"
     $ python3.8 run.py arg0 arg1 &name &test
 }
