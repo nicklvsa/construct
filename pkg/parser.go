@@ -15,6 +15,8 @@ type ParsedData struct {
 }
 
 func (p *ParsedData) GetVariable(variableName, scope string) (*Variable, error) {
+	variableName = strings.ReplaceAll(variableName, `"`, "")
+
 	if scope == "" {
 		scope = "global"
 	}

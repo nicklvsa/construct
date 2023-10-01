@@ -1,0 +1,29 @@
+var name = @USER
+var example = 25
+
+|testfunc| {
+    echo hello
+}
+
+another {
+    echo "test"
+    echo "&name"
+}
+
+prerun (arg0) {
+    $ python3.8 run.py arg0 abc 123
+    $ open https://google.com
+}
+
+run (arg0, opt arg1) < prerun, another {
+    var cool = &example
+    var test = &cool
+    $ echo "&prerun.0 &another.0 &another.1"
+    $ python3.8 run.py arg0 arg1 &name &test
+}
+
+_ {
+    $ rm -rf run.py
+    $ echo "import sys" >> run.py
+    $ echo "print(sys.argv[1:])" >> run.py
+}
