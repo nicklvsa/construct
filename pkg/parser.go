@@ -286,8 +286,6 @@ func (p *Parser) parseCommand(idx int, line string, isDefault bool) error {
 			commandName = commandName[1 : len(commandName)-1]
 		}
 
-		fmt.Println(commandName)
-
 		p.Data.Commands = append(p.Data.Commands, Command{
 			IsDefault:       isDefault,
 			IsPrereq:        false,
