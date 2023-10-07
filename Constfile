@@ -1,7 +1,7 @@
 var name = @COMPUTERNAME
 var example = 25
 
-|cool| {
+|testfunc| {
     echo hello
 }
 
@@ -12,17 +12,20 @@ another {
 
 prerun (arg0) {
     $ python run.py arg0 abc 123
-    $ explorer https://google.com
 }
 
-run (arg0, opt arg1) < prerun, another {
+run (arg0, opt arg1) < prerun, another, testfunc {
     var cool = &example
     var test = &cool
     $ echo &prerun.0 &another.0 &another.1
     $ python run.py arg0 arg1 &name &test
+    $ echo &testfunc.0
 }
 
 _ {
+    $ python -m pip install requests
     $ echo import sys > run.py
+    $ echo import requests >> run.py
     $ echo print(sys.argv[1:]) >> run.py
+    $ echo print(requests.get('https://dummyjson.com/products/1').json()) >> run.py
 }

@@ -154,6 +154,10 @@ func (e *Executor) EvaluateCommand(command *Command) error {
 			return err
 		}
 
+		if err := e.tryApplyCloudBody(preCmd); err != nil {
+			return err
+		}
+
 		command.PrereqCmds = append(command.PrereqCmds, preCmd)
 	}
 
@@ -161,7 +165,21 @@ func (e *Executor) EvaluateCommand(command *Command) error {
 		return err
 	}
 
+	if err := e.tryApplyCloudBody(command); err != nil {
+		return err
+	}
+
 	return execCommandBody(command)
+}
+
+func (e *Executor) tryApplyCloudBody(cmd *Command) error {
+	if !cmd.CloudAccessible {
+		return nil
+	}
+
+	// TODO: append cloud body to command
+
+	return nil
 }
 
 func (e *Executor) Exec(commands []string) error {
@@ -191,9 +209,9 @@ func (e *Executor) Exec(commands []string) error {
 }
 
 func buildCommand(cmd string) (string, []string) {
-	cmdPrefix := []string{"/bin/bash", "-c", cmd}
+	cmdPrefix := [3]string{"/bin/bash", "-c", cmd}
 	if runtime.GOOS == "windows" {
-		cmdPrefix = []string{"cmd", "/c", cmd}
+		cmdPrefix = [3]string{"cmd", "/c", cmd}
 	}
 
 	return cmdPrefix[0], cmdPrefix[1:]
