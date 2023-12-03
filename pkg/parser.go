@@ -57,9 +57,9 @@ func (p *ParsedData) GetDefaultCommand() (*Command, error) {
 }
 
 type Parser struct {
-	InputFile string
-	Data      *ParsedData
-	Lines     []string
+	InputFile string      `json:"-"`
+	Data      *ParsedData `json:"data"`
+	Lines     []string    `json:"-"`
 }
 
 type Argument struct {
@@ -331,12 +331,21 @@ func (p *Parser) Parse() (*ParsedData, error) {
 		}
 	}
 
-	// jsonOutput, err := json.Marshal(p.Data)
-	// if err != nil {
-	// 	return nil, err
-	// }
+	writeChan := make(chan error)
 
-	// fmt.Println(string(jsonOutput))
+	debugWriter := func(signal chan<- error) {
+		mermaid := DebugToMermaid(p.Data)
+		if err := os.WriteFile("diagram.md", []byte(mermaid), 0644); err != nil {
+			signal <- err
+		}
+
+		signal <- nil
+	}
+
+	go debugWriter(writeChan)
+	if err := <-writeChan; err != nil {
+		fmt.Println(err.Error())
+	}
 
 	return p.Data, nil
 }
