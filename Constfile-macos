@@ -11,7 +11,7 @@ another {
 }
 
 prerun (arg0) {
-    $ python3.8 run.py arg0 abc 123
+    $ python3.11 run.py arg0 abc 123
     $ open https://google.com
 }
 
@@ -20,7 +20,7 @@ run (arg0, opt arg1) < prerun, another, testfunc {
     var test = &cool
     $ echo "&testfunc.0"
     $ echo "&prerun.0 &another.0 &another.1"
-    $ python3.8 run.py arg0 arg1 &name &test
+    $ python3.11 run.py arg0 arg1 &name &test
 }
 
 _ {
