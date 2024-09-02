@@ -1,0 +1,3 @@
+{
+    "testfunc": {"name":"testfunc","cloud_accessible":true,"is_default":false,"is_prereq":false,"prereq_output":null,"arguments":null,"prereqs":[""],"prereq_cmds":[],"body":["echo \"hey\""]}
+}

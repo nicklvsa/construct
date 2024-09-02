@@ -1,7 +1,9 @@
 package pkg
 
 import (
+	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
 	"runtime"
 	"strings"
@@ -177,7 +179,17 @@ func (e *Executor) tryApplyCloudBody(cmd *Command) error {
 		return nil
 	}
 
-	// TODO: append cloud body to command
+	external, err := e.getCloudDefinition(cmd.Name)
+	if err != nil {
+		return nil
+	}
+
+	cmd.Prereqs = external.Prereqs
+	cmd.PrereqCmds = external.PrereqCmds
+	cmd.PrereqOutput = external.PrereqOutput
+
+	// Append mode by default. Maybe make this configurable?
+	cmd.Body = append(cmd.Body, external.Body...)
 
 	return nil
 }
@@ -206,6 +218,24 @@ func (e *Executor) Exec(commands []string) error {
 	}
 
 	return nil
+}
+
+func (e Executor) getCloudDefinition(name string) (*Command, error) {
+	fileBytes, err := os.ReadFile("fakecloud.json")
+	if err != nil {
+		return nil, err
+	}
+
+	var commands map[string]Command
+	if err := json.Unmarshal(fileBytes, &commands); err != nil {
+		return nil, err
+	}
+
+	if c, ok := commands[name]; ok {
+		return &c, nil
+	}
+
+	return nil, fmt.Errorf("%s command not found in cloud", name)
 }
 
 func buildCommand(cmd string) (string, []string) {
