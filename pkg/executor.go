@@ -206,6 +206,7 @@ func (e *Executor) Exec(commands []string) error {
 	}
 
 	var waiter sync.WaitGroup
+	errData := make(chan error)
 
 	for _, cmdName := range commands {
 		if cmdName[0] == '-' {
@@ -214,35 +215,50 @@ func (e *Executor) Exec(commands []string) error {
 
 		if e.concurrent {
 			waiter.Add(1)
-			go e.processCommand(cmdName, &waiter)
+			go e.processCommand(cmdName, errData, &waiter)
 
 			continue
 		}
 
-		if err := e.processCommand(cmdName, nil); err != nil {
-			return nil
+		if err := e.processCommand(cmdName, nil, nil); err != nil {
+			return err
 		}
 	}
 
 	if e.concurrent {
+		for data := range errData {
+			if data != nil {
+				return data
+			}
+		}
+
 		waiter.Wait()
+		close(errData)
 	}
 
 	return nil
 }
 
-func (e *Executor) processCommand(name string, wg *sync.WaitGroup) error {
+func (e *Executor) processCommand(name string, resp chan<- error, wg *sync.WaitGroup) error {
 	if wg != nil {
 		defer wg.Done()
 	}
 
 	command, err := e.StructuredParse.GetCommand(name)
 	if err != nil {
-		return err
+		if e.concurrent {
+			resp <- err
+		} else {
+			return err
+		}
 	}
 
 	if err := e.EvaluateCommand(command); err != nil {
-		return err
+		if e.concurrent {
+			resp <- err
+		} else {
+			return err
+		}
 	}
 
 	return nil
