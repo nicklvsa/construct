@@ -148,6 +148,10 @@ func (e *Executor) EvaluateCommand(command *Command) error {
 		preCmd.IsPrereq = true
 		preCmd.PrereqOutput = []string{}
 
+		if err := e.tryApplyCloudBody(preCmd); err != nil {
+			return err
+		}
+
 		if err := cleanCommandBody(preCmd); err != nil {
 			return err
 		}
@@ -156,18 +160,14 @@ func (e *Executor) EvaluateCommand(command *Command) error {
 			return err
 		}
 
-		if err := e.tryApplyCloudBody(preCmd); err != nil {
-			return err
-		}
-
 		command.PrereqCmds = append(command.PrereqCmds, preCmd)
 	}
 
-	if err := cleanCommandBody(command); err != nil {
+	if err := e.tryApplyCloudBody(command); err != nil {
 		return err
 	}
 
-	if err := e.tryApplyCloudBody(command); err != nil {
+	if err := cleanCommandBody(command); err != nil {
 		return err
 	}
 

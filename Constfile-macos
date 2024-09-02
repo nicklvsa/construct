@@ -19,6 +19,7 @@ run (arg0, opt arg1) < prerun, another, testfunc {
     var cool = &example
     var test = &cool
     $ echo "&testfunc.0"
+    $ echo "&testfunc.1"
     $ echo "&prerun.0 &another.0 &another.1"
     $ python3.11 run.py arg0 arg1 &name &test
 }
