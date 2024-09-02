@@ -226,14 +226,16 @@ func (e *Executor) Exec(commands []string) error {
 	}
 
 	if e.concurrent {
+		go func() {
+			waiter.Wait()
+			close(errData)
+		}()
+
 		for data := range errData {
 			if data != nil {
 				return data
 			}
 		}
-
-		waiter.Wait()
-		close(errData)
 	}
 
 	return nil
