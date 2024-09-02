@@ -2,12 +2,12 @@ package pkg
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"runtime"
 	"strings"
+	"sync"
 	"unicode"
 
 	flag "github.com/spf13/pflag"
@@ -15,12 +15,12 @@ import (
 
 type Executor struct {
 	StructuredParse *ParsedData
-	concurrency     int
+	concurrent      bool
 }
 
-func NewExecutor(data *ParsedData, concurrency int) *Executor {
+func NewExecutor(data *ParsedData, concurrent bool) *Executor {
 	return &Executor{
-		concurrency:     concurrency,
+		concurrent:      concurrent,
 		StructuredParse: data,
 	}
 }
@@ -205,23 +205,44 @@ func (e *Executor) Exec(commands []string) error {
 		}
 	}
 
-	if e.concurrency > 1 {
-		return errors.New("concurrent commands not implemented yet")
-	}
+	var waiter sync.WaitGroup
 
 	for _, cmdName := range commands {
 		if cmdName[0] == '-' {
 			continue
 		}
 
-		command, err := e.StructuredParse.GetCommand(cmdName)
-		if err != nil {
-			return err
+		if e.concurrent {
+			waiter.Add(1)
+			go e.processCommand(cmdName, &waiter)
+
+			continue
 		}
 
-		if err := e.EvaluateCommand(command); err != nil {
-			return err
+		if err := e.processCommand(cmdName, nil); err != nil {
+			return nil
 		}
+	}
+
+	if e.concurrent {
+		waiter.Wait()
+	}
+
+	return nil
+}
+
+func (e *Executor) processCommand(name string, wg *sync.WaitGroup) error {
+	if wg != nil {
+		defer wg.Done()
+	}
+
+	command, err := e.StructuredParse.GetCommand(name)
+	if err != nil {
+		return err
+	}
+
+	if err := e.EvaluateCommand(command); err != nil {
+		return err
 	}
 
 	return nil
