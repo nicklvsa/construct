@@ -52,9 +52,12 @@ func main() {
 		panic(err)
 	}
 
+	var concurrency int
+	flag.IntVar(&concurrency, "concurrency", 1, "")
+
 	flag.Parse()
 
-	executor := pkg.NewExecutor(data)
+	executor := pkg.NewExecutor(data, concurrency)
 	if err := executor.Exec(inputs.Commands); err != nil {
 		panic(err)
 	}

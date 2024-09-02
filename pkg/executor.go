@@ -2,6 +2,7 @@ package pkg
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -14,10 +15,12 @@ import (
 
 type Executor struct {
 	StructuredParse *ParsedData
+	concurrency     int
 }
 
-func NewExecutor(data *ParsedData) *Executor {
+func NewExecutor(data *ParsedData, concurrency int) *Executor {
 	return &Executor{
+		concurrency:     concurrency,
 		StructuredParse: data,
 	}
 }
@@ -200,6 +203,10 @@ func (e *Executor) Exec(commands []string) error {
 		if err := e.EvaluateCommand(defaultCommand); err != nil {
 			return err
 		}
+	}
+
+	if e.concurrency > 1 {
+		return errors.New("concurrent commands not implemented yet")
 	}
 
 	for _, cmdName := range commands {
