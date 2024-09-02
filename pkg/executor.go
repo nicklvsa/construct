@@ -184,9 +184,9 @@ func (e *Executor) tryApplyCloudBody(cmd *Command) error {
 		return nil
 	}
 
-	cmd.Prereqs = external.Prereqs
-	cmd.PrereqCmds = external.PrereqCmds
-	cmd.PrereqOutput = external.PrereqOutput
+	// cmd.Prereqs = external.Prereqs
+	// cmd.PrereqCmds = external.PrereqCmds
+	// cmd.PrereqOutput = external.PrereqOutput
 
 	// Append mode by default. Maybe make this configurable?
 	cmd.Body = append(cmd.Body, external.Body...)
