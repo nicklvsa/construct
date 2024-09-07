@@ -104,9 +104,13 @@ func NewParser(file string) *Parser {
 	}
 }
 
-func (p *Parser) findVariable(varName string) (*Variable, error) {
+func (p *Parser) findVariable(varName string, scope *string) (*Variable, error) {
 	for _, v := range p.Data.Variables {
 		if v.Name == varName {
+			if scope != nil && v.Scope == *scope {
+				return v, nil
+			}
+
 			return v, nil
 		}
 	}
@@ -126,14 +130,13 @@ func (p *Parser) tryEvalExpression(expression string, varName *string, varScope 
 		if expr == '&' {
 			name := GetCharsUntilEnd(exprIdx, expression)
 
-			if variable, err := p.findVariable(name); err == nil {
+			if variable, err := p.findVariable(name, varScope); err == nil {
 				output += variable.Value
 			}
 		}
 
 		if expr == '$' && varName != nil && varScope != nil {
 			data := GetCharsUntilEnd(exprIdx, expression)
-			fmt.Println(expression)
 
 			p.Data.Commands = append(p.Data.Commands, &Command{
 				Name:            fmt.Sprintf("__lazy_%s_%s", *varName, *varScope),

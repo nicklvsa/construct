@@ -61,7 +61,7 @@ func (e *Executor) EvaluateCommand(command *Command) error {
 					return err
 				}
 
-				variable.Value = strOutput
+				variable.Value = strings.TrimSpace(strOutput)
 			} else {
 				fmt.Println(strOutput)
 			}
