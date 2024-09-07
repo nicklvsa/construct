@@ -51,7 +51,7 @@ func (e *Executor) EvaluateCommand(command *Command) error {
 			strOutput := string(output)
 
 			if execCmd.IsPrereq {
-				execCmd.PrereqOutput = append(execCmd.PrereqOutput, strOutput)
+				execCmd.PrereqOutput = append(execCmd.PrereqOutput, strings.TrimSpace(strOutput))
 				continue
 			}
 
