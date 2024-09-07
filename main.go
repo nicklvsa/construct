@@ -52,7 +52,9 @@ func main() {
 		panic(err)
 	}
 
+	var debug bool
 	var concurrent bool
+	flag.BoolVar(&debug, "debug", false, "")
 	flag.BoolVar(&concurrent, "concurrent", false, "")
 
 	flag.Parse()
@@ -62,5 +64,7 @@ func main() {
 		panic(err)
 	}
 
-	// executor.Dump("debug.json")
+	if debug {
+		executor.Dump("debug.json")
+	}
 }
