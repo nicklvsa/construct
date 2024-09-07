@@ -10,8 +10,8 @@ import (
 )
 
 type ParsedData struct {
-	Variables []Variable `json:"variables"`
-	Commands  []Command  `json:"commands"`
+	Variables []*Variable `json:"variables"`
+	Commands  []*Command  `json:"commands"`
 }
 
 func (p *ParsedData) GetVariable(variableName, scope string) (*Variable, error) {
@@ -23,13 +23,13 @@ func (p *ParsedData) GetVariable(variableName, scope string) (*Variable, error) 
 
 	for _, variable := range p.Variables {
 		if variable.Name == variableName && variable.Scope == scope {
-			return &variable, nil
+			return variable, nil
 		}
 	}
 
 	for _, variable := range p.Variables {
 		if variable.Name == variableName && variable.Scope == "global" {
-			return &variable, nil
+			return variable, nil
 		}
 	}
 
@@ -39,7 +39,7 @@ func (p *ParsedData) GetVariable(variableName, scope string) (*Variable, error) 
 func (p *ParsedData) GetCommand(commandName string) (*Command, error) {
 	for _, command := range p.Commands {
 		if command.Name == commandName {
-			return &command, nil
+			return command, nil
 		}
 	}
 
@@ -49,7 +49,7 @@ func (p *ParsedData) GetCommand(commandName string) (*Command, error) {
 func (p *ParsedData) GetDefaultCommand() (*Command, error) {
 	for _, command := range p.Commands {
 		if command.IsDefault {
-			return &command, nil
+			return command, nil
 		}
 	}
 
@@ -73,16 +73,22 @@ type Variable struct {
 	Scope string `json:"scope"`
 }
 
+type LazyOutput struct {
+	VarName string `json:"var_name"`
+	Scope   string `json:"scope"`
+}
+
 type Command struct {
-	Name            string     `json:"name"`
-	CloudAccessible bool       `json:"cloud_accessible"`
-	IsDefault       bool       `json:"is_default"`
-	IsPrereq        bool       `json:"is_prereq"`
-	PrereqOutput    []string   `json:"prereq_output"`
-	Arguments       []Argument `json:"arguments"`
-	Prereqs         []string   `json:"prereqs"`
-	PrereqCmds      []*Command `json:"prereq_cmds"`
-	Body            []string   `json:"body"`
+	Name            string      `json:"name"`
+	CloudAccessible bool        `json:"cloud_accessible"`
+	IsDefault       bool        `json:"is_default"`
+	LazyEval        *LazyOutput `json:"lazy_output"`
+	IsPrereq        bool        `json:"is_prereq"`
+	PrereqOutput    []string    `json:"prereq_output"`
+	Arguments       []Argument  `json:"arguments"`
+	Prereqs         []string    `json:"prereqs"`
+	PrereqCmds      []*Command  `json:"prereq_cmds"`
+	Body            []string    `json:"body"`
 }
 
 func NewParser(file string) *Parser {
@@ -101,14 +107,14 @@ func NewParser(file string) *Parser {
 func (p *Parser) findVariable(varName string) (*Variable, error) {
 	for _, v := range p.Data.Variables {
 		if v.Name == varName {
-			return &v, nil
+			return v, nil
 		}
 	}
 
 	return nil, fmt.Errorf("cannot find %s", varName)
 }
 
-func (p *Parser) tryEvalExpression(expression string) string {
+func (p *Parser) tryEvalExpression(expression string, varName *string, varScope *string) string {
 	expression = strings.TrimSpace(expression)
 
 	var output string
@@ -124,10 +130,18 @@ func (p *Parser) tryEvalExpression(expression string) string {
 				output += variable.Value
 			}
 		}
-		// if expr == '+' || expr == '-' || expr == '*' || expr == '/' {
-		// 	left, right := GetLeftRightOfChar(exprIdx, expression)
-		// 	left, right = simplestReplacers(left), simplestReplacers(right)
-		// }
+
+		if expr == '$' && varName != nil && varScope != nil {
+			data := GetCharsUntilEnd(exprIdx, expression)
+
+			p.Data.Commands = append(p.Data.Commands, &Command{
+				Name:            fmt.Sprintf("__lazy_%s", *varName),
+				LazyEval:        &LazyOutput{VarName: *varName, Scope: *varScope},
+				IsDefault:       false,
+				CloudAccessible: false,
+				Body:            []string{fmt.Sprintf("$ %s", data)},
+			})
+		}
 	}
 
 	// if expression[0] == '@' {
@@ -149,10 +163,15 @@ func (p *Parser) tryEvalExpression(expression string) string {
 
 func (p *Parser) parseVar(line string, scope string) error {
 	pieces := strings.Split(line, "=")
-	variableName := strings.TrimSpace(strings.Split(pieces[0], "var")[1])
-	variableValue := p.tryEvalExpression(pieces[1])
 
-	p.Data.Variables = append(p.Data.Variables, Variable{
+	var variableValue string
+	variableName := strings.TrimSpace(strings.Split(pieces[0], "var")[1])
+
+	if len(pieces) > 1 {
+		variableValue = p.tryEvalExpression(pieces[1], &variableName, &scope)
+	}
+
+	p.Data.Variables = append(p.Data.Variables, &Variable{
 		Name:  variableName,
 		Value: variableValue,
 		Scope: scope,
@@ -288,7 +307,7 @@ func (p *Parser) parseCommand(idx int, line string, isDefault bool) error {
 			commandName = commandName[1 : len(commandName)-1]
 		}
 
-		p.Data.Commands = append(p.Data.Commands, Command{
+		p.Data.Commands = append(p.Data.Commands, &Command{
 			IsDefault:       isDefault,
 			IsPrereq:        false,
 			PrereqOutput:    nil,

@@ -10,6 +10,11 @@ another {
     echo "&name"
 }
 
+thing {
+    var abc = $ python3.11 run.py hello world hello world
+    echo "testing &abc"
+}
+
 prerun (arg0) {
     $ python3.11 run.py arg0 abc 123
     $ open https://google.com

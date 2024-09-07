@@ -46,7 +46,16 @@ func (e *Executor) EvaluateCommand(command *Command) error {
 				continue
 			}
 
-			fmt.Println(strOutput)
+			if command.LazyEval != nil {
+				variable, err := e.StructuredParse.GetVariable(command.LazyEval.VarName, command.LazyEval.Scope)
+				if err != nil {
+					return err
+				}
+
+				variable.Value = strOutput
+			} else {
+				fmt.Println(strOutput)
+			}
 		}
 
 		return nil
@@ -59,7 +68,7 @@ func (e *Executor) EvaluateCommand(command *Command) error {
 					varName := fmt.Sprintf("%s.%d", prereq.Name, idx)
 					e.StructuredParse.Variables = append(
 						e.StructuredParse.Variables,
-						Variable{
+						&Variable{
 							Name:  strings.TrimSpace(varName),
 							Value: strings.TrimSpace(arg),
 							Scope: uncleanedCommand.Name,
@@ -87,6 +96,13 @@ func (e *Executor) EvaluateCommand(command *Command) error {
 							if err == nil && variable != nil {
 								linePieces[pieceIdx] = variable.Value
 								continue
+							}
+						}
+
+						if pieceChar == '|' && piece[pieceCharIdx+1] == '>' {
+							variable, err := e.StructuredParse.GetVariable(linePieces[pieceIdx+1], uncleanedCommand.Name)
+							if err == nil && variable != nil {
+								fmt.Println(variable)
 							}
 						}
 					}
@@ -202,6 +218,14 @@ func (e *Executor) Exec(commands []string) error {
 	if err == nil && defaultCommand != nil {
 		if err := e.EvaluateCommand(defaultCommand); err != nil {
 			return err
+		}
+	}
+
+	for _, cmd := range e.StructuredParse.Commands {
+		if cmd.LazyEval != nil {
+			if err := e.EvaluateCommand(cmd); err != nil {
+				return err
+			}
 		}
 	}
 
