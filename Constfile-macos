@@ -6,7 +6,7 @@ var example = 25
 }
 
 thing {
-    var abc = $ python3.11 run.py hello world hello world
+    var abc = $ python3.11 run.py hello world hello &example
     echo "testing &abc"
 }
 

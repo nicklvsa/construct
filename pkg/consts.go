@@ -6,7 +6,7 @@ import (
 )
 
 var SPECIAL_CHARS = []rune{
-	'&', '@', '+', '-', '*', '/',
+	'@', '+', '-', '*', '/',
 }
 
 func IsSpecialChar(char rune) bool {

@@ -133,6 +133,7 @@ func (p *Parser) tryEvalExpression(expression string, varName *string, varScope 
 
 		if expr == '$' && varName != nil && varScope != nil {
 			data := GetCharsUntilEnd(exprIdx, expression)
+			fmt.Println(expression)
 
 			p.Data.Commands = append(p.Data.Commands, &Command{
 				Name:            fmt.Sprintf("__lazy_%s_%s", *varName, *varScope),
