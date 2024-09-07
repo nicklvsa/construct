@@ -1,3 +1,4 @@
 *.py
 *.env
 diagram.md
+debug.json

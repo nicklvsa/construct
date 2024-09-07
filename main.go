@@ -61,4 +61,6 @@ func main() {
 	if err := executor.Exec(inputs.Commands); err != nil {
 		panic(err)
 	}
+
+	// executor.Dump("debug.json")
 }

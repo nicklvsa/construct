@@ -5,14 +5,19 @@ var example = 25
     echo "yoyoyo"
 }
 
-another {
-    echo "test"
-    echo "&name"
-}
-
 thing {
     var abc = $ python3.11 run.py hello world hello world
     echo "testing &abc"
+}
+
+thing2 () < thing {
+    echo "hello"
+    $ echo "&thing.0"
+}
+
+another {
+    echo "test"
+    echo "&name"
 }
 
 prerun (arg0) {

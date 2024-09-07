@@ -135,7 +135,7 @@ func (p *Parser) tryEvalExpression(expression string, varName *string, varScope 
 			data := GetCharsUntilEnd(exprIdx, expression)
 
 			p.Data.Commands = append(p.Data.Commands, &Command{
-				Name:            fmt.Sprintf("__lazy_%s", *varName),
+				Name:            fmt.Sprintf("__lazy_%s_%s", *varName, *varScope),
 				LazyEval:        &LazyOutput{VarName: *varName, Scope: *varScope},
 				IsDefault:       false,
 				CloudAccessible: false,

@@ -25,6 +25,15 @@ func NewExecutor(data *ParsedData, concurrent bool) *Executor {
 	}
 }
 
+func (e Executor) Dump(outputLoc string) error {
+	data, err := json.MarshalIndent(e, "", "\t")
+	if err != nil {
+		return err
+	}
+
+	return os.WriteFile(outputLoc, data, 0644)
+}
+
 func (e *Executor) EvaluateCommand(command *Command) error {
 	execCommandBody := func(execCmd *Command) error {
 		for _, cmdLine := range execCmd.Body {
@@ -96,13 +105,6 @@ func (e *Executor) EvaluateCommand(command *Command) error {
 							if err == nil && variable != nil {
 								linePieces[pieceIdx] = variable.Value
 								continue
-							}
-						}
-
-						if pieceChar == '|' && piece[pieceCharIdx+1] == '>' {
-							variable, err := e.StructuredParse.GetVariable(linePieces[pieceIdx+1], uncleanedCommand.Name)
-							if err == nil && variable != nil {
-								fmt.Println(variable)
 							}
 						}
 					}
