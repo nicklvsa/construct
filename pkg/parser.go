@@ -85,7 +85,7 @@ type Command struct {
 	LazyEval        *LazyOutput `json:"lazy_output"`
 	IsPrereq        bool        `json:"is_prereq"`
 	PrereqOutput    []string    `json:"prereq_output"`
-	Arguments       []Argument  `json:"arguments"`
+	Arguments       []*Argument `json:"arguments"`
 	Prereqs         []string    `json:"prereqs"`
 	PrereqCmds      []*Command  `json:"prereq_cmds"`
 	Body            []string    `json:"body"`
@@ -188,7 +188,7 @@ func (p *Parser) parseCommand(idx int, line string, isDefault bool) error {
 	var commandName string
 	var prereqNames string
 	var commandBody []string
-	var commandArgs []Argument
+	var commandArgs []*Argument
 
 	parseArgName := func(name string) (string, bool) {
 		name = strings.TrimSpace(name)
@@ -258,7 +258,7 @@ func (p *Parser) parseCommand(idx int, line string, isDefault bool) error {
 					}
 
 					argumentName, optional := parseArgName(argName)
-					commandArgs = append(commandArgs, Argument{
+					commandArgs = append(commandArgs, &Argument{
 						Name:       argumentName,
 						IsOptional: optional,
 					})
@@ -267,7 +267,7 @@ func (p *Parser) parseCommand(idx int, line string, isDefault bool) error {
 
 				if argChar == ',' {
 					argumentName, optional := parseArgName(argName)
-					commandArgs = append(commandArgs, Argument{
+					commandArgs = append(commandArgs, &Argument{
 						Name:       argumentName,
 						IsOptional: optional,
 					})

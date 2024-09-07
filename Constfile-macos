@@ -34,6 +34,11 @@ run (arg0, opt arg1) < prerun, another, testfunc {
     $ python3.11 run.py arg0 arg1 &name &test
 }
 
+realworld (lname) {
+    var value = $ python3.11 run.py lname
+    echo "Name: &value"
+}
+
 _ {
     $ rm -rf run.py
     $ echo "import sys" >> run.py

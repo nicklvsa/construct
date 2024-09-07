@@ -225,6 +225,11 @@ func (e *Executor) Exec(commands []string) error {
 
 	for _, cmd := range e.StructuredParse.Commands {
 		if cmd.LazyEval != nil {
+			prevCmd, err := e.StructuredParse.GetCommand(cmd.LazyEval.Scope)
+			if err == nil && prevCmd != nil {
+				cmd.Arguments = append(cmd.Arguments, prevCmd.Arguments...)
+			}
+
 			if err := e.EvaluateCommand(cmd); err != nil {
 				return err
 			}
