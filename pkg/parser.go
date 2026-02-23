@@ -91,17 +91,17 @@ type Command struct {
 	Body            []string    `json:"body"`
 }
 
-func NewParser(file string) *Parser {
+func NewParser(file string) (*Parser, error) {
 	data, err := os.ReadFile(file)
 	if err != nil {
-		panic(err)
+		return nil, fmt.Errorf("failed to read file '%s': %w", file, err)
 	}
 
 	return &Parser{
 		InputFile: file,
 		Data:      &ParsedData{},
 		Lines:     strings.Split(string(data), "\n"),
-	}
+	}, nil
 }
 
 func (p *Parser) findVariable(varName string, scope *string) (*Variable, error) {
@@ -184,143 +184,264 @@ func (p *Parser) parseVar(line string, scope string) error {
 	return nil
 }
 
-func (p *Parser) parseCommand(idx int, line string, isDefault bool) error {
-	var commandName string
-	var prereqNames string
-	var commandBody []string
-	var commandArgs []*Argument
+// =============================================================================
+// Helper Functions for Command Parsing
+// These functions extract specific parts of a command declaration
+// Each function is pure, testable, and has a single responsibility
+// =============================================================================
 
-	parseArgName := func(name string) (string, bool) {
-		name = strings.TrimSpace(name)
-		namePieces := strings.Split(name, " ")
+// parseCommandName extracts the command name from a command declaration line
+// Examples:
+//   "build {" -> "build"
+//   "test (arg1, arg2) {" -> "test"
+//   "|cloudcmd| {" -> "cloudcmd"
+func parseCommandName(line string) string {
+	line = strings.TrimSpace(line)
 
-		isOptional := false
-		argumentName := namePieces[len(namePieces)-1]
-
-		for _, arg := range namePieces[:len(namePieces)-1] {
-			if arg == "opt" {
-				isOptional = true
+	// Handle cloud command markers: |commandname|
+	if len(line) >= 2 && line[0] == '|' {
+		// Find the second pipe
+		endIdx := strings.Index(line[1:], "|")
+		if endIdx > 0 {
+			// Extract name between pipes
+			name := line[1 : endIdx+1]
+			// Check if followed by command syntax
+			remainder := strings.TrimSpace(line[endIdx+2:])
+			if strings.HasPrefix(remainder, "(") || strings.HasPrefix(remainder, "<") || strings.HasPrefix(remainder, "{") {
+				return strings.TrimSpace(name)
 			}
 		}
-
-		return argumentName, isOptional
 	}
 
-	parseCmdName := func(cmdName string) string {
-		var outputCmdName string
-
-		for _, cmdChar := range cmdName {
-			if cmdChar == '(' || cmdChar == '*' {
-				break
-			}
-
-			outputCmdName += string(cmdChar)
+	// Find end of command name (stops at '(', '<', or '{')
+	for i, r := range line {
+		if r == '(' || r == '<' || r == '{' {
+			return strings.TrimSpace(line[:i])
 		}
-
-		return strings.TrimSpace(outputCmdName)
 	}
 
-	for chIdx, char := range line {
-		if char == '{' {
-			for _, nameChar := range line[:chIdx-1] {
-				commandName += string(nameChar)
-			}
+	return strings.TrimSpace(line)
+}
 
-			commandName = parseCmdName(commandName)
+// extractArgumentString extracts the argument string from a command line
+// Example: "run (arg1, arg2) < prereq {" -> "arg1, arg2"
+func extractArgumentString(line string) string {
+	start := strings.Index(line, "(")
+	if start == -1 {
+		return ""
+	}
 
-			start := idx + 1
-			for !strings.ContainsRune(p.Lines[start], '}') {
-				cmdLine := strings.TrimSpace(p.Lines[start])
-				commandBody = append(commandBody, cmdLine)
-				start++
-			}
+	end := strings.Index(line[start:], ")")
+	if end == -1 {
+		return ""
+	}
 
+	return strings.TrimSpace(line[start+1 : start+end])
+}
+
+// extractPrerequisiteString extracts the prerequisite string from a command line
+// Example: "run (arg1) < build, test {" -> "build, test"
+func extractPrerequisiteString(line string) string {
+	start := strings.Index(line, "<")
+	if start == -1 {
+		return ""
+	}
+
+	// Find the opening brace to know where prereqs end
+	end := strings.Index(line[start:], "{")
+	if end == -1 {
+		return ""
+	}
+
+	return strings.TrimSpace(line[start+1 : start+end])
+}
+
+// parseArgumentName parses a single argument name and determines if it's optional
+// Examples:
+//   "arg1" -> ("arg1", false)
+//   "opt arg2" -> ("arg2", true)
+func parseArgumentName(argStr string) (string, bool) {
+	argStr = strings.TrimSpace(argStr)
+	if argStr == "" {
+		return "", false
+	}
+
+	// Check for "opt" keyword
+	parts := strings.Fields(argStr)
+	if len(parts) == 0 {
+		return "", false
+	}
+
+	// Last part is always the argument name
+	argName := parts[len(parts)-1]
+
+	// Check if any part before the name is "opt"
+	isOptional := false
+	for _, part := range parts[:len(parts)-1] {
+		if part == "opt" {
+			isOptional = true
 			break
 		}
+	}
 
-		if char == '(' {
-			var argName string
+	return argName, isOptional
+}
 
-			for argCharIdx, argChar := range line[chIdx+1:] {
-				if argChar == ')' {
-					// TODO: support non-argument constructs with prereqs
-					for nextCharIdx, nextChar := range line[chIdx+1:][argCharIdx+1:] {
-						if nextChar == '<' {
-							updatedLine := line[chIdx+1:][argCharIdx+1:][nextCharIdx+1:]
-							for _, namedNextChar := range updatedLine {
-								if namedNextChar == '{' {
-									break
-								}
+// parseArgumentList parses the argument string into Argument structs
+// Examples:
+//   "arg1, opt arg2" -> [{arg1, false}, {arg2, true}]
+//   "arg1" -> [{arg1, false}]
+func parseArgumentList(argStr string) ([]*Argument, error) {
+	argStr = strings.TrimSpace(argStr)
+	if argStr == "" {
+		return nil, nil
+	}
 
-								prereqNames += string(namedNextChar)
-							}
-						}
-					}
+	args := []*Argument{}
+	parts := strings.Split(argStr, ",")
 
-					argumentName, optional := parseArgName(argName)
-					commandArgs = append(commandArgs, &Argument{
-						Name:       argumentName,
-						IsOptional: optional,
-					})
-					break
-				}
-
-				if argChar == ',' {
-					argumentName, optional := parseArgName(argName)
-					commandArgs = append(commandArgs, &Argument{
-						Name:       argumentName,
-						IsOptional: optional,
-					})
-
-					argName = ""
-					continue
-				}
-
-				argName += string(argChar)
-			}
-
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
 			continue
+		}
+
+		argName, isOptional := parseArgumentName(part)
+		if argName == "" {
+			return nil, fmt.Errorf("invalid argument syntax: '%s'", part)
+		}
+
+		args = append(args, &Argument{
+			Name:       argName,
+			IsOptional: isOptional,
+		})
+	}
+
+	return args, nil
+}
+
+// parsePrerequisiteList parses the prerequisite string into a list of prereq names
+// Examples:
+//   "build, test" -> ["build", "test"]
+//   "build" -> ["build"]
+func parsePrerequisiteList(prereqStr string) ([]string, error) {
+	prereqStr = strings.TrimSpace(prereqStr)
+	if prereqStr == "" {
+		return nil, nil
+	}
+
+	parts := strings.Split(prereqStr, ",")
+	prereqs := []string{}
+
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			prereqs = append(prereqs, part)
 		}
 	}
 
-	if commandName != "" && len(commandBody) > 0 {
-		var updatedCommandBody []string
-		prereqList := strings.Split(strings.TrimSpace(prereqNames), ",")
+	return prereqs, nil
+}
 
-		for _, cmdLine := range commandBody {
-			cmdLine = strings.TrimSpace(cmdLine)
-			if strings.HasPrefix(cmdLine, "var") {
-				if err := p.parseVar(cmdLine, commandName); err != nil {
-					return err
-				}
+// parseCommandBody extracts the command body starting from the given line index
+// Returns the body lines and the index of the line after the closing brace
+func (p *Parser) parseCommandBody(startIdx int, commandName string) ([]string, int, error) {
+	var body []string
 
-				continue
+	for i := startIdx; i < len(p.Lines); i++ {
+		line := p.Lines[i]
+
+		// Check for closing brace BEFORE trimming
+		if strings.Contains(line, "}") {
+			// Found the end of the body - return what we have so far
+			return body, i + 1, nil
+		}
+
+		// Trim and check if empty
+		trimmedLine := strings.TrimSpace(line)
+		if trimmedLine == "" {
+			continue
+		}
+
+		body = append(body, trimmedLine)
+	}
+
+	return nil, startIdx, fmt.Errorf("unclosed command body for '%s' (missing '}')", commandName)
+}
+
+// =============================================================================
+// Refactored parseCommand - Clean and readable!
+// =============================================================================
+
+func (p *Parser) parseCommand(idx int, line string, isDefault bool) error {
+	// Check if this line actually contains a command body
+	// If not, just skip it (it might be a line with just a command name)
+	trimmedLine := strings.TrimSpace(line)
+	if !strings.Contains(trimmedLine, "{") {
+		// No command body, skip
+		return nil
+	}
+
+	// Step 1: Extract the command name (parseCommandName handles cloud markers)
+	commandName := parseCommandName(line)
+
+	// Determine if this is a cloud command
+	// We check the original line for pipe markers
+	cloudAccessible := false
+	if len(trimmedLine) >= 2 && trimmedLine[0] == '|' {
+		// This is a cloud command
+		cloudAccessible = true
+	}
+
+	// Step 2: Parse arguments
+	argStr := extractArgumentString(line)
+	commandArgs, err := parseArgumentList(argStr)
+	if err != nil {
+		return fmt.Errorf("failed to parse arguments for '%s': %w", commandName, err)
+	}
+
+	// Step 3: Parse prerequisites
+	prereqStr := extractPrerequisiteString(line)
+	prereqs, err := parsePrerequisiteList(prereqStr)
+	if err != nil {
+		return fmt.Errorf("failed to parse prerequisites for '%s': %w", commandName, err)
+	}
+
+	// Step 4: Parse body
+	rawBody, _, err := p.parseCommandBody(idx+1, commandName)
+	if err != nil {
+		return err
+	}
+
+	// Step 5: Process body (handle local variables)
+	var commandBody []string
+	for _, cmdLine := range rawBody {
+		cmdLine = strings.TrimSpace(cmdLine)
+		if strings.HasPrefix(cmdLine, "var") {
+			if err := p.parseVar(cmdLine, commandName); err != nil {
+				return err
 			}
-
-			updatedCommandBody = append(updatedCommandBody, cmdLine)
+			continue
 		}
+		commandBody = append(commandBody, cmdLine)
+	}
 
-		for _, arg := range commandArgs {
-			flagName := fmt.Sprintf("%s:%s", commandName, arg.Name)
-			flag.String(flagName, "", flagName)
-		}
+	// Step 6: Register flags for arguments
+	for _, arg := range commandArgs {
+		flagName := fmt.Sprintf("%s:%s", commandName, arg.Name)
+		flag.String(flagName, "", flagName)
+	}
 
-		cloudAccessible := false
-		if commandName[0] == '|' && commandName[len(commandName)-1] == '|' {
-			cloudAccessible = true
-			commandName = commandName[1 : len(commandName)-1]
-		}
-
+	// Step 7: Create and register the command
+	if commandName != "" && len(commandBody) > 0 {
 		p.Data.Commands = append(p.Data.Commands, &Command{
-			IsDefault:       isDefault,
-			IsPrereq:        false,
-			PrereqOutput:    nil,
-			PrereqCmds:      nil,
-			Arguments:       commandArgs,
-			Prereqs:         prereqList,
 			Name:            commandName,
 			CloudAccessible: cloudAccessible,
-			Body:            updatedCommandBody,
+			IsDefault:       isDefault,
+			IsPrereq:        false,
+			Arguments:       commandArgs,
+			Prereqs:         prereqs,
+			Body:            commandBody,
 		})
 	}
 

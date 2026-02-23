@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 
 	"github.com/nicklvsa/construct/pkg"
@@ -46,10 +47,16 @@ func handleArgs() *ConstructInput {
 func main() {
 	inputs := handleArgs()
 
-	p := pkg.NewParser(inputs.FileName)
+	p, err := pkg.NewParser(inputs.FileName)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+
 	data, err := p.Parse()
 	if err != nil {
-		panic(err)
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
 	}
 
 	var debug bool
@@ -60,8 +67,11 @@ func main() {
 	flag.Parse()
 
 	executor := pkg.NewExecutor(data, concurrent)
+	executor.SetDebug(debug) // Enable debug mode for verbose output
+
 	if err := executor.Exec(inputs.Commands); err != nil {
-		panic(err)
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
 	}
 
 	if debug {

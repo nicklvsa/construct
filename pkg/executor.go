@@ -3,6 +3,7 @@ package pkg
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"runtime"
@@ -16,13 +17,20 @@ import (
 type Executor struct {
 	StructuredParse *ParsedData
 	concurrent      bool
+	debug           bool
 }
 
 func NewExecutor(data *ParsedData, concurrent bool) *Executor {
 	return &Executor{
 		concurrent:      concurrent,
+		debug:           false,
 		StructuredParse: data,
 	}
+}
+
+// SetDebug enables or disables debug mode for verbose output
+func (e *Executor) SetDebug(debug bool) {
+	e.debug = debug
 }
 
 func (e Executor) Dump(outputLoc string) error {
@@ -36,22 +44,60 @@ func (e Executor) Dump(outputLoc string) error {
 
 func (e *Executor) EvaluateCommand(command *Command) error {
 	execCommandBody := func(execCmd *Command) error {
-		for _, cmdLine := range execCmd.Body {
+		for lineIdx, cmdLine := range execCmd.Body {
 			if cmdLine == "" {
 				continue
 			}
 
 			name, args := buildCommand(cmdLine)
-			cmd := exec.Command(name, args...)
-			output, err := cmd.Output()
-			if err != nil {
-				output = []byte(err.Error())
+			fullCommand := strings.Join(append([]string{name}, args...), " ")
+
+			// Debug output showing what command is being executed
+			if e.debug {
+				if execCmd.IsPrereq {
+					fmt.Printf("[DEBUG] Running prerequisite %s[%d]: %s\n", execCmd.Name, lineIdx, fullCommand)
+				} else if command.LazyEval != nil {
+					fmt.Printf("[DEBUG] Running lazy command for variable %s: %s\n", command.LazyEval.VarName, fullCommand)
+				} else {
+					fmt.Printf("[DEBUG] Running command %s[%d]: %s\n", execCmd.Name, lineIdx, fullCommand)
+				}
 			}
 
-			strOutput := string(output)
+			cmd := exec.Command(name, args...)
+
+			// Capture both stdout and stderr
+			var stdout, stderr []byte
+			var err error
+			if e.debug {
+				stdout, stderr, err = captureOutputWithDebug(cmd)
+			} else {
+				stdout, err = cmd.Output()
+			}
+
+			// Combine output for display
+			output := stdout
+			if len(stderr) > 0 {
+				if len(output) > 0 {
+					output = append(output, '\n')
+				}
+				output = append(output, stderr...)
+			}
+
+			// Handle command errors
+			if err != nil && e.debug {
+				fmt.Printf("[DEBUG] Command failed: %v\n", err)
+				if len(stderr) > 0 {
+					fmt.Printf("[DEBUG] Error output: %s\n", string(stderr))
+				}
+			}
+
+			strOutput := strings.TrimSpace(string(output))
 
 			if execCmd.IsPrereq {
-				execCmd.PrereqOutput = append(execCmd.PrereqOutput, strings.TrimSpace(strOutput))
+				execCmd.PrereqOutput = append(execCmd.PrereqOutput, strOutput)
+				if e.debug {
+					fmt.Printf("[DEBUG] Prereq output: %s\n", strOutput)
+				}
 				continue
 			}
 
@@ -61,7 +107,10 @@ func (e *Executor) EvaluateCommand(command *Command) error {
 					return err
 				}
 
-				variable.Value = strings.TrimSpace(strOutput)
+				variable.Value = strOutput
+				if e.debug {
+					fmt.Printf("[DEBUG] Set variable %s.%s = %s\n", command.LazyEval.Scope, command.LazyEval.VarName, strOutput)
+				}
 			} else {
 				fmt.Println(strOutput)
 			}
@@ -111,6 +160,10 @@ func (e *Executor) EvaluateCommand(command *Command) error {
 
 					// for now, arguments can ONLY be used in $ expressions
 					for _, arg := range uncleanedCommand.Arguments {
+						if e.debug {
+							fmt.Printf("[DEBUG] Handling argument --%s for command %s\n", arg.Name, uncleanedCommand.Name)
+						}
+
 						pieceFlagName := fmt.Sprintf("%s:%s", uncleanedCommand.Name, piece)
 						argFlagName := fmt.Sprintf("%s:%s", uncleanedCommand.Name, arg.Name)
 						if pieceFlagName == argFlagName {
@@ -313,6 +366,44 @@ func (e Executor) getCloudDefinition(name string) (*Command, error) {
 	}
 
 	return nil, fmt.Errorf("%s command not found in cloud", name)
+}
+
+// captureOutputWithDebug captures both stdout and stderr from a command
+func captureOutputWithDebug(cmd *exec.Cmd) (stdout, stderr []byte, err error) {
+	// Create pipes for stdout and stderr
+	stdoutPipe, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to create stdout pipe: %w", err)
+	}
+
+	stderrPipe, err := cmd.StderrPipe()
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to create stderr pipe: %w", err)
+	}
+
+	// Start the command
+	if err := cmd.Start(); err != nil {
+		return nil, nil, fmt.Errorf("failed to start command: %w", err)
+	}
+
+	// Read stdout
+	stdoutBytes, err := io.ReadAll(stdoutPipe)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to read stdout: %w", err)
+	}
+
+	// Read stderr
+	stderrBytes, err := io.ReadAll(stderrPipe)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to read stderr: %w", err)
+	}
+
+	// Wait for command to complete
+	if err := cmd.Wait(); err != nil {
+		return stdoutBytes, stderrBytes, err
+	}
+
+	return stdoutBytes, stderrBytes, nil
 }
 
 func buildCommand(cmd string) (string, []string) {
