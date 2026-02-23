@@ -18,14 +18,20 @@ type Executor struct {
 	StructuredParse *ParsedData
 	concurrent      bool
 	debug           bool
+	dryRun          bool
 }
 
-func NewExecutor(data *ParsedData, concurrent bool) *Executor {
+func NewExecutor(data *ParsedData, concurrent bool, debug bool) *Executor {
 	return &Executor{
 		concurrent:      concurrent,
-		debug:           false,
+		debug:           debug,
+		dryRun:          false,
 		StructuredParse: data,
 	}
+}
+
+func (e *Executor) SetDryRun(dryRun bool) {
+	e.dryRun = dryRun
 }
 
 // SetDebug enables or disables debug mode for verbose output
@@ -323,6 +329,10 @@ func (e *Executor) Exec(commands []string) error {
 	}
 
 	return nil
+}
+
+func (e *Executor) Execute(commands []string) error {
+	return e.Exec(commands)
 }
 
 func (e *Executor) processCommand(name string, resp chan<- error, wg *sync.WaitGroup) error {

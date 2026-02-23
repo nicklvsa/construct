@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"unicode"
 
 	flag "github.com/spf13/pflag"
 )
@@ -121,48 +122,71 @@ func (p *Parser) findVariable(varName string, scope *string) (*Variable, error) 
 func (p *Parser) tryEvalExpression(expression string, varName *string, varScope *string) string {
 	expression = strings.TrimSpace(expression)
 
-	var output string
-	for exprIdx, expr := range expression {
-		if expr == '@' {
-			output += os.Getenv(GetCharsUntilEnd(exprIdx, expression))
-		}
+	var result strings.Builder
+	i := 0
+	for i < len(expression) {
+		char := rune(expression[i])
 
-		if expr == '&' {
-			name := GetCharsUntilEnd(exprIdx, expression)
-
-			if variable, err := p.findVariable(name, varScope); err == nil {
-				output += variable.Value
+		if char == '@' {
+			envName := ""
+			j := i + 1
+			for j < len(expression) {
+				c := rune(expression[j])
+				if !unicode.IsLetter(c) && !unicode.IsDigit(c) && c != '_' {
+					break
+				}
+				envName += string(c)
+				j++
+			}
+			if envName != "" {
+				result.WriteString(os.Getenv(envName))
+				i = j
+				continue
 			}
 		}
 
-		if expr == '$' && varName != nil && varScope != nil {
-			data := GetCharsUntilEnd(exprIdx, expression)
+		if char == '&' {
+			refName := ""
+			j := i + 1
+			for j < len(expression) {
+				c := rune(expression[j])
+				if !unicode.IsLetter(c) && !unicode.IsDigit(c) && c != '_' {
+					break
+				}
+				refName += string(c)
+				j++
+			}
+			if refName != "" {
+				scope := "global"
+				if varScope != nil && *varScope != "" {
+					scope = *varScope
+				}
+				if variable, err := p.findVariable(refName, &scope); err == nil {
+					result.WriteString(variable.Value)
+				}
+				i = j
+				continue
+			}
+		}
 
+		if char == '$' && varName != nil && varScope != nil {
+			restOfLine := strings.TrimSpace(expression[i+1:])
 			p.Data.Commands = append(p.Data.Commands, &Command{
 				Name:            fmt.Sprintf("__lazy_%s_%s", *varName, *varScope),
 				LazyEval:        &LazyOutput{VarName: *varName, Scope: *varScope},
 				IsDefault:       false,
 				CloudAccessible: false,
-				Body:            []string{fmt.Sprintf("$ %s", data)},
+				Body:            []string{fmt.Sprintf("$ %s", restOfLine)},
 			})
+			i = len(expression)
+			continue
 		}
+
+		result.WriteRune(char)
+		i++
 	}
 
-	// if expression[0] == '@' {
-	// 	return os.Getenv(expression[1:])
-	// }
-
-	// if expression[0] == '&' {
-	// 	if variable, err := p.findVariable(expression[1:]); err == nil {
-	// 		return variable.Value
-	// 	}
-	// }
-
-	if len(output) <= 0 {
-		return expression
-	}
-
-	return output
+	return result.String()
 }
 
 func (p *Parser) parseVar(line string, scope string) error {
@@ -192,9 +216,10 @@ func (p *Parser) parseVar(line string, scope string) error {
 
 // parseCommandName extracts the command name from a command declaration line
 // Examples:
-//   "build {" -> "build"
-//   "test (arg1, arg2) {" -> "test"
-//   "|cloudcmd| {" -> "cloudcmd"
+//
+//	"build {" -> "build"
+//	"test (arg1, arg2) {" -> "test"
+//	"|cloudcmd| {" -> "cloudcmd"
 func parseCommandName(line string) string {
 	line = strings.TrimSpace(line)
 
@@ -258,8 +283,9 @@ func extractPrerequisiteString(line string) string {
 
 // parseArgumentName parses a single argument name and determines if it's optional
 // Examples:
-//   "arg1" -> ("arg1", false)
-//   "opt arg2" -> ("arg2", true)
+//
+//	"arg1" -> ("arg1", false)
+//	"opt arg2" -> ("arg2", true)
 func parseArgumentName(argStr string) (string, bool) {
 	argStr = strings.TrimSpace(argStr)
 	if argStr == "" {
@@ -289,8 +315,9 @@ func parseArgumentName(argStr string) (string, bool) {
 
 // parseArgumentList parses the argument string into Argument structs
 // Examples:
-//   "arg1, opt arg2" -> [{arg1, false}, {arg2, true}]
-//   "arg1" -> [{arg1, false}]
+//
+//	"arg1, opt arg2" -> [{arg1, false}, {arg2, true}]
+//	"arg1" -> [{arg1, false}]
 func parseArgumentList(argStr string) ([]*Argument, error) {
 	argStr = strings.TrimSpace(argStr)
 	if argStr == "" {
@@ -322,8 +349,9 @@ func parseArgumentList(argStr string) ([]*Argument, error) {
 
 // parsePrerequisiteList parses the prerequisite string into a list of prereq names
 // Examples:
-//   "build, test" -> ["build", "test"]
-//   "build" -> ["build"]
+//
+//	"build, test" -> ["build", "test"]
+//	"build" -> ["build"]
 func parsePrerequisiteList(prereqStr string) ([]string, error) {
 	prereqStr = strings.TrimSpace(prereqStr)
 	if prereqStr == "" {
@@ -448,9 +476,77 @@ func (p *Parser) parseCommand(idx int, line string, isDefault bool) error {
 	return nil
 }
 
+func (p *Parser) detectCircularDependencies() error {
+	visited := make(map[string]bool)
+	inStack := make(map[string]bool)
+
+	var visit func(cmdName string, path []string) error
+	visit = func(cmdName string, path []string) error {
+		if inStack[cmdName] {
+			return &CircularDependencyError{
+				Command: cmdName,
+				Path:    append(path, cmdName),
+			}
+		}
+
+		if visited[cmdName] {
+			return nil
+		}
+
+		cmd, err := p.Data.GetCommand(cmdName)
+		if err != nil {
+			return nil
+		}
+
+		inStack[cmdName] = true
+		path = append(path, cmdName)
+
+		for _, prereq := range cmd.Prereqs {
+			prereq = strings.TrimSpace(prereq)
+			if prereq == "" {
+				continue
+			}
+			if err := visit(prereq, path); err != nil {
+				return err
+			}
+		}
+
+		inStack[cmdName] = false
+		visited[cmdName] = true
+		return nil
+	}
+
+	for _, cmd := range p.Data.Commands {
+		if err := visit(cmd.Name, []string{}); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (p *Parser) validatePrerequisites() error {
+	for _, cmd := range p.Data.Commands {
+		for _, prereq := range cmd.Prereqs {
+			prereq = strings.TrimSpace(prereq)
+			if prereq == "" {
+				continue
+			}
+			_, err := p.Data.GetCommand(prereq)
+			if err != nil {
+				return &MissingDependencyError{
+					Command:    cmd.Name,
+					PrereqName: prereq,
+				}
+			}
+		}
+	}
+	return nil
+}
+
 func (p *Parser) Parse() (*ParsedData, error) {
 	for idx, line := range p.Lines {
-		if strings.HasPrefix(line, "//") {
+		if strings.HasPrefix(line, "//") || strings.HasPrefix(line, "#") {
 			continue
 		}
 
@@ -475,20 +571,12 @@ func (p *Parser) Parse() (*ParsedData, error) {
 		}
 	}
 
-	writeChan := make(chan error)
-
-	debugWriter := func(signal chan<- error) {
-		mermaid := DebugToMermaid(p.Data)
-		if err := os.WriteFile("diagram.md", []byte(mermaid), 0644); err != nil {
-			signal <- err
-		}
-
-		signal <- nil
+	if err := p.validatePrerequisites(); err != nil {
+		return nil, err
 	}
 
-	go debugWriter(writeChan)
-	if err := <-writeChan; err != nil {
-		fmt.Println(err.Error())
+	if err := p.detectCircularDependencies(); err != nil {
+		return nil, err
 	}
 
 	return p.Data, nil
