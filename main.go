@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"runtime"
+	"slices"
 
 	"github.com/nicklvsa/construct/pkg"
 	flag "github.com/spf13/pflag"
@@ -52,42 +53,6 @@ func getPlatformConstfile() string {
 func fileExists(path string) bool {
 	_, err := os.Stat(path)
 	return err == nil
-}
-
-func handleArgs() *ConstructInput {
-	defaultFileName := "Constfile"
-
-	platformFile := getPlatformConstfile()
-	if fileExists(platformFile) && !fileExists(defaultFileName) {
-		defaultFileName = platformFile
-	}
-
-	args := os.Args[1:]
-	if len(args) <= 0 {
-		return &ConstructInput{
-			FileName: defaultFileName,
-		}
-	}
-
-	info, err := os.Stat(args[0])
-	if err != nil {
-		return &ConstructInput{
-			FileName: defaultFileName,
-			Commands: args,
-		}
-	}
-
-	if info.IsDir() {
-		return &ConstructInput{
-			FileName: defaultFileName,
-			Commands: args,
-		}
-	}
-
-	return &ConstructInput{
-		FileName: args[0],
-		Commands: args[1:],
-	}
 }
 
 func listCommands(data *pkg.ParsedData) {
@@ -174,7 +139,9 @@ func main() {
 			}
 		}
 	} else {
-		inputs = handleArgs()
+		inputs = &ConstructInput{
+			FileName: defaultFileName,
+		}
 	}
 
 	p, err := pkg.NewParser(inputs.FileName)
@@ -197,7 +164,7 @@ func main() {
 	if dryRun {
 		fmt.Println("Dry run mode - commands that would be executed:")
 		for _, cmd := range data.Commands {
-			if len(inputs.Commands) == 0 || contains(inputs.Commands, cmd.Name) {
+			if len(inputs.Commands) == 0 || slices.Contains(inputs.Commands, cmd.Name) {
 				fmt.Printf("  %s\n", cmd.Name)
 				for _, line := range cmd.Body {
 					fmt.Printf("    %s\n", line)
@@ -208,17 +175,12 @@ func main() {
 	}
 
 	executor := pkg.NewExecutor(data, concurrent, debug)
+	executor.RegisterArgumentFlags(flagSet)
 	if err := executor.Execute(inputs.Commands); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		if cmdErr, ok := err.(*pkg.CommandError); ok {
+			os.Exit(cmdErr.ExitCode)
+		}
 		os.Exit(1)
 	}
-}
-
-func contains(slice []string, item string) bool {
-	for _, s := range slice {
-		if s == item {
-			return true
-		}
-	}
-	return false
 }

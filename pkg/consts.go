@@ -5,18 +5,16 @@ import (
 	"unicode/utf8"
 )
 
-var SPECIAL_CHARS = []rune{
-	'@', '+', '-', '*', '/',
+var SPECIAL_CHARS = map[rune]bool{
+	'@': true,
+	'+': true,
+	'-': true,
+	'*': true,
+	'/': true,
 }
 
 func IsSpecialChar(char rune) bool {
-	for _, special := range SPECIAL_CHARS {
-		if special == char {
-			return true
-		}
-	}
-
-	return false
+	return SPECIAL_CHARS[char]
 }
 
 func GetLeftRightOfChar(idx int, str string) (string, string) {
@@ -24,32 +22,33 @@ func GetLeftRightOfChar(idx int, str string) (string, string) {
 }
 
 func GetCharsFromStart(idx int, str string) string {
-	var output string
+	runes := []rune(str)
+	var output strings.Builder
 
 	for i := idx - 1; i >= 0; i-- {
-		s := rune(str[i])
-		output += string(s)
+		s := runes[i]
+		output.WriteRune(s)
 
 		if IsSpecialChar(s) {
 			break
 		}
 	}
 
-	return Reverse(strings.TrimSpace(output))
+	return Reverse(strings.TrimSpace(output.String()))
 }
 
 func GetCharsUntilEnd(idx int, str string) string {
-	var output string
+	var output strings.Builder
 
 	for _, s := range str[idx+1:] {
 		if IsSpecialChar(s) {
 			break
 		}
 
-		output += string(s)
+		output.WriteRune(s)
 	}
 
-	return strings.TrimSpace(output)
+	return strings.TrimSpace(output.String())
 }
 
 func Reverse(s string) string {

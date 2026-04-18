@@ -61,10 +61,11 @@ func TestBuildCommand(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			shell, args := buildCommand(tt.input)
-			if shell != tt.expectShell {
-				t.Errorf("expected shell %s, got %s", tt.expectShell, shell)
+			executor := NewExecutor(nil, false, false)
+			if executor.shellName != tt.expectShell {
+				t.Errorf("expected shell %s, got %s", tt.expectShell, executor.shellName)
 			}
+			args := append(executor.shellArgs, tt.input)
 			if len(args) < 2 {
 				t.Error("expected at least 2 args (flag and command)")
 			}

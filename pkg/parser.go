@@ -6,13 +6,36 @@ import (
 	"os"
 	"strings"
 	"unicode"
-
-	flag "github.com/spf13/pflag"
 )
 
 type ParsedData struct {
-	Variables []*Variable `json:"variables"`
-	Commands  []*Command  `json:"commands"`
+	Variables []*Variable      `json:"variables"`
+	Commands  []*Command       `json:"commands"`
+
+	// Index maps for O(1) lookups, built after parsing
+	variableMap map[string]*Variable // key: "scope.name"
+	commandMap  map[string]*Command  // key: command name
+}
+
+// buildIndexMaps populates the lookup maps for O(1) access
+func (p *ParsedData) buildIndexMaps() {
+	p.variableMap = make(map[string]*Variable, len(p.Variables))
+	p.commandMap = make(map[string]*Command, len(p.Commands))
+
+	for _, v := range p.Variables {
+		p.variableMap[v.Scope+"."+v.Name] = v
+	}
+	for _, cmd := range p.Commands {
+		p.commandMap[cmd.Name] = cmd
+	}
+}
+
+// AddVariable appends a variable and updates the index map
+func (p *ParsedData) AddVariable(v *Variable) {
+	p.Variables = append(p.Variables, v)
+	if p.variableMap != nil {
+		p.variableMap[v.Scope+"."+v.Name] = v
+	}
 }
 
 func (p *ParsedData) GetVariable(variableName, scope string) (*Variable, error) {
@@ -22,12 +45,26 @@ func (p *ParsedData) GetVariable(variableName, scope string) (*Variable, error) 
 		scope = "global"
 	}
 
+	// O(1) scoped lookup
+	if p.variableMap != nil {
+		if v, ok := p.variableMap[scope+"."+variableName]; ok {
+			return v, nil
+		}
+		// Fallback to global scope
+		if scope != "global" {
+			if v, ok := p.variableMap["global."+variableName]; ok {
+				return v, nil
+			}
+		}
+		return nil, fmt.Errorf("cannot find variable with name %s", variableName)
+	}
+
+	// Fallback for when maps aren't built yet (during parsing)
 	for _, variable := range p.Variables {
 		if variable.Name == variableName && variable.Scope == scope {
 			return variable, nil
 		}
 	}
-
 	for _, variable := range p.Variables {
 		if variable.Name == variableName && variable.Scope == "global" {
 			return variable, nil
@@ -38,6 +75,13 @@ func (p *ParsedData) GetVariable(variableName, scope string) (*Variable, error) 
 }
 
 func (p *ParsedData) GetCommand(commandName string) (*Command, error) {
+	if p.commandMap != nil {
+		if cmd, ok := p.commandMap[commandName]; ok {
+			return cmd, nil
+		}
+		return nil, fmt.Errorf("cannot find command with name %s", commandName)
+	}
+
 	for _, command := range p.Commands {
 		if command.Name == commandName {
 			return command, nil
@@ -106,12 +150,18 @@ func NewParser(file string) (*Parser, error) {
 }
 
 func (p *Parser) findVariable(varName string, scope *string) (*Variable, error) {
-	for _, v := range p.Data.Variables {
-		if v.Name == varName {
-			if scope != nil && v.Scope == *scope {
+	// First try to find a variable matching the requested scope
+	if scope != nil && *scope != "" {
+		for _, v := range p.Data.Variables {
+			if v.Name == varName && v.Scope == *scope {
 				return v, nil
 			}
+		}
+	}
 
+	// Fall back to global scope
+	for _, v := range p.Data.Variables {
+		if v.Name == varName && v.Scope == "global" {
 			return v, nil
 		}
 	}
@@ -123,45 +173,46 @@ func (p *Parser) tryEvalExpression(expression string, varName *string, varScope 
 	expression = strings.TrimSpace(expression)
 
 	var result strings.Builder
+	runes := []rune(expression)
 	i := 0
-	for i < len(expression) {
-		char := rune(expression[i])
+	for i < len(runes) {
+		char := runes[i]
 
 		if char == '@' {
-			envName := ""
+			var envName strings.Builder
 			j := i + 1
-			for j < len(expression) {
-				c := rune(expression[j])
+			for j < len(runes) {
+				c := runes[j]
 				if !unicode.IsLetter(c) && !unicode.IsDigit(c) && c != '_' {
 					break
 				}
-				envName += string(c)
+				envName.WriteRune(c)
 				j++
 			}
-			if envName != "" {
-				result.WriteString(os.Getenv(envName))
+			if envName.Len() > 0 {
+				result.WriteString(os.Getenv(envName.String()))
 				i = j
 				continue
 			}
 		}
 
 		if char == '&' {
-			refName := ""
+			var refName strings.Builder
 			j := i + 1
-			for j < len(expression) {
-				c := rune(expression[j])
+			for j < len(runes) {
+				c := runes[j]
 				if !unicode.IsLetter(c) && !unicode.IsDigit(c) && c != '_' {
 					break
 				}
-				refName += string(c)
+				refName.WriteRune(c)
 				j++
 			}
-			if refName != "" {
+			if refName.Len() > 0 {
 				scope := "global"
 				if varScope != nil && *varScope != "" {
 					scope = *varScope
 				}
-				if variable, err := p.findVariable(refName, &scope); err == nil {
+				if variable, err := p.findVariable(refName.String(), &scope); err == nil {
 					result.WriteString(variable.Value)
 				}
 				i = j
@@ -170,7 +221,7 @@ func (p *Parser) tryEvalExpression(expression string, varName *string, varScope 
 		}
 
 		if char == '$' && varName != nil && varScope != nil {
-			restOfLine := strings.TrimSpace(expression[i+1:])
+			restOfLine := strings.TrimSpace(string(runes[i+1:]))
 			p.Data.Commands = append(p.Data.Commands, &Command{
 				Name:            fmt.Sprintf("__lazy_%s_%s", *varName, *varScope),
 				LazyEval:        &LazyOutput{VarName: *varName, Scope: *varScope},
@@ -178,7 +229,7 @@ func (p *Parser) tryEvalExpression(expression string, varName *string, varScope 
 				CloudAccessible: false,
 				Body:            []string{fmt.Sprintf("$ %s", restOfLine)},
 			})
-			i = len(expression)
+			i = len(runes)
 			continue
 		}
 
@@ -190,7 +241,7 @@ func (p *Parser) tryEvalExpression(expression string, varName *string, varScope 
 }
 
 func (p *Parser) parseVar(line string, scope string) error {
-	pieces := strings.Split(line, "=")
+	pieces := strings.SplitN(line, "=", 2)
 
 	var variableValue string
 	variableName := strings.TrimSpace(strings.Split(pieces[0], "var")[1])
@@ -454,13 +505,7 @@ func (p *Parser) parseCommand(idx int, line string, isDefault bool) error {
 		commandBody = append(commandBody, cmdLine)
 	}
 
-	// Step 6: Register flags for arguments
-	for _, arg := range commandArgs {
-		flagName := fmt.Sprintf("%s:%s", commandName, arg.Name)
-		flag.String(flagName, "", flagName)
-	}
-
-	// Step 7: Create and register the command
+	// Step 6: Create and register the command
 	if commandName != "" && len(commandBody) > 0 {
 		p.Data.Commands = append(p.Data.Commands, &Command{
 			Name:            commandName,
@@ -544,30 +589,59 @@ func (p *Parser) validatePrerequisites() error {
 	return nil
 }
 
+// stripInlineComment removes inline comments (// or #) from a line,
+// preserving comment markers inside quoted strings.
+func stripInlineComment(line string) string {
+	inQuote := false
+	for i := 0; i < len(line); i++ {
+		if line[i] == '"' {
+			inQuote = !inQuote
+			continue
+		}
+		if !inQuote && i+1 < len(line) && line[i] == '/' && line[i+1] == '/' {
+			return strings.TrimSpace(line[:i])
+		}
+		if !inQuote && line[i] == '#' {
+			return strings.TrimSpace(line[:i])
+		}
+	}
+	return line
+}
+
 func (p *Parser) Parse() (*ParsedData, error) {
 	for idx, line := range p.Lines {
+		lineNum := idx + 1 // 1-indexed for error reporting
+
+		line = stripInlineComment(line)
+		if line == "" {
+			continue
+		}
+
 		if strings.HasPrefix(line, "//") || strings.HasPrefix(line, "#") {
 			continue
 		}
 
-		if strings.HasPrefix(line, "var") {
+		// "var" must be followed by a space to be a variable declaration
+		// (avoids matching "variable", "var_x", etc.)
+		if strings.HasPrefix(line, "var ") {
 			if err := p.parseVar(line, "global"); err != nil {
-				return nil, err
+				return nil, NewParseError(lineNum, 1, err.Error(), line)
 			}
 
 			continue
 		}
 
-		if strings.HasPrefix(line, "_") {
+		// "_" is the default command marker — must be followed by space, '(' , '<', or '{'
+		if len(line) > 0 && line[0] == '_' && (len(line) == 1 || line[1] == ' ' || line[1] == '(' || line[1] == '<' || line[1] == '{') {
 			if err := p.parseCommand(idx, line, true); err != nil {
-				return nil, err
+				return nil, NewParseError(lineNum, 1, err.Error(), line)
 			}
 
 			continue
 		}
 
 		if err := p.parseCommand(idx, line, false); err != nil {
-			return nil, err
+			return nil, NewParseError(lineNum, 1, err.Error(), line)
 		}
 	}
 
@@ -578,6 +652,8 @@ func (p *Parser) Parse() (*ParsedData, error) {
 	if err := p.detectCircularDependencies(); err != nil {
 		return nil, err
 	}
+
+	p.Data.buildIndexMaps()
 
 	return p.Data, nil
 }
