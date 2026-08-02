@@ -253,12 +253,7 @@ func (p *Parser) tryEvalExpression(expression string, varName *string, varScope 
 
 func (p *Parser) parseVar(line string, scope string) error {
 	pieces := strings.SplitN(line, "=", 2)
-	if len(pieces) == 0 {
-		return fmt.Errorf("invalid variable declaration: %q", line)
-	}
 
-	// Name is everything after the "var" keyword. TrimPrefix is robust against
-	// names that happen to contain "var" (e.g. "var var_name = x").
 	variableName := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(pieces[0]), "var"))
 	if variableName == "" {
 		return fmt.Errorf("variable declaration is missing a name: %q", line)
@@ -287,7 +282,7 @@ func parseCommandName(line string) string {
 		if endIdx > 0 {
 			name := line[1 : endIdx+1]
 			remainder := strings.TrimSpace(line[endIdx+2:])
-			if strings.HasPrefix(remainder, "(") || strings.HasPrefix(remainder, "<") || strings.HasPrefix(remainder, "{") {
+			if strings.HasPrefix(remainder, "(") || strings.HasPrefix(remainder, "<") || strings.HasPrefix(remainder, "{") || strings.HasPrefix(remainder, "in ") {
 				return strings.TrimSpace(name)
 			}
 		}
@@ -663,8 +658,18 @@ func extractIfCondition(line string) string {
 	line = strings.TrimPrefix(line, "if")
 	line = strings.TrimSpace(line)
 
-	// Strip a trailing "{" and whitespace.
-	if brace := strings.Index(line, "{"); brace >= 0 {
+	brace := -1
+	inQuote := false
+	for i := 0; i < len(line); i++ {
+		if line[i] == '"' {
+			inQuote = !inQuote
+		}
+		if line[i] == '{' && !inQuote {
+			brace = i
+			break
+		}
+	}
+	if brace >= 0 {
 		line = strings.TrimSpace(line[:brace])
 	}
 	return line
@@ -702,7 +707,7 @@ func (p *Parser) parseCommand(idx int, line string, isDefault bool) (int, error)
 		return 0, err
 	}
 
-	if commandName != "" && len(commandBody) > 0 {
+	if commandName != "" {
 		p.Data.Commands = append(p.Data.Commands, &Command{
 			Name:            commandName,
 			CloudAccessible: cloudAccessible,

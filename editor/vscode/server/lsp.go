@@ -3,7 +3,6 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"log"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -432,8 +431,12 @@ func refRange(line, col, length int) range_ {
 func countShellLines(body []pkg.BodyStatement) int {
 	count := 0
 	for _, stmt := range body {
-		if stmt.Type == "shell" {
+		switch stmt.Type {
+		case "shell":
 			count++
+		case "if":
+			count += countShellLines(stmt.ThenBody)
+			count += countShellLines(stmt.ElseBody)
 		}
 	}
 	return count
@@ -443,6 +446,11 @@ func hasNamedOutput(body []pkg.BodyStatement, name string) bool {
 	for _, stmt := range body {
 		if stmt.OutputName == name {
 			return true
+		}
+		if stmt.Type == "if" {
+			if hasNamedOutput(stmt.ThenBody, name) || hasNamedOutput(stmt.ElseBody, name) {
+				return true
+			}
 		}
 	}
 	return false
@@ -1075,6 +1083,3 @@ func completionTriggerVar(line string, char int) bool {
 func isPrereqListLine(line string) bool {
 	return strings.Contains(line, "<") && !strings.Contains(line, "{")
 }
-
-// reference to silence unused warning if log is not used elsewhere
-var _ = log.Printf

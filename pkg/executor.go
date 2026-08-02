@@ -598,43 +598,51 @@ func (e *Executor) tryApplyCloudBody(cmd *Command) error {
 	}
 
 	external, err := e.getCloudDefinition(cmd.Name)
-	if err != nil {
+	if err != nil || external == nil {
 		return nil
 	}
 
-	cmd.Body = append(cmd.Body, external.Body...)
+	for _, stmt := range external.Body {
+		cmd.Body = append(cmd.Body, stmt)
+	}
+	cmd.CloudAccessible = false
 	return nil
 }
 
 func (e *Executor) Exec(commands []string) error {
-	if len(commands) == 0 {
-		defaultCommand, err := e.StructuredParse.GetDefaultCommand()
-		if err == nil && defaultCommand != nil {
-			if err := e.EvaluateCommand(defaultCommand); err != nil {
-				return err
-			}
-		}
-	}
-
-	for _, cmd := range e.StructuredParse.Commands {
-		if cmd.LazyEval != nil {
-			prevCmd, err := e.StructuredParse.GetCommand(cmd.LazyEval.Scope)
-			if err == nil && prevCmd != nil {
-				cmd.Arguments = append(cmd.Arguments, prevCmd.Arguments...)
-			}
-
-			if err := e.EvaluateCommand(cmd); err != nil {
-				return err
-			}
-		}
-	}
-
 	targets := make([]string, 0, len(commands))
 	for _, cmdName := range commands {
 		if cmdName == "" || cmdName[0] == '-' {
 			continue
 		}
 		targets = append(targets, cmdName)
+	}
+
+	if len(targets) == 0 {
+		if defaultCommand, err := e.StructuredParse.GetDefaultCommand(); err == nil && defaultCommand != nil {
+			targets = []string{defaultCommand.Name}
+		}
+	}
+
+	neededScopes := make(map[string]bool)
+	for _, name := range targets {
+		neededScopes[name] = true
+	}
+	neededScopes["global"] = true
+
+	for _, cmd := range e.StructuredParse.Commands {
+		if cmd.LazyEval == nil {
+			continue
+		}
+		if !neededScopes[cmd.LazyEval.Scope] {
+			continue
+		}
+		if prevCmd, err := e.StructuredParse.GetCommand(cmd.LazyEval.Scope); err == nil && prevCmd != nil {
+			cmd.Arguments = append(cmd.Arguments, prevCmd.Arguments...)
+		}
+		if err := e.EvaluateCommand(cmd); err != nil {
+			return err
+		}
 	}
 
 	if e.concurrent {
