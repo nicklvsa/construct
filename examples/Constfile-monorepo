@@ -1,0 +1,47 @@
+// Monorepo multi-service build file
+// Demonstrates: for loops over services, concurrent builds, workdir per service
+
+var registry = ghcr.io/myorg
+var tag = $ git rev-parse --short HEAD
+
+build-api in services/api {
+    $ go build -o bin/api ./cmd/api
+}
+
+build-web in services/web {
+    $ npm install --silent
+    $ npm run build
+}
+
+build-worker in services/worker {
+    $ go build -o bin/worker ./cmd/worker
+}
+
+build < build-api, build-web, build-worker {
+    $ echo "All services built"
+}
+
+dockerize < build {
+    for svc in api, web, worker {
+        $ docker build -t &registry/&svc:&tag services/&svc
+    }
+}
+
+deploy (opt env) < dockerize {
+    if "&env" == "prod" {
+        for svc in api, web, worker {
+            $ kubectl set image deployment/&svc &svc=&registry/&svc:&tag
+        }
+    } else {
+        for svc in api, web, worker {
+            $ docker compose -f docker-compose-dev.yml up -d &svc
+        }
+    }
+}
+
+clean {
+    for svc in api, web, worker {
+        $ docker rmi &registry/&svc 2>/dev/null; true
+    }
+    $ rm -rf services/*/bin services/web/node_modules
+}

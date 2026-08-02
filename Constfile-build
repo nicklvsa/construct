@@ -20,5 +20,6 @@ build-ext < hello, build-lsp in editor/vscode {
 }
 
 _ < another, build-ext {
+    echo "&build-ext.1"
     echo "&another.0"
 }

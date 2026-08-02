@@ -1,6 +1,8 @@
 package pkg
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -159,8 +161,6 @@ func (e *Executor) SetDebug(debug bool) {
 }
 
 func (e *Executor) EvaluateCommand(command *Command) error {
-	// resolveValue resolves &var and @env references in a string at execution
-	// time, scoped to the given command scope.
 	resolveValue := func(s, scope string) string {
 		s = resolveVarRefs(s, func(name string) (string, bool) {
 			v, err := e.StructuredParse.GetVariable(name, scope)
@@ -170,6 +170,13 @@ func (e *Executor) EvaluateCommand(command *Command) error {
 			return v.Value, true
 		})
 		return resolveEnvRefs(s)
+	}
+
+	if len(command.FileDeps) > 0 && !command.IsPrereq {
+		if e.shouldSkip(command, resolveValue) {
+			fmt.Printf("(%s cached)\n", command.Name)
+			return nil
+		}
 	}
 
 	// execCommandBody walks the statement tree, running shell lines and
@@ -189,6 +196,53 @@ func (e *Executor) EvaluateCommand(command *Command) error {
 					}
 				} else if stmt.ElseBody != nil {
 					if err := execCommandBody(target, stmt.ElseBody); err != nil {
+						return err
+					}
+				}
+				continue
+			}
+
+			if stmt.Type == "for" {
+				items := resolveValue(stmt.LoopItems, target.Name)
+				var expanded []string
+				if strings.ContainsAny(items, "*?") {
+					wd := "."
+					if target.WorkDir != "" {
+						wd = resolveValue(target.WorkDir, target.Name)
+					}
+					for _, pattern := range strings.Split(items, ",") {
+						pattern = strings.TrimSpace(pattern)
+						matches, _ := filepath.Glob(filepath.Join(wd, pattern))
+						if len(matches) == 0 {
+							matches = []string{pattern}
+						}
+						for _, m := range matches {
+							expanded = append(expanded, filepath.Base(m))
+						}
+					}
+				} else {
+					for _, item := range strings.Split(items, ",") {
+						expanded = append(expanded, strings.TrimSpace(item))
+					}
+				}
+
+				for _, item := range expanded {
+					e.mu.Lock()
+					e.StructuredParse.AddVariable(&Variable{
+						Name:  stmt.LoopVar,
+						Value: item,
+						Scope: target.Name,
+					})
+					e.mu.Unlock()
+					if e.debug {
+						fmt.Printf("[DEBUG] For loop %s = %s\n", stmt.LoopVar, item)
+					}
+					argFlags := make(map[string]bool)
+					for _, arg := range target.Arguments {
+						argFlags[target.Name+":"+arg.Name] = true
+					}
+					cleaned := e.cleanStatements(stmt.LoopBody, target, argFlags)
+					if err := execCommandBody(target, cleaned); err != nil {
 						return err
 					}
 				}
@@ -343,9 +397,18 @@ func (e *Executor) EvaluateCommand(command *Command) error {
 				if stmt.Type == "if" {
 					out[i] = BodyStatement{
 						Type:     "if",
-						Cond:     stmt.Cond, // resolved at exec time
+						Cond:     stmt.Cond,
 						ThenBody: cleanStmts(stmt.ThenBody),
 						ElseBody: cleanStmts(stmt.ElseBody),
+					}
+					continue
+				}
+				if stmt.Type == "for" {
+					out[i] = BodyStatement{
+						Type:      "for",
+						LoopVar:   stmt.LoopVar,
+						LoopItems: e.cleanShellLine(cmd, stmt.LoopItems, argFlags),
+						LoopBody:  stmt.LoopBody,
 					}
 					continue
 				}
@@ -411,7 +474,39 @@ func (e *Executor) EvaluateCommand(command *Command) error {
 		return err
 	}
 
-	return execCommandBody(command, body)
+	if err := execCommandBody(command, body); err != nil {
+		return err
+	}
+
+	if len(command.FileDeps) > 0 && !command.IsPrereq {
+		e.updateCache(command, resolveValue)
+	}
+
+	return nil
+}
+
+func (e *Executor) cleanStatements(stmts []BodyStatement, cmd *Command, argFlags map[string]bool) []BodyStatement {
+	out := make([]BodyStatement, len(stmts))
+	for i, stmt := range stmts {
+		if stmt.Type == "if" {
+			out[i] = BodyStatement{
+				Type:     "if",
+				Cond:     stmt.Cond,
+				ThenBody: e.cleanStatements(stmt.ThenBody, cmd, argFlags),
+				ElseBody: e.cleanStatements(stmt.ElseBody, cmd, argFlags),
+			}
+		} else if stmt.Type == "for" {
+			out[i] = BodyStatement{
+				Type:      "for",
+				LoopVar:   stmt.LoopVar,
+				LoopItems: e.cleanShellLine(cmd, stmt.LoopItems, argFlags),
+				LoopBody:  stmt.LoopBody,
+			}
+		} else {
+			out[i] = BodyStatement{Type: "shell", Shell: e.cleanShellLine(cmd, stmt.Shell, argFlags), OutputName: stmt.OutputName}
+		}
+	}
+	return out
 }
 
 func (e *Executor) cleanShellLine(cmd *Command, line string, argFlags map[string]bool) string {
@@ -755,4 +850,93 @@ func capture(cmd *exec.Cmd) (stdout, stderr []byte, err error) {
 	}
 
 	return stdoutBytes, stderrBytes, nil
+}
+
+const cacheDir = ".construct-cache"
+
+type fileCache map[string]map[string]string
+
+func loadFileCache() fileCache {
+	data, err := os.ReadFile(filepath.Join(cacheDir, "manifest.json"))
+	if err != nil {
+		return fileCache{}
+	}
+	var fc fileCache
+	if err := json.Unmarshal(data, &fc); err != nil {
+		return fileCache{}
+	}
+	return fc
+}
+
+func (fc fileCache) save() {
+	if err := os.MkdirAll(cacheDir, 0755); err != nil {
+		return
+	}
+	data, _ := json.MarshalIndent(fc, "", "  ")
+	os.WriteFile(filepath.Join(cacheDir, "manifest.json"), data, 0644)
+}
+
+func hashFile(path string) string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	h := sha256.Sum256(data)
+	return hex.EncodeToString(h[:])
+}
+
+func expandFileDeps(patterns []string, workDir string) []string {
+	wd := workDir
+	if wd == "" {
+		wd = "."
+	}
+	var files []string
+	for _, pattern := range patterns {
+		full := filepath.Join(wd, pattern)
+		matches, err := filepath.Glob(full)
+		if err != nil || len(matches) == 0 {
+			files = append(files, full)
+			continue
+		}
+		files = append(files, matches...)
+	}
+	return files
+}
+
+func (e *Executor) shouldSkip(cmd *Command, resolve func(string, string) string) bool {
+	wd := resolve(cmd.WorkDir, cmd.Name)
+	files := expandFileDeps(cmd.FileDeps, wd)
+	if len(files) == 0 {
+		return false
+	}
+
+	fc := loadFileCache()
+	cached, exists := fc[cmd.Name]
+	if !exists {
+		return false
+	}
+
+	for _, f := range files {
+		current := hashFile(f)
+		if cached[f] != current {
+			if e.debug {
+				fmt.Printf("[DEBUG] %s: file changed: %s\n", cmd.Name, f)
+			}
+			return false
+		}
+	}
+	return true
+}
+
+func (e *Executor) updateCache(cmd *Command, resolve func(string, string) string) {
+	wd := resolve(cmd.WorkDir, cmd.Name)
+	files := expandFileDeps(cmd.FileDeps, wd)
+	fc := loadFileCache()
+	if fc[cmd.Name] == nil {
+		fc[cmd.Name] = make(map[string]string)
+	}
+	for _, f := range files {
+		fc[cmd.Name][f] = hashFile(f)
+	}
+	fc.save()
 }

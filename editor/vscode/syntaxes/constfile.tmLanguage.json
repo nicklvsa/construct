@@ -39,7 +39,7 @@
 			"patterns": [
 				{
 					"name": "keyword.control.constfile",
-					"match": "\\b(opt|if|else)\\b"
+					"match": "\\b(opt|if|else|for|in)\\b"
 				}
 			]
 		},

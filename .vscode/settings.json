@@ -1,0 +1,5 @@
+{
+	"terminal.integrated.env.windows": {
+		"CONSTRUCT_LSP_DEV": "C:\\Users\\nicklvsa\\Desktop\\construct\\editor\\vscode\\server"
+	}
+}

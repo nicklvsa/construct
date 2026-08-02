@@ -1,0 +1,43 @@
+// Go web application build file
+// Demonstrates: file deps, for loops, workdir, named outputs, conditionals
+
+var app_name = myapp
+var version = $ git describe --tags --always
+
+_ < build {
+    $ echo "Built &app_name (&version)"
+}
+
+build < main.go, pkg/**/*.go, go.mod {
+    $ go build -o &app_name .
+    $ echo "Build complete" as status
+}
+
+test < build {
+    $ go test ./... -v
+    for pkg in ./pkg/... {
+        $ go vet &pkg
+    }
+}
+
+lint {
+    for f in *.go {
+        $ gofmt -l &f
+    }
+}
+
+docker < build {
+    $ docker build -t &app_name:&version .
+    if "&version" != "" {
+        $ docker tag &app_name:&version &app_name:latest
+    }
+}
+
+deploy (opt env) < docker {
+    var target = prod
+    if "&env" != "" {
+        $ kubectl apply -f deploy-&env.yaml
+    } else {
+        $ kubectl apply -f deploy-&target.yaml
+    }
+}

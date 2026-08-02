@@ -34,6 +34,7 @@ Options:
   --concurrent      Execute commands concurrently
   --dry-run         Show commands without executing them
   --list            List all available commands
+  -e, --env k=v     Override a variable (repeatable)
 
 Examples:
   construct                  Run default command from Constfile
@@ -101,6 +102,10 @@ func printDryRunBody(body []pkg.BodyStatement, indent int) {
 				printDryRunBody(stmt.ElseBody, indent+1)
 			}
 			fmt.Printf("%s}\n", prefix)
+		} else if stmt.Type == "for" {
+			fmt.Printf("%sfor %s in %s {\n", prefix, stmt.LoopVar, stmt.LoopItems)
+			printDryRunBody(stmt.LoopBody, indent+1)
+			fmt.Printf("%s}\n", prefix)
 		} else {
 			fmt.Printf("%s%s\n", prefix, stmt.Shell)
 		}
@@ -114,6 +119,7 @@ func main() {
 	var debug bool
 	var concurrent bool
 	var dryRun bool
+	var overrides []string
 
 	flagSet := flag.NewFlagSet("construct", flag.ExitOnError)
 	flagSet.BoolVarP(&showHelp, "help", "h", false, "Show help message")
@@ -122,6 +128,7 @@ func main() {
 	flagSet.BoolVar(&debug, "debug", false, "Debug mode")
 	flagSet.BoolVar(&concurrent, "concurrent", false, "Run concurrently")
 	flagSet.BoolVar(&dryRun, "dry-run", false, "Dry run")
+	flagSet.StringArrayVarP(&overrides, "env", "e", []string{}, "Override variable (key=value)")
 
 	if err := flagSet.Parse(os.Args[1:]); err != nil {
 		fmt.Fprintf(os.Stderr, "Error parsing flags: %v\n", err)
@@ -177,6 +184,33 @@ func main() {
 		os.Exit(1)
 	}
 
+	for _, ov := range overrides {
+		eq := strings.IndexByte(ov, '=')
+		if eq < 0 {
+			fmt.Fprintf(os.Stderr, "Error: invalid override %q (expected key=value)\n", ov)
+			os.Exit(1)
+		}
+		key := strings.TrimSpace(ov[:eq])
+		val := ov[eq+1:]
+		overridden := false
+		for _, v := range data.Variables {
+			if v.Name == key {
+				v.Value = val
+				overridden = true
+				if debug {
+					fmt.Printf("[DEBUG] Override: %s = %s\n", key, val)
+				}
+				break
+			}
+		}
+		if !overridden {
+			data.Variables = append(data.Variables, &pkg.Variable{Name: key, Value: val, Scope: "global"})
+			if debug {
+				fmt.Printf("[DEBUG] Override (new): %s = %s\n", key, val)
+			}
+		}
+	}
+
 	if showList {
 		listCommands(data)
 		os.Exit(0)
@@ -192,6 +226,9 @@ func main() {
 				fmt.Printf("  %s\n", cmd.Name)
 				if cmd.WorkDir != "" {
 					fmt.Printf("    (in %s)\n", cmd.WorkDir)
+				}
+				if len(cmd.FileDeps) > 0 {
+					fmt.Printf("    (deps: %s)\n", strings.Join(cmd.FileDeps, ", "))
 				}
 				printDryRunBody(cmd.Body, 1)
 			}

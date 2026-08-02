@@ -82,15 +82,68 @@ mycommand {
 
 ### Prerequisite Output
 
-Access prerequisite output using `&prereqName.index`:
+Access prerequisite output using `&prereqName.index` or named outputs:
 
 ```
 prereq {
-    $ echo "hello"
+    $ echo "hello" as greeting
 }
 
 main < prereq {
-    $ echo &prereq.0    # Outputs: hello
+    $ echo &prereq.0         # Outputs: hello (positional)
+    $ echo &prereq.greeting  # Outputs: hello (named)
+}
+```
+
+### For Loops
+
+Iterate over comma-separated lists or file globs:
+
+```
+vet {
+    for f in *.go {
+        $ go vet &f
+    }
+}
+
+deploy {
+    for svc in api, web, worker {
+        $ docker build -t &svc ./&svc
+    }
+}
+```
+
+The loop variable (`&f`, `&svc`) is available inside the loop body. Globs are expanded relative to the command's working directory.
+
+### File Dependencies
+
+Commands with file dependencies skip execution if nothing changed since the last run:
+
+```
+build < main.go, pkg/*.go {
+    $ go build -o app .
+}
+```
+
+File patterns (containing `/`, `*`, or `.`) are tracked separately from command prerequisites. A manifest is stored in `.construct-cache/`. Touch a file and re-run to trigger a rebuild.
+
+### CLI Variable Overrides
+
+Override any variable from the command line:
+
+```bash
+construct deploy -e env=prod -e region=us-east
+```
+
+### Conditionals
+
+```
+build {
+    if "&version" >= "2" {
+        $ make modern
+    } else {
+        $ make legacy
+    }
 }
 ```
 

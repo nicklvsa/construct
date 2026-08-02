@@ -370,15 +370,8 @@ func namedOutputHints(text string, data *pkg.ParsedData) []diagnostic {
 			cmdName := name[:dot]
 			suffix := name[dot+1:]
 
-			// Look up the referenced command.
 			cmd, err := data.GetCommand(cmdName)
 			if err != nil || cmd == nil {
-				diags = append(diags, diagnostic{
-					Range:    refRange(lineIdx, absIdx, refLen),
-					Severity: sevError,
-					Source:   "constfile",
-					Message:  fmt.Sprintf("unknown command `%s` in output reference `&%s`", cmdName, name),
-				})
 				continue
 			}
 
@@ -711,6 +704,32 @@ func (s *server) handleDefinition(params json.RawMessage) (interface{}, error) {
 		}
 	}
 
+	// Ctrl-click on a file dependency (path/glob) in "< ... {" → open the file/dir.
+	fd, fsc, fec, fok := fileDepAtPosition(line, char)
+	if fok {
+		resolved := resolveWorkDir(fd, p.TextDocument.URI)
+		target := resolved
+		if strings.ContainsAny(resolved, "*?") {
+			matches, err := filepath.Glob(resolved)
+			if err == nil && len(matches) > 0 {
+				target = matches[0]
+			} else {
+				dir := filepath.Dir(resolved)
+				if _, err := os.Stat(dir); err == nil {
+					target = dir
+				}
+			}
+		}
+		uri := pathToURI(target)
+		return location{
+			URI: uri,
+			Range: range_{
+				Start: position{Line: p.Position.Line, Character: fsc},
+				End:   position{Line: p.Position.Line, Character: fec},
+			},
+		}, nil
+	}
+
 	// Go-to-definition for a prerequisite name the cursor is on. The cursor
 	// must be within the "< ... {" portion of a command header line.
 	if target, ok := prereqNameAtPosition(line, char); ok {
@@ -954,7 +973,7 @@ func prereqNameAtPosition(line string, char int) (string, bool) {
 		return "", false
 	}
 	name := string(runes[start:endRel])
-	if name == "" {
+	if name == "" || looksLikeFileDep(name) {
 		return "", false
 	}
 	return name, true
@@ -962,6 +981,48 @@ func prereqNameAtPosition(line string, char int) (string, bool) {
 
 func isPrereqIdentRune(r rune) bool {
 	return isIdentRune(r) || (r >= '0' && r <= '9') || r == '-'
+}
+
+func fileDepAtPosition(line string, char int) (token string, startCol, endCol int, ok bool) {
+	lt := strings.IndexByte(line, '<')
+	if lt < 0 {
+		return "", 0, 0, false
+	}
+	brace := strings.IndexByte(line[lt:], '{')
+	var region string
+	if brace >= 0 {
+		region = line[lt+1 : lt+brace]
+	} else {
+		region = line[lt+1:]
+	}
+	regionStart := lt + 1
+
+	pos := char - regionStart
+	if pos < 0 || pos > len(region) {
+		return "", 0, 0, false
+	}
+
+	for _, part := range strings.Split(region, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" || !looksLikeFileDep(part) {
+			continue
+		}
+		idx := strings.Index(region, part)
+		if pos >= idx && pos < idx+len(part) {
+			return part, regionStart + idx, regionStart + idx + len(part), true
+		}
+	}
+	return "", 0, 0, false
+}
+
+func looksLikeFileDep(token string) bool {
+	if strings.ContainsAny(token, "/*\\?") {
+		return true
+	}
+	if dot := strings.LastIndexByte(token, '.'); dot > 0 && dot < len(token)-1 {
+		return true
+	}
+	return false
 }
 
 // workDirAtPosition returns the directory path text and its column span if the

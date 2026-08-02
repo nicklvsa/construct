@@ -1,0 +1,40 @@
+// Rust project build file
+// Demonstrates: lazy vars, conditionals, named outputs, prereq chaining
+
+var cargo = cargo
+var target = @CARGO_TARGET_DIR
+
+check < src/**/*.rs, Cargo.toml {
+    $ &cargo check
+    $ &cargo clippy -- -D warnings
+}
+
+test < check {
+    $ &cargo test
+    $ echo "Tests passed" as result
+}
+
+build < check {
+    $ &cargo build --release
+    $ echo "Release binary ready" as status
+}
+
+bench < build {
+    $ &cargo bench
+}
+
+doc {
+    $ &cargo doc --open
+}
+
+// Cross-compile for multiple targets
+cross < build {
+    for target in x86_64-unknown-linux-musl, aarch64-apple-darwin {
+        $ &cargo build --release --target &target
+    }
+}
+
+clean {
+    $ &cargo clean
+    $ rm -rf target
+}

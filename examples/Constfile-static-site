@@ -1,0 +1,33 @@
+// Static site generator build file
+// Demonstrates: file deps, workdir, named outputs, for loops over assets
+
+var site_dir = _site
+var sass = sass
+
+build < src/**/*.md, templates/*.html {
+    $ &sass src/scss/:build/css/
+    for page in src/*.md {
+        $ pandoc &page -o build/&page.html --template templates/default.html
+    }
+    for img in src/assets/* {
+        $ cp &img build/assets/
+    }
+    $ echo "Site built" as status
+}
+
+serve < build {
+    $ python -m http.server 8000 --directory build
+}
+
+watch {
+    $ &sass --watch src/scss/:build/css/
+}
+
+deploy < build {
+    $ rsync -avz build/ user@server:/var/www/site/
+    $ echo "Deployed" as result
+}
+
+clean {
+    $ rm -rf build &site_dir
+}

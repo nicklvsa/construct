@@ -1,0 +1,44 @@
+// Python project build file
+// Demonstrates: lazy vars, env refs, prereq outputs, CLI overrides
+
+var python = python3
+var venv = .venv
+var packages = requirements.txt
+
+setup {
+    $ &python -m venv &venv
+    $ &venv/bin/pip install -r &packages
+}
+
+test < setup {
+    $ &venv/bin/pytest tests/ -v
+    $ echo "All tests passed" as result
+}
+
+lint < setup {
+    $ &venv/bin/ruff check .
+    $ &venv/bin/mypy src/
+}
+
+fmt < setup {
+    $ &venv/bin/ruff format .
+}
+
+clean {
+    $ rm -rf &venv __pycache__ .pytest_cache .mypy_cache
+    $ echo "Cleaned" as status
+}
+
+// Run with: construct run -e python=python3.11
+run (opt env) {
+    if "&env" == "prod" {
+        $ &venv/bin/gunicorn app:app
+    } else {
+        $ &venv/bin/python -m flask run --debug
+    }
+}
+
+_ < setup {
+    $ echo "&python project ready"
+    $ echo "&test.result"
+}

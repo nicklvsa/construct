@@ -1,0 +1,35 @@
+// C/C++ project build file
+// Demonstrates: file deps, for loops, compiler flags
+
+var cc = cc
+var cflags = -Wall -Wextra -O2
+var ldflags = -lm
+
+build < src/*.c, include/*.h {
+    for src in src/*.c {
+        $ &cc &cflags -c &src -o build/&src.o
+    }
+    $ &cc build/*.o &ldflags -o app
+    $ echo "Built" as status
+}
+
+debug < src/*.c, include/*.h {
+    for src in src/*.c {
+        $ &cc -g -Wall -c &src -o build/&src.o
+    }
+    $ &cc build/*.o &ldflags -o app-debug
+}
+
+test < build {
+    $ ./app -t
+    $ echo "Tests passed" as result
+}
+
+clean {
+    $ rm -rf build/*.o app app-debug
+}
+
+install < build {
+    $ cp app /usr/local/bin/
+    $ echo "Installed" as status
+}

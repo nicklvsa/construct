@@ -7,3 +7,9 @@ debug.json
 # Compiled binary (the README suggests `go build -o construct`)
 /construct
 /construct.exe
+
+# File dependency cache
+.construct-cache/
+
+# LSP dev mode marker (points to source server binary)
+.construct-lsp-dev

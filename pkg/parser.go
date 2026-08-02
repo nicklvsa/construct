@@ -120,12 +120,15 @@ type LazyOutput struct {
 // BodyStatement is a single node in a command body: either a shell line or an
 // if/else block. The executor walks this tree rather than a flat string list.
 type BodyStatement struct {
-	Type       string          `json:"type"` // "shell" or "if"
+	Type       string          `json:"type"` // "shell", "if", or "for"
 	Shell      string          `json:"shell,omitempty"`
 	OutputName string          `json:"output_name,omitempty"`
 	Cond       string          `json:"cond,omitempty"`
 	ThenBody   []BodyStatement `json:"then,omitempty"`
 	ElseBody   []BodyStatement `json:"else,omitempty"`
+	LoopVar    string          `json:"loop_var,omitempty"`
+	LoopItems  string          `json:"loop_items,omitempty"`
+	LoopBody   []BodyStatement `json:"loop_body,omitempty"`
 }
 
 type Command struct {
@@ -138,6 +141,7 @@ type Command struct {
 	NamedOutput     map[string]string `json:"named_output"`
 	Arguments       []*Argument       `json:"arguments"`
 	Prereqs         []string          `json:"prereqs"`
+	FileDeps        []string          `json:"file_deps"`
 	PrereqCmds      []*Command        `json:"prereq_cmds"`
 	WorkDir         string            `json:"work_dir"`
 	Body            []BodyStatement   `json:"body"`
@@ -338,28 +342,20 @@ func extractPrerequisiteString(line string) string {
 
 	segment := line[start+1 : start+end]
 
-	// The segment may contain prereqs, an " in <dir>" modifier, and more prereqs
-	// after the workdir. Split on commas, remove the workdir token and "in"
-	// keyword, and keep the rest as prereq names.
 	parts := strings.Split(segment, ",")
-	var prereqs []string
+	var result []string
 	for _, part := range parts {
 		part = strings.TrimSpace(part)
 		if part == "" || part == "in" {
 			continue
 		}
-		// Skip path-like tokens (the workdir directory).
-		if strings.ContainsAny(part, "/\\") {
-			continue
-		}
-		// Skip "in <path>" combined tokens.
 		if strings.HasPrefix(part, "in ") {
 			continue
 		}
-		prereqs = append(prereqs, part)
+		result = append(result, part)
 	}
 
-	return strings.Join(prereqs, ", ")
+	return strings.Join(result, ", ")
 }
 
 // extractWorkDir finds the " in <dir>" modifier that sits between the end of
@@ -456,6 +452,16 @@ func parsePrerequisiteList(prereqStr string) ([]string, error) {
 	return prereqs, nil
 }
 
+func isFileDep(token string) bool {
+	if strings.ContainsAny(token, "/*\\") {
+		return true
+	}
+	if dot := strings.LastIndexByte(token, '.'); dot > 0 && dot < len(token)-1 {
+		return true
+	}
+	return false
+}
+
 // parseCommandBody collects raw body lines until the closing brace, tracking
 // nesting depth so if/else block braces are not mistaken for the command's
 // closing brace.
@@ -472,6 +478,7 @@ func (p *Parser) parseCommandBody(startIdx int, commandName string) ([]string, i
 
 		// An "if" line with a brace opens a new block.
 		isIfHeader := strings.HasPrefix(trimmedLine, "if ") && opens > 0
+		isForHeader := strings.HasPrefix(trimmedLine, "for ") && opens > 0
 		isElseCompound := strings.HasPrefix(trimmedLine, "}") && strings.Contains(trimmedLine, "else")
 
 		if isElseCompound {
@@ -494,7 +501,7 @@ func (p *Parser) parseCommandBody(startIdx int, commandName string) ([]string, i
 			return body, i + 1, nil
 		}
 
-		if isIfHeader {
+		if isIfHeader || isForHeader {
 			depth++
 		}
 
@@ -529,6 +536,17 @@ func (p *Parser) parseBodyStatements(raw []string, scope string) ([]BodyStatemen
 		// if "<cond>" { ... } else { ... }
 		if strings.HasPrefix(line, "if ") || line == "if{" {
 			stmt, consumed, err := p.parseIfBlock(raw[i:], scope)
+			if err != nil {
+				return nil, err
+			}
+			stmts = append(stmts, stmt)
+			i += consumed
+			continue
+		}
+
+		// for <var> in <items> { ... }
+		if strings.HasPrefix(line, "for ") && strings.Contains(line, "{") {
+			stmt, consumed, err := p.parseForBlock(raw[i:], scope)
 			if err != nil {
 				return nil, err
 			}
@@ -589,15 +607,37 @@ func (p *Parser) parseIfBlock(raw []string, scope string) (BodyStatement, int, e
 	// Collect the then-body until we hit a line starting with '}' or 'else'.
 	var thenLines []string
 	consumed := 1
+	depth := 0
 	for consumed < len(raw) {
 		l := raw[consumed]
 		trimmed := strings.TrimSpace(l)
-		if trimmed == "}" || strings.HasPrefix(trimmed, "}") {
+
+		isInnerIf := strings.HasPrefix(trimmed, "if ") && strings.Contains(trimmed, "{")
+		isInnerFor := strings.HasPrefix(trimmed, "for ") && strings.Contains(trimmed, "{")
+		isElseCompound := strings.HasPrefix(trimmed, "}") && strings.Contains(trimmed, "else")
+
+		if isInnerIf || isInnerFor {
+			depth++
+		}
+
+		if isElseCompound && depth == 0 {
 			break
 		}
-		if trimmed == "else" || strings.HasPrefix(trimmed, "else ") || strings.HasPrefix(trimmed, "else{") {
+
+		if strings.HasPrefix(trimmed, "}") {
+			if depth > 0 {
+				depth--
+				thenLines = append(thenLines, l)
+				consumed++
+				continue
+			}
 			break
 		}
+
+		if (trimmed == "else" || strings.HasPrefix(trimmed, "else ")) && depth == 0 {
+			break
+		}
+
 		thenLines = append(thenLines, l)
 		consumed++
 	}
@@ -622,16 +662,30 @@ func (p *Parser) parseIfBlock(raw []string, scope string) (BodyStatement, int, e
 	hasElse := strings.Contains(closingLine, "else")
 
 	if hasElse {
-		// The else-body starts on the same line as "} else {" — no header to
-		// consume separately. Just gather lines until the closing "}".
 		consumed++ // consume the "} else {" line
 		var elseLines []string
+		depth := 0
 		for consumed < len(raw) {
 			l := raw[consumed]
 			trimmed := strings.TrimSpace(l)
-			if trimmed == "}" || strings.HasPrefix(trimmed, "}") {
+
+			isInnerIf := strings.HasPrefix(trimmed, "if ") && strings.Contains(trimmed, "{")
+			isInnerFor := strings.HasPrefix(trimmed, "for ") && strings.Contains(trimmed, "{")
+
+			if isInnerIf || isInnerFor {
+				depth++
+			}
+
+			if strings.HasPrefix(trimmed, "}") {
+				if depth > 0 {
+					depth--
+					elseLines = append(elseLines, l)
+					consumed++
+					continue
+				}
 				break
 			}
+
 			elseLines = append(elseLines, l)
 			consumed++
 		}
@@ -648,6 +702,54 @@ func (p *Parser) parseIfBlock(raw []string, scope string) (BodyStatement, int, e
 		consumed++ // consume the closing '}'
 	}
 
+	return stmt, consumed, nil
+}
+
+func (p *Parser) parseForBlock(raw []string, scope string) (BodyStatement, int, error) {
+	header := strings.TrimSpace(raw[0])
+	header = strings.TrimPrefix(header, "for")
+
+	brace := strings.Index(header, "{")
+	if brace < 0 {
+		return BodyStatement{}, 0, fmt.Errorf("malformed for loop: missing '{'")
+	}
+	headerPart := strings.TrimSpace(header[:brace])
+
+	inIdx := strings.Index(headerPart, " in ")
+	if inIdx < 0 {
+		return BodyStatement{}, 0, fmt.Errorf("malformed for loop: missing 'in'")
+	}
+
+	loopVar := strings.TrimSpace(headerPart[:inIdx])
+	loopItems := strings.TrimSpace(headerPart[inIdx+4:])
+
+	var bodyLines []string
+	consumed := 1
+	for consumed < len(raw) {
+		l := raw[consumed]
+		trimmed := strings.TrimSpace(l)
+		if trimmed == "}" || strings.HasPrefix(trimmed, "}") {
+			break
+		}
+		bodyLines = append(bodyLines, l)
+		consumed++
+	}
+	if consumed >= len(raw) {
+		return BodyStatement{}, 0, fmt.Errorf("unclosed for block (missing '}')")
+	}
+
+	bodyStmts, err := p.parseBodyStatements(bodyLines, scope)
+	if err != nil {
+		return BodyStatement{}, 0, err
+	}
+
+	stmt := BodyStatement{
+		Type:      "for",
+		LoopVar:   loopVar,
+		LoopItems: loopItems,
+		LoopBody:  bodyStmts,
+	}
+	consumed++
 	return stmt, consumed, nil
 }
 
@@ -695,6 +797,15 @@ func (p *Parser) parseCommand(idx int, line string, isDefault bool) (int, error)
 		return 0, fmt.Errorf("failed to parse prerequisites for '%s': %w", commandName, err)
 	}
 
+	var cmdDeps, fileDeps []string
+	for _, p := range prereqs {
+		if isFileDep(p) {
+			fileDeps = append(fileDeps, p)
+		} else {
+			cmdDeps = append(cmdDeps, p)
+		}
+	}
+
 	workDir := extractWorkDir(line)
 
 	rawBody, endIdx, err := p.parseCommandBody(idx+1, commandName)
@@ -713,7 +824,8 @@ func (p *Parser) parseCommand(idx int, line string, isDefault bool) (int, error)
 			CloudAccessible: cloudAccessible,
 			IsDefault:       isDefault,
 			Arguments:       commandArgs,
-			Prereqs:         prereqs,
+			Prereqs:         cmdDeps,
+			FileDeps:        fileDeps,
 			WorkDir:         workDir,
 			Body:            commandBody,
 		})

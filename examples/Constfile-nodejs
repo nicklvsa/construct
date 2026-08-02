@@ -1,0 +1,50 @@
+// Node.js project build file
+// Demonstrates: workdir, for loops, env refs, CLI overrides
+
+var node = node
+var npm = npm
+var pkg_manager = npm
+
+install {
+    $ &pkg_manager install
+}
+
+dev < install {
+    $ &pkg_manager run dev
+}
+
+build < src/**, tsconfig.json {
+    $ &pkg_manager run build
+    $ echo "Build complete" as status
+}
+
+test < build {
+    $ &pkg_manager test
+    $ echo "Tests passed" as result
+}
+
+lint < install {
+    for f in src/**/*.ts {
+        $ &pkg_manager run lint &f
+    }
+}
+
+docker < build {
+    $ docker build -t myapp .
+    $ echo "Image built" as image
+}
+
+// Run with: construct deploy -e env=staging
+deploy (opt env) < docker {
+    if "&env" == "prod" {
+        $ docker push myapp:latest
+        $ kubectl rollout restart deployment/myapp
+    } else {
+        $ docker tag myapp myapp:&env
+        $ docker push myapp:&env
+    }
+}
+
+clean {
+    $ rm -rf node_modules dist coverage
+}
