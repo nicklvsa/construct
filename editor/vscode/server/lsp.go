@@ -708,10 +708,10 @@ func (s *server) handleDefinition(params json.RawMessage) (interface{}, error) {
 	fd, fsc, fec, fok := fileDepAtPosition(line, char)
 	if fok {
 		resolved := resolveWorkDir(fd, p.TextDocument.URI)
-		target := resolved
+		target := ""
 		if strings.ContainsAny(resolved, "*?") {
-			matches, err := filepath.Glob(resolved)
-			if err == nil && len(matches) > 0 {
+			matches, _ := filepath.Glob(resolved)
+			if len(matches) > 0 {
 				target = matches[0]
 			} else {
 				dir := filepath.Dir(resolved)
@@ -719,15 +719,21 @@ func (s *server) handleDefinition(params json.RawMessage) (interface{}, error) {
 					target = dir
 				}
 			}
+		} else {
+			if _, err := os.Stat(resolved); err == nil {
+				target = resolved
+			}
 		}
-		uri := pathToURI(target)
-		return location{
-			URI: uri,
-			Range: range_{
-				Start: position{Line: p.Position.Line, Character: fsc},
-				End:   position{Line: p.Position.Line, Character: fec},
-			},
-		}, nil
+		if target != "" {
+			uri := pathToURI(target)
+			return location{
+				URI: uri,
+				Range: range_{
+					Start: position{Line: p.Position.Line, Character: fsc},
+					End:   position{Line: p.Position.Line, Character: fec},
+				},
+			}, nil
+		}
 	}
 
 	// Go-to-definition for a prerequisite name the cursor is on. The cursor
