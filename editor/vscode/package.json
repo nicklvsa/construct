@@ -2,7 +2,7 @@
 	"name": "constfile",
 	"displayName": "Constfile",
 	"description": "Syntax highlighting and language intelligence for Constfiles (the construct build tool).",
-	"version": "0.1.0",
+	"version": "0.2.0",
 	"publisher": "nicklvsa",
 	"license": "MIT",
 	"engines": {
@@ -12,9 +12,6 @@
 		"Programming Languages"
 	],
 	"main": "./out/extension.js",
-	"activationEvents": [
-		"onLanguage:constfile"
-	],
 	"contributes": {
 		"languages": [
 			{

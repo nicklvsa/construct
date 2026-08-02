@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -43,12 +44,54 @@ type Executor struct {
 
 func defaultShell() (string, []string) {
 	if runtime.GOOS == "windows" {
+		// cmd.exe mangles quoted arguments when invoked via exec.Command.
+		// Prefer Git Bash, which handles quoting correctly and doesn't launch
+		// a Linux VM like WSL's bash.exe does. Check known Git Bash locations
+		// explicitly, since exec.LookPath("bash") may find WSL's bash first.
+		gitBashPaths := []string{
+			os.Getenv("ProgramFiles") + `\Git\usr\bin\bash.exe`,
+			os.Getenv("ProgramFiles(x86)") + `\Git\usr\bin\bash.exe`,
+			os.Getenv("LOCALAPPDATA") + `\Programs\Git\usr\bin\bash.exe`,
+		}
+		for _, p := range gitBashPaths {
+			if p != `\Git\usr\bin\bash.exe` {
+				if _, err := os.Stat(p); err == nil {
+					return p, []string{"-c"}
+				}
+			}
+		}
+		// Fall back to cmd.exe if Git Bash isn't installed.
 		return "cmd", []string{"/c"}
 	}
 	if sh := os.Getenv("SHELL"); sh != "" {
 		return sh, []string{"-c"}
 	}
 	return "/bin/sh", []string{"-c"}
+}
+
+// childEnv returns the environment for child processes. When using Git Bash on
+// Windows, we prepend its usr/bin to PATH so that child processes (like npm)
+// that spawn /bin/bash find Git Bash's bash, not WSL's broken one.
+func (e *Executor) childEnv() []string {
+	env := os.Environ()
+	if runtime.GOOS != "windows" {
+		return env
+	}
+	// Only adjust if we're using Git Bash.
+	bashDir := filepath.Dir(e.shellName)           // ...\Git\usr\bin
+	gitRoot := filepath.Dir(filepath.Dir(bashDir)) // ...\Git
+	usrBin := filepath.Join(gitRoot, "usr", "bin")
+	if _, err := os.Stat(usrBin); err != nil {
+		return env
+	}
+	// Prepend usrBin to PATH so /bin/bash resolves to Git Bash internally.
+	for i, kv := range env {
+		if strings.HasPrefix(strings.ToUpper(kv), "PATH=") {
+			env[i] = "PATH=" + usrBin + string(os.PathListSeparator) + kv[5:]
+			break
+		}
+	}
+	return env
 }
 
 func NewExecutor(data *ParsedData, concurrent bool, debug bool) *Executor {
@@ -162,6 +205,7 @@ func (e *Executor) EvaluateCommand(command *Command) error {
 			if target.WorkDir != "" {
 				cmd.Dir = resolveValue(target.WorkDir, target.Name)
 			}
+			cmd.Env = e.childEnv()
 
 			var fullCommand string
 			if e.debug {
@@ -225,9 +269,18 @@ func (e *Executor) EvaluateCommand(command *Command) error {
 			case isPrereq:
 				e.mu.Lock()
 				target.PrereqOutput = append(target.PrereqOutput, strOutput)
+				if stmt.OutputName != "" {
+					if target.NamedOutput == nil {
+						target.NamedOutput = make(map[string]string)
+					}
+					target.NamedOutput[stmt.OutputName] = strOutput
+				}
 				e.mu.Unlock()
 				if e.debug {
 					fmt.Printf("[DEBUG] Prereq output: %s\n", strOutput)
+					if stmt.OutputName != "" {
+						fmt.Printf("[DEBUG] Named output %s.%s = %s\n", target.Name, stmt.OutputName, strOutput)
+					}
 				}
 			case target.LazyEval != nil:
 				e.mu.Lock()
@@ -264,6 +317,17 @@ func (e *Executor) EvaluateCommand(command *Command) error {
 					})
 					e.mu.Unlock()
 				}
+				// Register named outputs (&prereq.name)
+				for name, val := range prereq.NamedOutput {
+					varName := prereq.Name + "." + name
+					e.mu.Lock()
+					e.StructuredParse.AddVariable(&Variable{
+						Name:  varName,
+						Value: strings.TrimSpace(val),
+						Scope: cmd.Name,
+					})
+					e.mu.Unlock()
+				}
 			}
 		}
 
@@ -285,7 +349,7 @@ func (e *Executor) EvaluateCommand(command *Command) error {
 					}
 					continue
 				}
-				out[i] = BodyStatement{Type: "shell", Shell: e.cleanShellLine(cmd, stmt.Shell, argFlags)}
+				out[i] = BodyStatement{Type: "shell", Shell: e.cleanShellLine(cmd, stmt.Shell, argFlags), OutputName: stmt.OutputName}
 			}
 			return out
 		}
@@ -343,64 +407,55 @@ func (e *Executor) EvaluateCommand(command *Command) error {
 	return execCommandBody(command, body)
 }
 
-// cleanShellLine resolves &var/@env references and argument placeholders in a
-// single shell body line for the given command.
 func (e *Executor) cleanShellLine(cmd *Command, line string, argFlags map[string]bool) string {
 	line = strings.TrimSpace(line)
 	if line == "" {
 		return ""
 	}
 
-	if line[0] == '$' {
-		executionLine := strings.TrimSpace(line[1:])
-		linePieces := strings.Fields(executionLine)
-
-		for pieceIdx, piece := range linePieces {
-			if idx := strings.IndexByte(piece, '&'); idx >= 0 {
-				varName := piece[idx+1:]
-				if variable, err := e.StructuredParse.GetVariable(varName, cmd.Name); err == nil && variable != nil {
-					linePieces[pieceIdx] = strings.ReplaceAll(piece, "&"+varName, variable.Value)
-				}
-			}
-
-			lookupKey := cmd.Name + ":" + piece
-			if argFlags[lookupKey] {
-				if e.debug {
-					fmt.Printf("[DEBUG] Handling argument --%s for command %s\n", piece, cmd.Name)
-				}
-
-				v, err := pflag.CommandLine.GetString(lookupKey)
-				if err != nil || v == "" {
-					isOptional := false
-					for _, arg := range cmd.Arguments {
-						if arg.Name == piece {
-							isOptional = arg.IsOptional
-							break
-						}
-					}
-					if !isOptional {
-						return line
-					}
-				}
-
-				linePieces[pieceIdx] = v
-			}
-		}
-
-		return strings.Join(linePieces, " ")
+	// Strip the $ prefix for execution lines — it marks a shell command.
+	if len(line) > 0 && line[0] == '$' {
+		line = strings.TrimSpace(line[1:])
 	}
 
-	return resolveVarRefs(line, func(name string) (string, bool) {
+	// Resolve &variable references in-place.
+	line = resolveVarRefs(line, func(name string) (string, bool) {
 		v, err := e.StructuredParse.GetVariable(name, cmd.Name)
 		if err != nil || v == nil {
 			return "", false
 		}
 		return v.Value, true
 	})
+
+	// Resolve argument placeholders: replace bare argument names with their
+	// flag values. We scan for known arg names as whole words.
+	for _, arg := range cmd.Arguments {
+		lookupKey := cmd.Name + ":" + arg.Name
+		if !argFlags[lookupKey] {
+			continue
+		}
+		// Only replace if the arg name appears as a standalone token.
+		if !strings.Contains(line, arg.Name) {
+			continue
+		}
+		if e.debug {
+			fmt.Printf("[DEBUG] Handling argument --%s for command %s\n", arg.Name, cmd.Name)
+		}
+		v, err := pflag.CommandLine.GetString(lookupKey)
+		if err != nil || v == "" {
+			if !arg.IsOptional {
+				return line
+			}
+			continue
+		}
+		line = strings.ReplaceAll(line, arg.Name, v)
+	}
+
+	return line
 }
 
-// resolveVarRefs replaces &name references in a line using lookup, leaving
-// unknown references untouched.
+// resolveVarRefs replaces &name and &name.index references in a line using
+// lookup, leaving unknown references untouched.
 func resolveVarRefs(line string, lookup func(string) (string, bool)) string {
 	var result strings.Builder
 	runes := []rune(line)
@@ -412,6 +467,21 @@ func resolveVarRefs(line string, lookup func(string) (string, bool)) string {
 			for j < len(runes) && (unicode.IsLetter(runes[j]) || runes[j] == '_') {
 				name.WriteRune(runes[j])
 				j++
+			}
+			// Capture an optional ".suffix" — either a numeric index (&prereq.0)
+			// or a named output (&prereq.greeting).
+			if j < len(runes) && runes[j] == '.' {
+				k := j + 1
+				for k < len(runes) && (unicode.IsLetter(runes[k]) || unicode.IsDigit(runes[k]) || runes[k] == '_') {
+					k++
+				}
+				if k > j+1 {
+					name.WriteRune('.')
+					for m := j + 1; m < k; m++ {
+						name.WriteRune(runes[m])
+					}
+					j = k
+				}
 			}
 			if name.Len() > 0 {
 				if val, ok := lookup(name.String()); ok {

@@ -685,3 +685,39 @@ func TestIfBlockNoElseSkipped(t *testing.T) {
 		t.Fatalf("expected no error (if skipped, no else), got: %v", err)
 	}
 }
+
+// TestNamedOutput verifies that "as <name>" tagged prereq output is accessible
+// as &prereq.name in the consuming command.
+func TestNamedOutput(t *testing.T) {
+	data := &ParsedData{
+		Commands: []*Command{
+			{
+				Name: "gen",
+				Body: []BodyStatement{
+					{Type: "shell", Shell: "echo hello", OutputName: "greeting"},
+				},
+			},
+			{
+				Name:    "use",
+				Prereqs: []string{"gen"},
+				Body: []BodyStatement{
+					{Type: "shell", Shell: "$ echo got:&gen.greeting"},
+				},
+			},
+		},
+	}
+	data.buildIndexMaps()
+
+	executor := NewExecutor(data, false, false)
+	if err := executor.Execute([]string{"use"}); err != nil {
+		t.Fatalf("Execute failed: %v", err)
+	}
+
+	gen, _ := data.GetCommand("gen")
+	if len(gen.PrereqOutput) != 1 || gen.PrereqOutput[0] != "hello" {
+		t.Errorf("positional output = %#v, want [\"hello\"]", gen.PrereqOutput)
+	}
+	if gen.NamedOutput == nil || gen.NamedOutput["greeting"] != "hello" {
+		t.Errorf("named output = %#v, want greeting=\"hello\"", gen.NamedOutput)
+	}
+}

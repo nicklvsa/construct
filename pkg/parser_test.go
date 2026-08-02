@@ -1197,3 +1197,31 @@ func TestEvaluateCondition(t *testing.T) {
 		})
 	}
 }
+
+// TestExtractOutputName covers the "as <name>" suffix extraction.
+func TestExtractOutputName(t *testing.T) {
+	tests := []struct {
+		name      string
+		input     string
+		wantShell string
+		wantName  string
+	}{
+		{name: "no tag", input: `$ echo hello`, wantShell: `$ echo hello`, wantName: ""},
+		{name: "simple tag", input: `$ echo hello as greeting`, wantShell: `$ echo hello`, wantName: "greeting"},
+		{name: "tag with underscore", input: `$ echo hi as my_output`, wantShell: `$ echo hi`, wantName: "my_output"},
+		{name: "tag with number", input: `$ echo v as version2`, wantShell: `$ echo v`, wantName: "version2"},
+		{name: "as inside quotes not a tag", input: `$ echo "hello as world"`, wantShell: `$ echo "hello as world"`, wantName: ""},
+		{name: "non-identifier suffix ignored", input: `$ echo hello as hello world`, wantShell: `$ echo hello as hello world`, wantName: ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			shell, name := extractOutputName(tt.input)
+			if shell != tt.wantShell {
+				t.Errorf("shell = %q, want %q", shell, tt.wantShell)
+			}
+			if name != tt.wantName {
+				t.Errorf("name = %q, want %q", name, tt.wantName)
+			}
+		})
+	}
+}

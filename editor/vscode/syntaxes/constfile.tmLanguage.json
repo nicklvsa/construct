@@ -47,7 +47,7 @@
 			"patterns": [
 				{
 					"name": "support.variable.constfile",
-					"match": "(@)([A-Za-z_][A-Za-z0-9_]*)",
+					"match": "(?:^|\\s)(@)([A-Za-z_][A-Za-z0-9_]*)",
 					"captures": {
 						"1": { "name": "punctuation.definition.variable.constfile" },
 						"2": { "name": "variable.other.readwrite.constfile" }
@@ -197,6 +197,14 @@
 		"body-content": {
 			"patterns": [
 				{ "include": "#variable-declaration" },
+				{
+					"comment": "as <name> output tag — must precede keywords so 'as' is claimed here",
+					"match": "(\\s+)(as)(\\s+)([A-Za-z_][A-Za-z0-9_]*)\\s*$",
+					"captures": {
+						"2": { "name": "keyword.control.constfile" },
+						"4": { "name": "entity.name.label.constfile" }
+					}
+				},
 				{ "include": "#keywords" },
 				{ "include": "#operators" },
 				{ "include": "#shell-prefix" },
@@ -210,9 +218,9 @@
 					"match": "[{}]"
 				},
 				{
-					"comment": "Body line braces inside shell commands like awk {print} are literal.",
+					"comment": "Body text — shell commands, paths, flags. Stops before 'as <name>' tag.",
 					"name": "string.unquoted.constfile",
-					"match": "[^{}\\s][^{}]*"
+					"match": "[^{}\\s][^{}]*?(?=\\s+as\\s+[A-Za-z_][A-Za-z0-9_]*\\s*$|$)"
 				}
 			]
 		},

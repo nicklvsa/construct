@@ -120,25 +120,27 @@ type LazyOutput struct {
 // BodyStatement is a single node in a command body: either a shell line or an
 // if/else block. The executor walks this tree rather than a flat string list.
 type BodyStatement struct {
-	Type     string          `json:"type"` // "shell" or "if"
-	Shell    string          `json:"shell,omitempty"`
-	Cond     string          `json:"cond,omitempty"`
-	ThenBody []BodyStatement `json:"then,omitempty"`
-	ElseBody []BodyStatement `json:"else,omitempty"`
+	Type       string          `json:"type"` // "shell" or "if"
+	Shell      string          `json:"shell,omitempty"`
+	OutputName string          `json:"output_name,omitempty"`
+	Cond       string          `json:"cond,omitempty"`
+	ThenBody   []BodyStatement `json:"then,omitempty"`
+	ElseBody   []BodyStatement `json:"else,omitempty"`
 }
 
 type Command struct {
-	Name            string          `json:"name"`
-	CloudAccessible bool            `json:"cloud_accessible"`
-	IsDefault       bool            `json:"is_default"`
-	LazyEval        *LazyOutput     `json:"lazy_output"`
-	IsPrereq        bool            `json:"is_prereq"`
-	PrereqOutput    []string        `json:"prereq_output"`
-	Arguments       []*Argument     `json:"arguments"`
-	Prereqs         []string        `json:"prereqs"`
-	PrereqCmds      []*Command      `json:"prereq_cmds"`
-	WorkDir         string          `json:"work_dir"`
-	Body            []BodyStatement `json:"body"`
+	Name            string            `json:"name"`
+	CloudAccessible bool              `json:"cloud_accessible"`
+	IsDefault       bool              `json:"is_default"`
+	LazyEval        *LazyOutput       `json:"lazy_output"`
+	IsPrereq        bool              `json:"is_prereq"`
+	PrereqOutput    []string          `json:"prereq_output"`
+	NamedOutput     map[string]string `json:"named_output"`
+	Arguments       []*Argument       `json:"arguments"`
+	Prereqs         []string          `json:"prereqs"`
+	PrereqCmds      []*Command        `json:"prereq_cmds"`
+	WorkDir         string            `json:"work_dir"`
+	Body            []BodyStatement   `json:"body"`
 }
 
 func NewParser(file string) (*Parser, error) {
@@ -523,10 +525,47 @@ func (p *Parser) parseBodyStatements(raw []string, scope string) ([]BodyStatemen
 			continue
 		}
 
-		stmts = append(stmts, BodyStatement{Type: "shell", Shell: line})
+		// Extract "as <name>" output tag if present.
+		shell, outputName := extractOutputName(line)
+		stmts = append(stmts, BodyStatement{Type: "shell", Shell: shell, OutputName: outputName})
 		i++
 	}
 	return stmts, nil
+}
+
+// extractOutputName splits a trailing " as <name>" from a shell line, returning
+// the cleaned shell text and the output name ("" if none).
+func extractOutputName(line string) (shell, name string) {
+	// Match " as <identifier>" at end of line. Avoid matching inside quotes.
+	idx := strings.LastIndex(line, " as ")
+	if idx < 0 {
+		return line, ""
+	}
+	suffix := strings.TrimSpace(line[idx+4:])
+	// The name must be a bare identifier (no spaces, quotes, or special chars).
+	if suffix == "" || !isValidIdent(suffix) {
+		return line, ""
+	}
+	// Don't treat " as " inside a quoted string as an output tag.
+	// Simple heuristic: if there's an odd number of quotes before the " as ",
+	// we're inside a string.
+	before := line[:idx]
+	if strings.Count(before, `"`)%2 != 0 {
+		return line, ""
+	}
+	return strings.TrimSpace(before), suffix
+}
+
+func isValidIdent(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if !(r == '_' || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9')) {
+			return false
+		}
+	}
+	return true
 }
 
 // parseIfBlock parses an if/else block starting at lines[0]. Returns the

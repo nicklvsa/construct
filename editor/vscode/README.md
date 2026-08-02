@@ -1,6 +1,6 @@
 # Constfile
 
-Syntax highlighting and language intelligence for [Constfiles](../../README.md) used by the `construct` build tool.
+Syntax highlighting and language intelligence for [Constfiles](https://github.com/nicklvsa/construct#readme) used by the `construct` build tool.
 
 ## Features
 

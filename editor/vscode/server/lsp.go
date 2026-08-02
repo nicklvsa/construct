@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -202,7 +203,7 @@ func (s *server) updateDoc(uri, text string, version int) {
 	}
 
 	s.docs[uri] = &docState{text: text, version: version, data: data}
-	s.publishDiagnostics(uri, nil)
+	s.publishDiagnostics(uri, namedOutputHints(text, data))
 }
 
 func (s *server) publishDiagnostics(uri string, diags []diagnostic) {
@@ -275,6 +276,148 @@ func fullRange(text string) range_ {
 	}
 }
 
+// namedOutputHints scans the document for &prereq.suffix references and validates
+// them. Generates: warnings for positional refs with named alternatives; errors
+// for invalid indices, unknown named outputs, or references to non-existent commands.
+func namedOutputHints(text string, data *pkg.ParsedData) []diagnostic {
+	diags := []diagnostic{}
+	lines := strings.Split(text, "\n")
+	for lineIdx, line := range lines {
+		searchFrom := 0
+		for {
+			ampIdx := strings.IndexByte(line[searchFrom:], '&')
+			if ampIdx < 0 {
+				break
+			}
+			absIdx := searchFrom + ampIdx
+			name := extractRefName(line[absIdx:])
+			if name == "" {
+				searchFrom = absIdx + 1
+				continue
+			}
+			searchFrom = absIdx + 1 + len(name)
+			refLen := len(name) + 1
+
+			dot := strings.IndexByte(name, '.')
+			if dot < 0 {
+				continue // plain &var, not a prereq output ref
+			}
+
+			cmdName := name[:dot]
+			suffix := name[dot+1:]
+
+			// Look up the referenced command.
+			cmd, err := data.GetCommand(cmdName)
+			if err != nil || cmd == nil {
+				diags = append(diags, diagnostic{
+					Range:    refRange(lineIdx, absIdx, refLen),
+					Severity: sevError,
+					Source:   "constfile",
+					Message:  fmt.Sprintf("unknown command `%s` in output reference `&%s`", cmdName, name),
+				})
+				continue
+			}
+
+			// Count shell lines (each produces one output).
+			shellCount := countShellLines(cmd.Body)
+
+			if idx, err := strconv.Atoi(suffix); err == nil {
+				// Numeric index: validate bounds.
+				if idx < 0 || idx >= shellCount {
+					diags = append(diags, diagnostic{
+						Range:    refRange(lineIdx, absIdx, refLen),
+						Severity: sevError,
+						Source:   "constfile",
+						Message:  fmt.Sprintf("index %d out of bounds: `%s` has %d output line(s)", idx, cmdName, shellCount),
+					})
+					continue
+				}
+				// Check if a named output is available at this index.
+				if hint := namedOutputAt(data, cmdName, idx); hint != "" {
+					diags = append(diags, diagnostic{
+						Range:    refRange(lineIdx, absIdx, refLen),
+						Severity: sevWarning,
+						Source:   "constfile",
+						Message:  fmt.Sprintf("💡 named output available: use &%s instead of &%s", hint, name),
+					})
+				}
+			} else {
+				// Named output: validate it exists.
+				if !hasNamedOutput(cmd.Body, suffix) {
+					diags = append(diags, diagnostic{
+						Range:    refRange(lineIdx, absIdx, refLen),
+						Severity: sevError,
+						Source:   "constfile",
+						Message:  fmt.Sprintf("unknown named output `%s` on command `%s`", suffix, cmdName),
+					})
+				}
+			}
+		}
+	}
+	return diags
+}
+
+func refRange(line, col, length int) range_ {
+	return range_{
+		Start: position{Line: line, Character: col},
+		End:   position{Line: line, Character: col + length},
+	}
+}
+
+func countShellLines(body []pkg.BodyStatement) int {
+	count := 0
+	for _, stmt := range body {
+		if stmt.Type == "shell" {
+			count++
+		}
+	}
+	return count
+}
+
+func hasNamedOutput(body []pkg.BodyStatement, name string) bool {
+	for _, stmt := range body {
+		if stmt.OutputName == name {
+			return true
+		}
+	}
+	return false
+}
+
+// namedOutputAt checks if command cmdName has a named output at the given index.
+func namedOutputAt(data *pkg.ParsedData, cmdName string, idx int) string {
+	cmd, err := data.GetCommand(cmdName)
+	if err != nil || cmd == nil {
+		return ""
+	}
+	shellIdx := 0
+	for _, stmt := range cmd.Body {
+		if stmt.Type != "shell" {
+			continue
+		}
+		if stmt.OutputName != "" && shellIdx == idx {
+			return cmdName + "." + stmt.OutputName
+		}
+		shellIdx++
+	}
+	return ""
+}
+
+// extractRefName extracts the variable name from a &reference at the start of s.
+func extractRefName(s string) string {
+	if len(s) < 2 || s[0] != '&' {
+		return ""
+	}
+	var name strings.Builder
+	for _, r := range s[1:] {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' || r == '.' {
+			name.WriteRune(r)
+		} else {
+			break
+		}
+	}
+	return name.String()
+}
+
 // ---- hover ----
 
 func (s *server) handleHover(params json.RawMessage) (interface{}, error) {
@@ -299,12 +442,10 @@ func (s *server) handleHover(params json.RawMessage) (interface{}, error) {
 
 	// Hover over a &varName reference.
 	if str, name := refAtPosition(line, char); str != "" {
-		if v, err := doc.data.GetVariable(name, ""); err == nil {
+		hoverMsg := varHoverMessage(name, doc.data)
+		if hoverMsg != "" {
 			return hoverResult{
-				Contents: markupContent{
-					Kind:  "markdown",
-					Value: fmt.Sprintf("`%s` (scope: `%s`)\n\nvalue: `%s`", name, v.Scope, v.Value),
-				},
+				Contents: markupContent{Kind: "markdown", Value: hoverMsg},
 			}, nil
 		}
 	}
@@ -379,6 +520,80 @@ func commandHover(c *pkg.Command) string {
 		fmt.Fprintf(&b, "- %d body statement(s)\n", len(c.Body))
 	}
 	return b.String()
+}
+
+// varHoverMessage resolves a &reference name to a hover string. For prereq
+// output references (&prereq.N or &prereq.name), it derives info from the
+// referenced command's body. If a positional index has a named output, a hint
+// suggests the named form.
+func varHoverMessage(name string, data *pkg.ParsedData) string {
+	dot := strings.IndexByte(name, '.')
+	if dot < 0 {
+		// Plain &var — look it up in the variable map.
+		v, err := data.GetVariable(name, "")
+		if err != nil {
+			for _, vv := range data.Variables {
+				if vv.Name == name {
+					v = vv
+					break
+				}
+			}
+		}
+		if v == nil {
+			return ""
+		}
+		return fmt.Sprintf("`%s` (scope: `%s`)\n\nvalue: `%s`", name, v.Scope, v.Value)
+	}
+
+	// Dotted reference: &prereq.N or &prereq.name
+	cmdName := name[:dot]
+	suffix := name[dot+1:]
+	cmd, err := data.GetCommand(cmdName)
+	if err != nil || cmd == nil {
+		return ""
+	}
+
+	// Find the shell line at this index/name.
+	shellIdx := 0
+	for _, stmt := range cmd.Body {
+		if stmt.Type != "shell" {
+			continue
+		}
+		matches := false
+		var namedHint string
+		if _, err := strconv.Atoi(suffix); err == nil {
+			// Numeric index
+			if shellIdx == int(stringToInt(suffix)) {
+				matches = true
+				if stmt.OutputName != "" {
+					namedHint = cmdName + "." + stmt.OutputName
+				}
+			}
+		} else if stmt.OutputName == suffix {
+			matches = true
+		}
+		if matches {
+			msg := fmt.Sprintf("`%s` → output of `%s` line %d\n\n```\n%s\n```",
+				name, cmdName, shellIdx, strings.TrimSpace(stmt.Shell))
+			if namedHint != "" {
+				msg += "\n\n💡 tip: this output is also available as `&" + namedHint + "`"
+			}
+			return msg
+		}
+		shellIdx++
+	}
+	return fmt.Sprintf("`%s` → output of `%s`", name, cmdName)
+}
+
+func stringToInt(s string) int64 {
+	var n int64
+	for _, c := range s {
+		if c < '0' || c > '9' {
+			break
+		}
+		n = n*10 + int64(c-'0')
+	}
+	return n
 }
 
 // ---- definition ----
@@ -522,8 +737,9 @@ func (s *server) handleCompletion(params json.RawMessage) (interface{}, error) {
 
 // ---- helpers ----
 
-// refAtPosition finds a &varName reference overlapping the given character.
-// Returns the literal (e.g. "&foo") and the bare name ("foo").
+// refAtPosition finds a &varName or &prereq.name reference overlapping the
+// given character. Returns the literal (e.g. "&foo.bar") and the full name
+// ("foo.bar") including any dotted suffix.
 func refAtPosition(line string, char int) (string, string) {
 	runes := []rune(line)
 	idx := -1
@@ -546,15 +762,8 @@ func refAtPosition(line string, char int) (string, string) {
 	if name.Len() == 0 {
 		return "", ""
 	}
-	// Strip a trailing ".index" if present.
-	clean := name.String()
-	if dot := strings.IndexByte(clean, '.'); dot >= 0 {
-		clean = clean[:dot]
-	}
-	if clean == "" {
-		return "", ""
-	}
-	return string(runes[idx : idx+1+len(name.String())]), clean
+	full := name.String()
+	return string(runes[idx : idx+1+len(full)]), full
 }
 
 // envRefAtPosition finds an @ENVNAME reference overlapping the given character.
