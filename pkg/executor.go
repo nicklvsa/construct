@@ -46,10 +46,6 @@ type Executor struct {
 
 func defaultShell() (string, []string) {
 	if runtime.GOOS == "windows" {
-		// cmd.exe mangles quoted arguments when invoked via exec.Command.
-		// Prefer Git Bash, which handles quoting correctly and doesn't launch
-		// a Linux VM like WSL's bash.exe does. Check known Git Bash locations
-		// explicitly, since exec.LookPath("bash") may find WSL's bash first.
 		gitBashPaths := []string{
 			os.Getenv("ProgramFiles") + `\Git\usr\bin\bash.exe`,
 			os.Getenv("ProgramFiles(x86)") + `\Git\usr\bin\bash.exe`,
@@ -71,9 +67,6 @@ func defaultShell() (string, []string) {
 	return "/bin/sh", []string{"-c"}
 }
 
-// childEnv returns the environment for child processes. When using Git Bash on
-// Windows, we prepend its usr/bin to PATH so that child processes (like npm)
-// that spawn /bin/bash find Git Bash's bash, not WSL's broken one.
 func (e *Executor) childEnv() []string {
 	env := os.Environ()
 	if runtime.GOOS != "windows" {
@@ -86,7 +79,7 @@ func (e *Executor) childEnv() []string {
 	if _, err := os.Stat(usrBin); err != nil {
 		return env
 	}
-	// Prepend usrBin to PATH so /bin/bash resolves to Git Bash internally.
+
 	for i, kv := range env {
 		if strings.HasPrefix(strings.ToUpper(kv), "PATH=") {
 			env[i] = "PATH=" + usrBin + string(os.PathListSeparator) + kv[5:]
@@ -128,8 +121,6 @@ func (e *Executor) loadCloudDefs() error {
 
 	fileBytes, err := os.ReadFile(e.cloudFile)
 	if err != nil {
-		// A missing cloud file is fine (cloud features are opt-in); a parse
-		// error is not, so only swallow not-found-style errors.
 		e.cloudDefs = make(map[string]Command)
 		e.cloudLoaded = true
 		return nil
@@ -179,8 +170,6 @@ func (e *Executor) EvaluateCommand(command *Command) error {
 		}
 	}
 
-	// execCommandBody walks the statement tree, running shell lines and
-	// branching on if/else blocks.
 	var execCommandBody func(target *Command, body []BodyStatement) error
 	execCommandBody = func(target *Command, body []BodyStatement) error {
 		isPrereq := target.IsPrereq
@@ -356,8 +345,6 @@ func (e *Executor) EvaluateCommand(command *Command) error {
 		return nil
 	}
 
-	// cleanCommandBody resolves &variable references and arguments, returning a
-	// new statement tree. It does not mutate the command's stored Body.
 	cleanCommandBody := func(cmd *Command) ([]BodyStatement, error) {
 		if len(cmd.Prereqs) > 0 {
 			for _, prereq := range cmd.PrereqCmds {
@@ -420,8 +407,6 @@ func (e *Executor) EvaluateCommand(command *Command) error {
 		return cleanStmts(cmd.Body), nil
 	}
 
-	// Run prerequisites first. Each prereq is executed with a resolved body
-	// so repeated invocations don't accumulate substitutions.
 	for _, prereqName := range command.Prereqs {
 		if command.PrereqCmds == nil {
 			command.PrereqCmds = []*Command{}
@@ -488,21 +473,22 @@ func (e *Executor) EvaluateCommand(command *Command) error {
 func (e *Executor) cleanStatements(stmts []BodyStatement, cmd *Command, argFlags map[string]bool) []BodyStatement {
 	out := make([]BodyStatement, len(stmts))
 	for i, stmt := range stmts {
-		if stmt.Type == "if" {
+		switch stmt.Type {
+		case "if":
 			out[i] = BodyStatement{
 				Type:     "if",
 				Cond:     stmt.Cond,
 				ThenBody: e.cleanStatements(stmt.ThenBody, cmd, argFlags),
 				ElseBody: e.cleanStatements(stmt.ElseBody, cmd, argFlags),
 			}
-		} else if stmt.Type == "for" {
+		case "for":
 			out[i] = BodyStatement{
 				Type:      "for",
 				LoopVar:   stmt.LoopVar,
 				LoopItems: e.cleanShellLine(cmd, stmt.LoopItems, argFlags),
 				LoopBody:  stmt.LoopBody,
 			}
-		} else {
+		default:
 			out[i] = BodyStatement{Type: "shell", Shell: e.cleanShellLine(cmd, stmt.Shell, argFlags), OutputName: stmt.OutputName}
 		}
 	}
@@ -515,12 +501,10 @@ func (e *Executor) cleanShellLine(cmd *Command, line string, argFlags map[string
 		return ""
 	}
 
-	// Strip the $ prefix for execution lines — it marks a shell command.
 	if len(line) > 0 && line[0] == '$' {
 		line = strings.TrimSpace(line[1:])
 	}
 
-	// Resolve &variable references in-place.
 	line = resolveVarRefs(line, func(name string) (string, bool) {
 		v, err := e.StructuredParse.GetVariable(name, cmd.Name)
 		if err != nil || v == nil {
@@ -529,14 +513,12 @@ func (e *Executor) cleanShellLine(cmd *Command, line string, argFlags map[string
 		return v.Value, true
 	})
 
-	// Resolve argument placeholders: replace bare argument names with their
-	// flag values. We scan for known arg names as whole words.
 	for _, arg := range cmd.Arguments {
 		lookupKey := cmd.Name + ":" + arg.Name
 		if !argFlags[lookupKey] {
 			continue
 		}
-		// Only replace if the arg name appears as a standalone token.
+
 		if !strings.Contains(line, arg.Name) {
 			continue
 		}
@@ -556,8 +538,6 @@ func (e *Executor) cleanShellLine(cmd *Command, line string, argFlags map[string
 	return line
 }
 
-// resolveVarRefs replaces &name and &name.index references in a line using
-// lookup, leaving unknown references untouched.
 func resolveVarRefs(line string, lookup func(string) (string, bool)) string {
 	var result strings.Builder
 	runes := []rune(line)
@@ -570,8 +550,7 @@ func resolveVarRefs(line string, lookup func(string) (string, bool)) string {
 				name.WriteRune(runes[j])
 				j++
 			}
-			// Capture an optional ".suffix" — either a numeric index (&prereq.0)
-			// or a named output (&prereq.greeting).
+
 			if j < len(runes) && runes[j] == '.' {
 				k := j + 1
 				for k < len(runes) && (unicode.IsLetter(runes[k]) || unicode.IsDigit(runes[k]) || runes[k] == '_') {
@@ -623,9 +602,6 @@ func resolveEnvRefs(s string) string {
 	return result.String()
 }
 
-// evaluateCondition parses a resolved condition string like `"18" >= "2"` and
-// returns the boolean result. Numeric comparison is used when both operands
-// parse as integers; otherwise lexicographic. Supported ops: == != < > <= >=.
 func evaluateCondition(cond string) bool {
 	cond = strings.TrimSpace(cond)
 
@@ -753,8 +729,6 @@ func (e *Executor) Exec(commands []string) error {
 	return nil
 }
 
-// execConcurrent runs the named commands concurrently, returning the first
-// non-nil error. All goroutines are awaited before returning.
 func (e *Executor) execConcurrent(targets []string) error {
 	var waiter sync.WaitGroup
 	errCh := make(chan error, len(targets))
