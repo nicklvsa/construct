@@ -1,9 +1,10 @@
 hello {
     $ echo "hello, world" as out
+    $ echo "Something else" as test
 }
 
 build-lsp in editor/vscode/server {
-    $ go build -o construct-lsp .
+    $ go build -o construct-lsp . as out
 }
 
 build-ext < hello, build-lsp in editor/vscode {

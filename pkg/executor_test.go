@@ -427,7 +427,7 @@ func TestStripInlineCommentEscapedQuotes(t *testing.T) {
 // cleanCommandBody for non-$ lines.
 func TestResolveVarRefs(t *testing.T) {
 	lookup := func(name string) (string, bool) {
-		vals := map[string]string{"g": "GV", "name": "nick"}
+		vals := map[string]string{"g": "GV", "name": "nick", "build-lsp.0": "output1"}
 		v, ok := vals[name]
 		return v, ok
 	}
@@ -440,7 +440,8 @@ func TestResolveVarRefs(t *testing.T) {
 		{name: "no refs", line: "echo hi", want: "echo hi"},
 		{name: "single ref", line: "echo &g", want: "echo GV"},
 		{name: "ref embedded in text", line: "hello &name!", want: "hello nick!"},
-		{name: "multiple refs", line: "&g-&name", want: "GV-nick"},
+		{name: "multiple refs", line: "&g and &name", want: "GV and nick"},
+		{name: "hyphenated ref", line: "echo &build-lsp.0", want: "echo output1"},
 		{name: "unknown ref passed through", line: "x &nope y", want: "x &nope y"},
 		{name: "bare ampersand not a ref", line: "a & b", want: "a & b"},
 	}

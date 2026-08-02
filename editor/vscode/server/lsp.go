@@ -409,7 +409,7 @@ func extractRefName(s string) string {
 	}
 	var name strings.Builder
 	for _, r := range s[1:] {
-		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' || r == '.' {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' || r == '.' || r == '-' {
 			name.WriteRune(r)
 		} else {
 			break
@@ -754,7 +754,7 @@ func refAtPosition(line string, char int) (string, string) {
 	var name strings.Builder
 	for j := idx + 1; j < len(runes); j++ {
 		r := runes[j]
-		if !isIdentRune(r) && r != '.' && !(r >= '0' && r <= '9') {
+		if !isIdentRune(r) && r != '.' && r != '-' && !(r >= '0' && r <= '9') {
 			break
 		}
 		name.WriteRune(r)

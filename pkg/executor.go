@@ -464,7 +464,7 @@ func resolveVarRefs(line string, lookup func(string) (string, bool)) string {
 		if runes[i] == '&' {
 			var name strings.Builder
 			j := i + 1
-			for j < len(runes) && (unicode.IsLetter(runes[j]) || runes[j] == '_') {
+			for j < len(runes) && (unicode.IsLetter(runes[j]) || unicode.IsDigit(runes[j]) || runes[j] == '_' || runes[j] == '-') {
 				name.WriteRune(runes[j])
 				j++
 			}
