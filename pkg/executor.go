@@ -14,7 +14,7 @@ import (
 	"github.com/spf13/pflag"
 )
 
-// CommandError wraps a command execution failure with its exit code
+// CommandError wraps a command execution failure with its exit code.
 type CommandError struct {
 	Cmd      string
 	ExitCode int
@@ -32,7 +32,6 @@ type Executor struct {
 	StructuredParse *ParsedData
 	concurrent      bool
 	debug           bool
-	dryRun          bool
 	cloudFile       string
 	cloudDefs       map[string]Command
 	cloudLoaded     bool
@@ -41,23 +40,34 @@ type Executor struct {
 	mu              sync.Mutex
 }
 
+func defaultShell() (string, []string) {
+	if runtime.GOOS == "windows" {
+		return "cmd", []string{"/c"}
+	}
+	if sh := os.Getenv("SHELL"); sh != "" {
+		return sh, []string{"-c"}
+	}
+	return "/bin/sh", []string{"-c"}
+}
+
 func NewExecutor(data *ParsedData, concurrent bool, debug bool) *Executor {
 	cloudFile := os.Getenv("CONSTRUCT_CLOUD_FILE")
 	if cloudFile == "" {
 		cloudFile = "fakecloud.json"
 	}
 
-	shellName := "/bin/bash"
-	shellArgs := []string{"-c"}
-	if runtime.GOOS == "windows" {
-		shellName = "cmd"
-		shellArgs = []string{"/c"}
+	shellName, shellArgs := defaultShell()
+	if sh := os.Getenv("CONSTRUCT_SHELL"); sh != "" {
+		if runtime.GOOS == "windows" {
+			shellName, shellArgs = sh, []string{"/c"}
+		} else {
+			shellName, shellArgs = sh, []string{"-c"}
+		}
 	}
 
 	return &Executor{
 		concurrent:      concurrent,
 		debug:           debug,
-		dryRun:          false,
 		cloudFile:       cloudFile,
 		shellName:       shellName,
 		shellArgs:       shellArgs,
@@ -65,7 +75,6 @@ func NewExecutor(data *ParsedData, concurrent bool, debug bool) *Executor {
 	}
 }
 
-// loadCloudDefs reads and caches cloud command definitions on first access
 func (e *Executor) loadCloudDefs() error {
 	if e.cloudLoaded {
 		return nil
@@ -73,6 +82,8 @@ func (e *Executor) loadCloudDefs() error {
 
 	fileBytes, err := os.ReadFile(e.cloudFile)
 	if err != nil {
+		// A missing cloud file is fine (cloud features are opt-in); a parse
+		// error is not, so only swallow not-found-style errors.
 		e.cloudDefs = make(map[string]Command)
 		e.cloudLoaded = true
 		return nil
@@ -82,7 +93,7 @@ func (e *Executor) loadCloudDefs() error {
 	if err := json.Unmarshal(fileBytes, &defs); err != nil {
 		e.cloudDefs = make(map[string]Command)
 		e.cloudLoaded = true
-		return nil
+		return fmt.Errorf("failed to parse cloud file %q: %w", e.cloudFile, err)
 	}
 
 	e.cloudDefs = defs
@@ -90,8 +101,6 @@ func (e *Executor) loadCloudDefs() error {
 	return nil
 }
 
-// RegisterArgumentFlags registers pflag flags for all command arguments
-// so they can be resolved during execution
 func (e *Executor) RegisterArgumentFlags(flagSet *pflag.FlagSet) {
 	for _, cmd := range e.StructuredParse.Commands {
 		for _, arg := range cmd.Arguments {
@@ -101,27 +110,14 @@ func (e *Executor) RegisterArgumentFlags(flagSet *pflag.FlagSet) {
 	}
 }
 
-func (e *Executor) SetDryRun(dryRun bool) {
-	e.dryRun = dryRun
-}
-
-// SetDebug enables or disables debug mode for verbose output
 func (e *Executor) SetDebug(debug bool) {
 	e.debug = debug
 }
 
-func (e *Executor) Dump(outputLoc string) error {
-	data, err := json.MarshalIndent(e, "", "\t")
-	if err != nil {
-		return err
-	}
-
-	return os.WriteFile(outputLoc, data, 0644)
-}
-
 func (e *Executor) EvaluateCommand(command *Command) error {
-	execCommandBody := func(execCmd *Command) error {
-		for lineIdx, cmdLine := range execCmd.Body {
+	execCommandBody := func(target *Command, body []string) error {
+		isPrereq := target.IsPrereq
+		for lineIdx, cmdLine := range body {
 			if cmdLine == "" {
 				continue
 			}
@@ -134,27 +130,25 @@ func (e *Executor) EvaluateCommand(command *Command) error {
 				fullCommand = e.shellName + " " + strings.Join(args, " ")
 			}
 
-			// Debug output showing what command is being executed
 			if e.debug {
-				if execCmd.IsPrereq {
-					fmt.Printf("[DEBUG] Running prerequisite %s[%d]: %s\n", execCmd.Name, lineIdx, fullCommand)
-				} else if command.LazyEval != nil {
-					fmt.Printf("[DEBUG] Running lazy command for variable %s: %s\n", command.LazyEval.VarName, fullCommand)
-				} else {
-					fmt.Printf("[DEBUG] Running command %s[%d]: %s\n", execCmd.Name, lineIdx, fullCommand)
+				switch {
+				case isPrereq:
+					fmt.Printf("[DEBUG] Running prerequisite %s[%d]: %s\n", target.Name, lineIdx, fullCommand)
+				case target.LazyEval != nil:
+					fmt.Printf("[DEBUG] Running lazy command for variable %s: %s\n", target.LazyEval.VarName, fullCommand)
+				default:
+					fmt.Printf("[DEBUG] Running command %s[%d]: %s\n", target.Name, lineIdx, fullCommand)
 				}
 			}
 
-			// Capture both stdout and stderr
 			var stdout, stderr []byte
 			var err error
 			if e.debug {
-				stdout, stderr, err = captureOutputWithDebug(cmd)
+				stdout, stderr, err = capture(cmd)
 			} else {
 				stdout, err = cmd.Output()
 			}
 
-			// Combine output for display
 			output := stdout
 			if len(stderr) > 0 {
 				if len(output) > 0 {
@@ -163,7 +157,6 @@ func (e *Executor) EvaluateCommand(command *Command) error {
 				output = append(output, stderr...)
 			}
 
-			// Handle command errors with exit code propagation
 			if err != nil {
 				exitCode := 1
 				if ee, ok := err.(*exec.ExitError); ok {
@@ -177,7 +170,6 @@ func (e *Executor) EvaluateCommand(command *Command) error {
 					}
 				}
 
-				// Build fullCommand lazily for the error (only needed if not already built for debug)
 				if fullCommand == "" {
 					fullCommand = e.shellName + " " + strings.Join(args, " ")
 				}
@@ -191,30 +183,27 @@ func (e *Executor) EvaluateCommand(command *Command) error {
 
 			strOutput := strings.TrimSpace(string(output))
 
-			if execCmd.IsPrereq {
+			switch {
+			case isPrereq:
 				e.mu.Lock()
-				execCmd.PrereqOutput = append(execCmd.PrereqOutput, strOutput)
+				target.PrereqOutput = append(target.PrereqOutput, strOutput)
 				e.mu.Unlock()
 				if e.debug {
 					fmt.Printf("[DEBUG] Prereq output: %s\n", strOutput)
 				}
-				continue
-			}
-
-			if command.LazyEval != nil {
+			case target.LazyEval != nil:
 				e.mu.Lock()
-				variable, err := e.StructuredParse.GetVariable(command.LazyEval.VarName, command.LazyEval.Scope)
+				variable, err := e.StructuredParse.GetVariable(target.LazyEval.VarName, target.LazyEval.Scope)
 				if err != nil {
 					e.mu.Unlock()
 					return err
 				}
-
 				variable.Value = strOutput
 				e.mu.Unlock()
 				if e.debug {
-					fmt.Printf("[DEBUG] Set variable %s.%s = %s\n", command.LazyEval.Scope, command.LazyEval.VarName, strOutput)
+					fmt.Printf("[DEBUG] Set variable %s.%s = %s\n", target.LazyEval.Scope, target.LazyEval.VarName, strOutput)
 				}
-			} else {
+			default:
 				fmt.Println(strOutput)
 			}
 		}
@@ -222,35 +211,30 @@ func (e *Executor) EvaluateCommand(command *Command) error {
 		return nil
 	}
 
-	// cleanCommandBody resolves variable references and arguments in the
-	// command body, returning a new body slice without mutating the original.
-	cleanCommandBody := func(uncleanedCommand *Command) ([]string, error) {
-		if len(uncleanedCommand.Prereqs) > 0 {
-			for _, prereq := range uncleanedCommand.PrereqCmds {
+	// cleanCommandBody resolves &variable references and arguments, returning a
+	// new body slice. It does not mutate the command's stored Body.
+	cleanCommandBody := func(cmd *Command) ([]string, error) {
+		if len(cmd.Prereqs) > 0 {
+			for _, prereq := range cmd.PrereqCmds {
 				for idx, arg := range prereq.PrereqOutput {
-					var varName strings.Builder
-					varName.WriteString(prereq.Name)
-					varName.WriteByte('.')
-					varName.WriteString(fmt.Sprintf("%d", idx))
+					varName := prereq.Name + "." + fmt.Sprintf("%d", idx)
 					e.mu.Lock()
 					e.StructuredParse.AddVariable(&Variable{
-						Name:  strings.TrimSpace(varName.String()),
+						Name:  strings.TrimSpace(varName),
 						Value: strings.TrimSpace(arg),
-						Scope: uncleanedCommand.Name,
+						Scope: cmd.Name,
 					})
 					e.mu.Unlock()
 				}
 			}
 		}
 
-		cleanedBody := make([]string, len(uncleanedCommand.Body))
-		copy(cleanedBody, uncleanedCommand.Body)
+		cleanedBody := make([]string, len(cmd.Body))
+		copy(cleanedBody, cmd.Body)
 
-		// Pre-build argument set for O(1) lookup: piece -> flag lookup key
-		argFlags := make(map[string]string, len(uncleanedCommand.Arguments))
-		for _, arg := range uncleanedCommand.Arguments {
-			key := uncleanedCommand.Name + ":" + arg.Name
-			argFlags[key] = key
+		argFlags := make(map[string]bool, len(cmd.Arguments))
+		for _, arg := range cmd.Arguments {
+			argFlags[cmd.Name+":"+arg.Name] = true
 		}
 
 		for lineIdx, line := range cleanedBody {
@@ -259,32 +243,29 @@ func (e *Executor) EvaluateCommand(command *Command) error {
 				continue
 			}
 
+			// `$` execution lines may contain argument placeholders and &vars.
 			if line[0] == '$' {
 				executionLine := strings.TrimSpace(line[1:])
-				linePieces := strings.Split(executionLine, " ")
+				linePieces := strings.Fields(executionLine)
 
 				for pieceIdx, piece := range linePieces {
-					piece = strings.TrimSpace(piece)
-
-					// Substitute variable references (&varName)
 					if idx := strings.IndexByte(piece, '&'); idx >= 0 {
 						varName := piece[idx+1:]
-						if variable, err := e.StructuredParse.GetVariable(varName, uncleanedCommand.Name); err == nil && variable != nil {
+						if variable, err := e.StructuredParse.GetVariable(varName, cmd.Name); err == nil && variable != nil {
 							linePieces[pieceIdx] = strings.ReplaceAll(piece, "&"+varName, variable.Value)
 						}
 					}
 
-					// O(1) argument lookup instead of iterating all args
-					lookupKey := uncleanedCommand.Name + ":" + piece
-					if _, ok := argFlags[lookupKey]; ok {
+					lookupKey := cmd.Name + ":" + piece
+					if argFlags[lookupKey] {
 						if e.debug {
-							fmt.Printf("[DEBUG] Handling argument --%s for command %s\n", piece, uncleanedCommand.Name)
+							fmt.Printf("[DEBUG] Handling argument --%s for command %s\n", piece, cmd.Name)
 						}
 
 						v, err := pflag.CommandLine.GetString(lookupKey)
 						if err != nil || v == "" {
 							isOptional := false
-							for _, arg := range uncleanedCommand.Arguments {
+							for _, arg := range cmd.Arguments {
 								if arg.Name == piece {
 									isOptional = arg.IsOptional
 									break
@@ -300,50 +281,35 @@ func (e *Executor) EvaluateCommand(command *Command) error {
 				}
 
 				cleanedBody[lineIdx] = strings.Join(linePieces, " ")
+				continue
 			}
 
-			for bodyIdx, bodyChar := range line {
-				if bodyChar == '&' {
-					var varName strings.Builder
-					for _, varRef := range line[bodyIdx+1:] {
-						if !unicode.IsLetter(varRef) && varRef != '_' {
-							break
-						}
-
-						varName.WriteRune(varRef)
-					}
-
-					if varName.Len() == 0 {
-						continue
-					}
-
-					name := varName.String()
-					varDef, err := e.StructuredParse.GetVariable(name, uncleanedCommand.Name)
-					if err == nil && varDef != nil {
-						// Build "&name" without fmt.Sprintf
-						var pattern strings.Builder
-						pattern.WriteByte('&')
-						pattern.WriteString(name)
-						cleanedBody[lineIdx] = strings.ReplaceAll(cleanedBody[lineIdx], pattern.String(), varDef.Value)
-					}
+			// Non-$ lines: resolve any &variable references inline.
+			cleanedBody[lineIdx] = resolveVarRefs(line, func(name string) (string, bool) {
+				v, err := e.StructuredParse.GetVariable(name, cmd.Name)
+				if err != nil || v == nil {
+					return "", false
 				}
-			}
+				return v.Value, true
+			})
 		}
 
 		return cleanedBody, nil
 	}
 
-	for _, prereq := range command.Prereqs {
+	// Run prerequisites first. Each prereq is executed with a copy of its body
+	// so repeated invocations don't accumulate substitutions.
+	for _, prereqName := range command.Prereqs {
 		if command.PrereqCmds == nil {
 			command.PrereqCmds = []*Command{}
 		}
 
-		prereq = strings.TrimSpace(prereq)
-		if len(prereq) <= 0 {
+		prereqName = strings.TrimSpace(prereqName)
+		if prereqName == "" {
 			continue
 		}
 
-		preCmd, err := e.StructuredParse.GetCommand(prereq)
+		preCmd, err := e.StructuredParse.GetCommand(prereqName)
 		if err != nil {
 			return err
 		}
@@ -357,13 +323,12 @@ func (e *Executor) EvaluateCommand(command *Command) error {
 			return err
 		}
 
-		cleanedBody, err := cleanCommandBody(preCmd)
+		preBody, err := cleanCommandBody(preCmd)
 		if err != nil {
 			return err
 		}
-		preCmd.Body = cleanedBody
 
-		if err := execCommandBody(preCmd); err != nil {
+		if err := execCommandBody(preCmd, preBody); err != nil {
 			return err
 		}
 
@@ -374,13 +339,40 @@ func (e *Executor) EvaluateCommand(command *Command) error {
 		return err
 	}
 
-	cleanedBody, err := cleanCommandBody(command)
+	body, err := cleanCommandBody(command)
 	if err != nil {
 		return err
 	}
-	command.Body = cleanedBody
 
-	return execCommandBody(command)
+	return execCommandBody(command, body)
+}
+
+// resolveVarRefs replaces &name references in a line using lookup, leaving
+// unknown references untouched.
+func resolveVarRefs(line string, lookup func(string) (string, bool)) string {
+	var result strings.Builder
+	runes := []rune(line)
+	i := 0
+	for i < len(runes) {
+		if runes[i] == '&' {
+			var name strings.Builder
+			j := i + 1
+			for j < len(runes) && (unicode.IsLetter(runes[j]) || runes[j] == '_') {
+				name.WriteRune(runes[j])
+				j++
+			}
+			if name.Len() > 0 {
+				if val, ok := lookup(name.String()); ok {
+					result.WriteString(val)
+					i = j
+					continue
+				}
+			}
+		}
+		result.WriteRune(runes[i])
+		i++
+	}
+	return result.String()
 }
 
 func (e *Executor) tryApplyCloudBody(cmd *Command) error {
@@ -393,18 +385,11 @@ func (e *Executor) tryApplyCloudBody(cmd *Command) error {
 		return nil
 	}
 
-	// cmd.Prereqs = external.Prereqs
-	// cmd.PrereqCmds = external.PrereqCmds
-	// cmd.PrereqOutput = external.PrereqOutput
-
-	// Append mode by default. Maybe make this configurable?
 	cmd.Body = append(cmd.Body, external.Body...)
-
 	return nil
 }
 
 func (e *Executor) Exec(commands []string) error {
-	// Only run the default command when no specific commands are provided
 	if len(commands) == 0 {
 		defaultCommand, err := e.StructuredParse.GetDefaultCommand()
 		if err == nil && defaultCommand != nil {
@@ -427,69 +412,65 @@ func (e *Executor) Exec(commands []string) error {
 		}
 	}
 
-	var waiter sync.WaitGroup
-	errData := make(chan error)
-
+	targets := make([]string, 0, len(commands))
 	for _, cmdName := range commands {
-		if cmdName[0] == '-' {
+		if cmdName == "" || cmdName[0] == '-' {
 			continue
 		}
+		targets = append(targets, cmdName)
+	}
 
-		if e.concurrent {
-			waiter.Add(1)
-			go e.processCommand(cmdName, errData, &waiter)
+	if e.concurrent {
+		return e.execConcurrent(targets)
+	}
 
-			continue
-		}
-
-		if err := e.processCommand(cmdName, nil, nil); err != nil {
+	for _, cmdName := range targets {
+		if err := e.processCommand(cmdName); err != nil {
 			return err
 		}
 	}
 
-	if e.concurrent {
-		go func() {
-			waiter.Wait()
-			close(errData)
-		}()
+	return nil
+}
 
-		for data := range errData {
-			if data != nil {
-				return data
-			}
-		}
+// execConcurrent runs the named commands concurrently, returning the first
+// non-nil error. All goroutines are awaited before returning.
+func (e *Executor) execConcurrent(targets []string) error {
+	var waiter sync.WaitGroup
+	errCh := make(chan error, len(targets))
+
+	for _, cmdName := range targets {
+		waiter.Add(1)
+		go func(name string) {
+			defer waiter.Done()
+			errCh <- e.processCommand(name)
+		}(cmdName)
 	}
 
-	return nil
+	go func() {
+		waiter.Wait()
+		close(errCh)
+	}()
+
+	var firstErr error
+	for err := range errCh {
+		if err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
 }
 
 func (e *Executor) Execute(commands []string) error {
 	return e.Exec(commands)
 }
 
-func (e *Executor) processCommand(name string, resp chan<- error, wg *sync.WaitGroup) error {
-	if wg != nil {
-		defer wg.Done()
-	}
-
+func (e *Executor) processCommand(name string) error {
 	command, err := e.StructuredParse.GetCommand(name)
 	if err != nil {
-		if e.concurrent {
-			resp <- err
-		} else {
-			return err
-		}
+		return err
 	}
-
-	if err := e.EvaluateCommand(command); err != nil {
-		if e.concurrent {
-			resp <- err
-		} else {
-			return err
-		}
-	}
-
-	return nil
+	return e.EvaluateCommand(command)
 }
 
 func (e *Executor) getCloudDefinition(name string) (*Command, error) {
@@ -504,9 +485,8 @@ func (e *Executor) getCloudDefinition(name string) (*Command, error) {
 	return nil, fmt.Errorf("%s command not found in cloud", name)
 }
 
-// captureOutputWithDebug captures both stdout and stderr from a command.
-// Both streams are read concurrently to prevent pipe buffer deadlocks.
-func captureOutputWithDebug(cmd *exec.Cmd) (stdout, stderr []byte, err error) {
+// capture reads stdout and stderr concurrently to avoid pipe-buffer deadlock.
+func capture(cmd *exec.Cmd) (stdout, stderr []byte, err error) {
 	stdoutPipe, err := cmd.StdoutPipe()
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to create stdout pipe: %w", err)
@@ -521,7 +501,6 @@ func captureOutputWithDebug(cmd *exec.Cmd) (stdout, stderr []byte, err error) {
 		return nil, nil, fmt.Errorf("failed to start command: %w", err)
 	}
 
-	// Read both streams concurrently to avoid deadlock
 	var stdoutBytes, stderrBytes []byte
 	var stdoutErr, stderrErr error
 	var wg sync.WaitGroup
@@ -552,4 +531,3 @@ func captureOutputWithDebug(cmd *exec.Cmd) (stdout, stderr []byte, err error) {
 
 	return stdoutBytes, stderrBytes, nil
 }
-

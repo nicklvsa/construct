@@ -5,11 +5,6 @@ import (
 	"testing"
 )
 
-// =============================================================================
-// Tests for new helper functions (Phase 1 Refactoring)
-// These tests demonstrate the improved testability of the refactored parser
-// =============================================================================
-
 func TestParseCommandName(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -171,39 +166,39 @@ func TestExtractPrerequisiteString(t *testing.T) {
 
 func TestParseArgumentName(t *testing.T) {
 	tests := []struct {
-		name          string
-		input         string
-		expectedName  string
+		name             string
+		input            string
+		expectedName     string
 		expectedOptional bool
 	}{
 		{
-			name:            "simple argument",
-			input:           "arg1",
-			expectedName:    "arg1",
+			name:             "simple argument",
+			input:            "arg1",
+			expectedName:     "arg1",
 			expectedOptional: false,
 		},
 		{
-			name:            "optional argument",
-			input:           "opt arg2",
-			expectedName:    "arg2",
+			name:             "optional argument",
+			input:            "opt arg2",
+			expectedName:     "arg2",
 			expectedOptional: true,
 		},
 		{
-			name:            "argument with spaces",
-			input:           "  arg3  ",
-			expectedName:    "arg3",
+			name:             "argument with spaces",
+			input:            "  arg3  ",
+			expectedName:     "arg3",
 			expectedOptional: false,
 		},
 		{
-			name:            "optional argument with spaces",
-			input:           "  opt  arg4  ",
-			expectedName:    "arg4",
+			name:             "optional argument with spaces",
+			input:            "  opt  arg4  ",
+			expectedName:     "arg4",
 			expectedOptional: true,
 		},
 		{
-			name:            "empty string",
-			input:           "",
-			expectedName:    "",
+			name:             "empty string",
+			input:            "",
+			expectedName:     "",
 			expectedOptional: false,
 		},
 	}
@@ -277,8 +272,8 @@ func TestParseArgumentList(t *testing.T) {
 			wantErr:  false,
 		},
 		{
-			name:     "trailing comma",
-			input:    "arg1,",
+			name:  "trailing comma",
+			input: "arg1,",
 			expected: []*Argument{
 				{Name: "arg1", IsOptional: false},
 			},
@@ -422,11 +417,11 @@ func TestNewParser(t *testing.T) {
 // TestParseVariable tests variable parsing
 func TestParseVariable(t *testing.T) {
 	tests := []struct {
-		name          string
-		input         string
-		expectName    string
-		expectValue   string
-		expectScope   string
+		name        string
+		input       string
+		expectName  string
+		expectValue string
+		expectScope string
 	}{
 		{
 			name:        "simple variable",
@@ -516,13 +511,13 @@ func TestParseCommand(t *testing.T) {
 			isDefault:  false,
 		},
 		{
-			name:       "command with prerequisites",
-			input:      "cmdWithPrereqs (arg0) < prerun, another {\n    echo test\n}",
-			expectName: "cmdWithPrereqs",
-			expectArgs: 1,
+			name:          "command with prerequisites",
+			input:         "cmdWithPrereqs (arg0) < prerun, another {\n    echo test\n}",
+			expectName:    "cmdWithPrereqs",
+			expectArgs:    1,
 			expectPrereqs: 2,
-			expectBody: 1,
-			isDefault:  false,
+			expectBody:    1,
+			isDefault:     false,
 		},
 		{
 			name:       "default command",
@@ -930,4 +925,135 @@ func TestScopedVariableParsing(t *testing.T) {
 	if found == nil {
 		t.Errorf("scoped variable not found")
 	}
+}
+
+// TestTryEvalExpression covers the three resolution forms (@env, &ref, and the
+// $ lazy command) plus plain-text passthrough.
+func TestTryEvalExpression(t *testing.T) {
+	t.Run("plain text passes through unchanged", func(t *testing.T) {
+		p := &Parser{Data: &ParsedData{}}
+		name, scope := "x", "global"
+		got := p.tryEvalExpression("hello world", &name, &scope)
+		if got != "hello world" {
+			t.Errorf("got %q, want %q", got, "hello world")
+		}
+	})
+
+	t.Run("@env expands environment variable", func(t *testing.T) {
+		t.Setenv("CONSTRUCT_TEST_ENV", "envvalue")
+		p := &Parser{Data: &ParsedData{}}
+		name, scope := "x", "global"
+		got := p.tryEvalExpression("v=@CONSTRUCT_TEST_ENV", &name, &scope)
+		if got != "v=envvalue" {
+			t.Errorf("got %q, want %q", got, "v=envvalue")
+		}
+	})
+
+	t.Run("@env undefined expands to empty", func(t *testing.T) {
+		p := &Parser{Data: &ParsedData{}}
+		name, scope := "x", "global"
+		got := p.tryEvalExpression("[@CONSTRUCT_NOPE_NOT_SET]", &name, &scope)
+		if got != "[]" {
+			t.Errorf("got %q, want %q", got, "[]")
+		}
+	})
+
+	t.Run("&ref resolves global variable", func(t *testing.T) {
+		p := &Parser{Data: &ParsedData{}}
+		p.Data.Variables = append(p.Data.Variables, &Variable{Name: "g", Value: "GVAL", Scope: "global"})
+		name, scope := "x", "global"
+		got := p.tryEvalExpression("&g!", &name, &scope)
+		if got != "GVAL!" {
+			t.Errorf("got %q, want %q", got, "GVAL!")
+		}
+	})
+
+	t.Run("&ref resolves scoped variable", func(t *testing.T) {
+		p := &Parser{Data: &ParsedData{}}
+		p.Data.Variables = append(p.Data.Variables, &Variable{Name: "loc", Value: "LOCVAL", Scope: "mycmd"})
+		name, scope := "x", "mycmd"
+		got := p.tryEvalExpression("&loc", &name, &scope)
+		if got != "LOCVAL" {
+			t.Errorf("got %q, want %q", got, "LOCVAL")
+		}
+	})
+
+	t.Run("unknown &ref leaves no text (findVariable fails silently)", func(t *testing.T) {
+		p := &Parser{Data: &ParsedData{}}
+		name, scope := "x", "global"
+		// The reference is consumed but resolves to nothing.
+		got := p.tryEvalExpression("a&missing b", &name, &scope)
+		if got != "a b" {
+			t.Errorf("got %q, want %q", got, "a b")
+		}
+	})
+
+	t.Run("$ creates a lazy command and stops evaluation", func(t *testing.T) {
+		p := &Parser{Data: &ParsedData{}}
+		name, scope := "myvar", "global"
+		_ = p.tryEvalExpression("$ echo hi", &name, &scope)
+		if len(p.Data.Commands) != 1 {
+			t.Fatalf("expected 1 lazy command, got %d", len(p.Data.Commands))
+		}
+		lc := p.Data.Commands[0]
+		if lc.LazyEval == nil {
+			t.Fatal("expected LazyEval to be set")
+		}
+		if lc.LazyEval.VarName != "myvar" || lc.LazyEval.Scope != "global" {
+			t.Errorf("lazy eval = %+v", lc.LazyEval)
+		}
+		wantBody := []string{"$ echo hi"}
+		if len(lc.Body) != len(wantBody) || lc.Body[0] != wantBody[0] {
+			t.Errorf("body = %#v, want %#v", lc.Body, wantBody)
+		}
+	})
+
+	t.Run("$ without varName/context is treated as literal", func(t *testing.T) {
+		p := &Parser{Data: &ParsedData{}}
+		// No varName/scope => the $ branch is skipped, $ stays literal.
+		got := p.tryEvalExpression("$5", nil, nil)
+		if got != "$5" {
+			t.Errorf("got %q, want %q", got, "$5")
+		}
+	})
+}
+
+// TestParseVarValidation covers the new validation paths in parseVar.
+func TestParseVarValidation(t *testing.T) {
+	t.Run("name containing var is extracted correctly", func(t *testing.T) {
+		p := &Parser{Data: &ParsedData{}}
+		if err := p.parseVar("var var_name = x", "global"); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(p.Data.Variables) != 1 {
+			t.Fatalf("expected 1 variable, got %d", len(p.Data.Variables))
+		}
+		if p.Data.Variables[0].Name != "var_name" {
+			t.Errorf("name = %q, want %q", p.Data.Variables[0].Name, "var_name")
+		}
+	})
+
+	t.Run("empty name returns an error", func(t *testing.T) {
+		p := &Parser{Data: &ParsedData{}}
+		err := p.parseVar("var = x", "global")
+		if err == nil {
+			t.Fatal("expected error for empty variable name, got nil")
+		}
+		if len(p.Data.Variables) != 0 {
+			t.Errorf("no variable should be created on error, got %d", len(p.Data.Variables))
+		}
+	})
+
+	t.Run("bare var with no equals creates empty-valued variable", func(t *testing.T) {
+		p := &Parser{Data: &ParsedData{}}
+		if err := p.parseVar("var onlyname", "global"); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(p.Data.Variables) != 1 || p.Data.Variables[0].Name != "onlyname" {
+			t.Fatalf("expected single variable 'onlyname', got %#v", p.Data.Variables)
+		}
+		if p.Data.Variables[0].Value != "" {
+			t.Errorf("expected empty value, got %q", p.Data.Variables[0].Value)
+		}
+	})
 }

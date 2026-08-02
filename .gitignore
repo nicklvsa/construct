@@ -2,3 +2,7 @@
 *.env
 diagram.md
 debug.json
+
+# Compiled binary (the README suggests `go build -o construct`)
+/construct
+/construct.exe

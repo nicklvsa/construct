@@ -9,15 +9,13 @@ import (
 )
 
 type ParsedData struct {
-	Variables []*Variable      `json:"variables"`
-	Commands  []*Command       `json:"commands"`
+	Variables []*Variable `json:"variables"`
+	Commands  []*Command  `json:"commands"`
 
-	// Index maps for O(1) lookups, built after parsing
 	variableMap map[string]*Variable // key: "scope.name"
 	commandMap  map[string]*Command  // key: command name
 }
 
-// buildIndexMaps populates the lookup maps for O(1) access
 func (p *ParsedData) buildIndexMaps() {
 	p.variableMap = make(map[string]*Variable, len(p.Variables))
 	p.commandMap = make(map[string]*Command, len(p.Commands))
@@ -30,7 +28,6 @@ func (p *ParsedData) buildIndexMaps() {
 	}
 }
 
-// AddVariable appends a variable and updates the index map
 func (p *ParsedData) AddVariable(v *Variable) {
 	p.Variables = append(p.Variables, v)
 	if p.variableMap != nil {
@@ -45,12 +42,10 @@ func (p *ParsedData) GetVariable(variableName, scope string) (*Variable, error) 
 		scope = "global"
 	}
 
-	// O(1) scoped lookup
 	if p.variableMap != nil {
 		if v, ok := p.variableMap[scope+"."+variableName]; ok {
 			return v, nil
 		}
-		// Fallback to global scope
 		if scope != "global" {
 			if v, ok := p.variableMap["global."+variableName]; ok {
 				return v, nil
@@ -59,7 +54,6 @@ func (p *ParsedData) GetVariable(variableName, scope string) (*Variable, error) 
 		return nil, fmt.Errorf("cannot find variable with name %s", variableName)
 	}
 
-	// Fallback for when maps aren't built yet (during parsing)
 	for _, variable := range p.Variables {
 		if variable.Name == variableName && variable.Scope == scope {
 			return variable, nil
@@ -102,9 +96,9 @@ func (p *ParsedData) GetDefaultCommand() (*Command, error) {
 }
 
 type Parser struct {
-	InputFile string      `json:"-"`
-	Data      *ParsedData `json:"data"`
-	Lines     []string    `json:"-"`
+	InputFile string
+	Data      *ParsedData
+	Lines     []string
 }
 
 type Argument struct {
@@ -150,7 +144,6 @@ func NewParser(file string) (*Parser, error) {
 }
 
 func (p *Parser) findVariable(varName string, scope *string) (*Variable, error) {
-	// First try to find a variable matching the requested scope
 	if scope != nil && *scope != "" {
 		for _, v := range p.Data.Variables {
 			if v.Name == varName && v.Scope == *scope {
@@ -159,7 +152,6 @@ func (p *Parser) findVariable(varName string, scope *string) (*Variable, error) 
 		}
 	}
 
-	// Fall back to global scope
 	for _, v := range p.Data.Variables {
 		if v.Name == varName && v.Scope == "global" {
 			return v, nil
@@ -220,14 +212,14 @@ func (p *Parser) tryEvalExpression(expression string, varName *string, varScope 
 			}
 		}
 
+		// A `$` in a variable definition creates a lazy command: the variable's
+		// value is computed by running the command at execution time.
 		if char == '$' && varName != nil && varScope != nil {
 			restOfLine := strings.TrimSpace(string(runes[i+1:]))
 			p.Data.Commands = append(p.Data.Commands, &Command{
-				Name:            fmt.Sprintf("__lazy_%s_%s", *varName, *varScope),
-				LazyEval:        &LazyOutput{VarName: *varName, Scope: *varScope},
-				IsDefault:       false,
-				CloudAccessible: false,
-				Body:            []string{fmt.Sprintf("$ %s", restOfLine)},
+				Name:     fmt.Sprintf("__lazy_%s_%s", *varName, *varScope),
+				LazyEval: &LazyOutput{VarName: *varName, Scope: *varScope},
+				Body:     []string{fmt.Sprintf("$ %s", restOfLine)},
 			})
 			i = len(runes)
 			continue
@@ -242,10 +234,18 @@ func (p *Parser) tryEvalExpression(expression string, varName *string, varScope 
 
 func (p *Parser) parseVar(line string, scope string) error {
 	pieces := strings.SplitN(line, "=", 2)
+	if len(pieces) == 0 {
+		return fmt.Errorf("invalid variable declaration: %q", line)
+	}
+
+	// Name is everything after the "var" keyword. TrimPrefix is robust against
+	// names that happen to contain "var" (e.g. "var var_name = x").
+	variableName := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(pieces[0]), "var"))
+	if variableName == "" {
+		return fmt.Errorf("variable declaration is missing a name: %q", line)
+	}
 
 	var variableValue string
-	variableName := strings.TrimSpace(strings.Split(pieces[0], "var")[1])
-
 	if len(pieces) > 1 {
 		variableValue = p.tryEvalExpression(pieces[1], &variableName, &scope)
 	}
@@ -259,29 +259,14 @@ func (p *Parser) parseVar(line string, scope string) error {
 	return nil
 }
 
-// =============================================================================
-// Helper Functions for Command Parsing
-// These functions extract specific parts of a command declaration
-// Each function is pure, testable, and has a single responsibility
-// =============================================================================
-
-// parseCommandName extracts the command name from a command declaration line
-// Examples:
-//
-//	"build {" -> "build"
-//	"test (arg1, arg2) {" -> "test"
-//	"|cloudcmd| {" -> "cloudcmd"
 func parseCommandName(line string) string {
 	line = strings.TrimSpace(line)
 
-	// Handle cloud command markers: |commandname|
+	// Cloud command markers: |commandname|
 	if len(line) >= 2 && line[0] == '|' {
-		// Find the second pipe
 		endIdx := strings.Index(line[1:], "|")
 		if endIdx > 0 {
-			// Extract name between pipes
 			name := line[1 : endIdx+1]
-			// Check if followed by command syntax
 			remainder := strings.TrimSpace(line[endIdx+2:])
 			if strings.HasPrefix(remainder, "(") || strings.HasPrefix(remainder, "<") || strings.HasPrefix(remainder, "{") {
 				return strings.TrimSpace(name)
@@ -289,7 +274,6 @@ func parseCommandName(line string) string {
 		}
 	}
 
-	// Find end of command name (stops at '(', '<', or '{')
 	for i, r := range line {
 		if r == '(' || r == '<' || r == '{' {
 			return strings.TrimSpace(line[:i])
@@ -299,8 +283,6 @@ func parseCommandName(line string) string {
 	return strings.TrimSpace(line)
 }
 
-// extractArgumentString extracts the argument string from a command line
-// Example: "run (arg1, arg2) < prereq {" -> "arg1, arg2"
 func extractArgumentString(line string) string {
 	start := strings.Index(line, "(")
 	if start == -1 {
@@ -315,15 +297,12 @@ func extractArgumentString(line string) string {
 	return strings.TrimSpace(line[start+1 : start+end])
 }
 
-// extractPrerequisiteString extracts the prerequisite string from a command line
-// Example: "run (arg1) < build, test {" -> "build, test"
 func extractPrerequisiteString(line string) string {
 	start := strings.Index(line, "<")
 	if start == -1 {
 		return ""
 	}
 
-	// Find the opening brace to know where prereqs end
 	end := strings.Index(line[start:], "{")
 	if end == -1 {
 		return ""
@@ -332,27 +311,19 @@ func extractPrerequisiteString(line string) string {
 	return strings.TrimSpace(line[start+1 : start+end])
 }
 
-// parseArgumentName parses a single argument name and determines if it's optional
-// Examples:
-//
-//	"arg1" -> ("arg1", false)
-//	"opt arg2" -> ("arg2", true)
 func parseArgumentName(argStr string) (string, bool) {
 	argStr = strings.TrimSpace(argStr)
 	if argStr == "" {
 		return "", false
 	}
 
-	// Check for "opt" keyword
 	parts := strings.Fields(argStr)
 	if len(parts) == 0 {
 		return "", false
 	}
 
-	// Last part is always the argument name
 	argName := parts[len(parts)-1]
 
-	// Check if any part before the name is "opt"
 	isOptional := false
 	for _, part := range parts[:len(parts)-1] {
 		if part == "opt" {
@@ -364,11 +335,6 @@ func parseArgumentName(argStr string) (string, bool) {
 	return argName, isOptional
 }
 
-// parseArgumentList parses the argument string into Argument structs
-// Examples:
-//
-//	"arg1, opt arg2" -> [{arg1, false}, {arg2, true}]
-//	"arg1" -> [{arg1, false}]
 func parseArgumentList(argStr string) ([]*Argument, error) {
 	argStr = strings.TrimSpace(argStr)
 	if argStr == "" {
@@ -398,11 +364,6 @@ func parseArgumentList(argStr string) ([]*Argument, error) {
 	return args, nil
 }
 
-// parsePrerequisiteList parses the prerequisite string into a list of prereq names
-// Examples:
-//
-//	"build, test" -> ["build", "test"]
-//	"build" -> ["build"]
 func parsePrerequisiteList(prereqStr string) ([]string, error) {
 	prereqStr = strings.TrimSpace(prereqStr)
 	if prereqStr == "" {
@@ -422,22 +383,19 @@ func parsePrerequisiteList(prereqStr string) ([]string, error) {
 	return prereqs, nil
 }
 
-// parseCommandBody extracts the command body starting from the given line index
-// Returns the body lines and the index of the line after the closing brace
 func (p *Parser) parseCommandBody(startIdx int, commandName string) ([]string, int, error) {
 	var body []string
 
 	for i := startIdx; i < len(p.Lines); i++ {
 		line := p.Lines[i]
+		trimmedLine := strings.TrimSpace(line)
 
-		// Check for closing brace BEFORE trimming
-		if strings.Contains(line, "}") {
-			// Found the end of the body - return what we have so far
+		// A closing brace only ends the block when it begins the trimmed line,
+		// so braces inside shell commands (e.g. `awk '{print $1}'`) are preserved.
+		if strings.HasPrefix(trimmedLine, "}") {
 			return body, i + 1, nil
 		}
 
-		// Trim and check if empty
-		trimmedLine := strings.TrimSpace(line)
 		if trimmedLine == "" {
 			continue
 		}
@@ -448,51 +406,33 @@ func (p *Parser) parseCommandBody(startIdx int, commandName string) ([]string, i
 	return nil, startIdx, fmt.Errorf("unclosed command body for '%s' (missing '}')", commandName)
 }
 
-// =============================================================================
-// Refactored parseCommand - Clean and readable!
-// =============================================================================
-
 func (p *Parser) parseCommand(idx int, line string, isDefault bool) error {
-	// Check if this line actually contains a command body
-	// If not, just skip it (it might be a line with just a command name)
 	trimmedLine := strings.TrimSpace(line)
 	if !strings.Contains(trimmedLine, "{") {
-		// No command body, skip
 		return nil
 	}
 
-	// Step 1: Extract the command name (parseCommandName handles cloud markers)
 	commandName := parseCommandName(line)
 
-	// Determine if this is a cloud command
-	// We check the original line for pipe markers
-	cloudAccessible := false
-	if len(trimmedLine) >= 2 && trimmedLine[0] == '|' {
-		// This is a cloud command
-		cloudAccessible = true
-	}
+	cloudAccessible := len(trimmedLine) >= 2 && trimmedLine[0] == '|'
 
-	// Step 2: Parse arguments
-	argStr := extractArgumentString(line)
-	commandArgs, err := parseArgumentList(argStr)
+	commandArgs, err := parseArgumentList(extractArgumentString(line))
 	if err != nil {
 		return fmt.Errorf("failed to parse arguments for '%s': %w", commandName, err)
 	}
 
-	// Step 3: Parse prerequisites
-	prereqStr := extractPrerequisiteString(line)
-	prereqs, err := parsePrerequisiteList(prereqStr)
+	prereqs, err := parsePrerequisiteList(extractPrerequisiteString(line))
 	if err != nil {
 		return fmt.Errorf("failed to parse prerequisites for '%s': %w", commandName, err)
 	}
 
-	// Step 4: Parse body
 	rawBody, _, err := p.parseCommandBody(idx+1, commandName)
 	if err != nil {
 		return err
 	}
 
-	// Step 5: Process body (handle local variables)
+	// Local variable declarations ("var ...") inside a body are extracted into
+	// command scope and removed from the executable body.
 	var commandBody []string
 	for _, cmdLine := range rawBody {
 		cmdLine = strings.TrimSpace(cmdLine)
@@ -505,13 +445,11 @@ func (p *Parser) parseCommand(idx int, line string, isDefault bool) error {
 		commandBody = append(commandBody, cmdLine)
 	}
 
-	// Step 6: Create and register the command
 	if commandName != "" && len(commandBody) > 0 {
 		p.Data.Commands = append(p.Data.Commands, &Command{
 			Name:            commandName,
 			CloudAccessible: cloudAccessible,
 			IsDefault:       isDefault,
-			IsPrereq:        false,
 			Arguments:       commandArgs,
 			Prereqs:         prereqs,
 			Body:            commandBody,
@@ -589,19 +527,26 @@ func (p *Parser) validatePrerequisites() error {
 	return nil
 }
 
-// stripInlineComment removes inline comments (// or #) from a line,
-// preserving comment markers inside quoted strings.
+// stripInlineComment removes inline comments (// or #), preserving comment
+// markers inside quoted strings and honouring backslash escapes.
 func stripInlineComment(line string) string {
 	inQuote := false
 	for i := 0; i < len(line); i++ {
-		if line[i] == '"' {
+		c := line[i]
+
+		if c == '\\' && inQuote && i+1 < len(line) {
+			i++ // skip the escaped character
+			continue
+		}
+
+		if c == '"' {
 			inQuote = !inQuote
 			continue
 		}
-		if !inQuote && i+1 < len(line) && line[i] == '/' && line[i+1] == '/' {
+		if !inQuote && i+1 < len(line) && c == '/' && line[i+1] == '/' {
 			return strings.TrimSpace(line[:i])
 		}
-		if !inQuote && line[i] == '#' {
+		if !inQuote && c == '#' {
 			return strings.TrimSpace(line[:i])
 		}
 	}
@@ -610,7 +555,7 @@ func stripInlineComment(line string) string {
 
 func (p *Parser) Parse() (*ParsedData, error) {
 	for idx, line := range p.Lines {
-		lineNum := idx + 1 // 1-indexed for error reporting
+		lineNum := idx + 1
 
 		line = stripInlineComment(line)
 		if line == "" {
@@ -621,22 +566,19 @@ func (p *Parser) Parse() (*ParsedData, error) {
 			continue
 		}
 
-		// "var" must be followed by a space to be a variable declaration
-		// (avoids matching "variable", "var_x", etc.)
+		// "var " (with the trailing space) marks a global variable declaration.
 		if strings.HasPrefix(line, "var ") {
 			if err := p.parseVar(line, "global"); err != nil {
 				return nil, NewParseError(lineNum, 1, err.Error(), line)
 			}
-
 			continue
 		}
 
-		// "_" is the default command marker — must be followed by space, '(' , '<', or '{'
+		// "_" marks the default command.
 		if len(line) > 0 && line[0] == '_' && (len(line) == 1 || line[1] == ' ' || line[1] == '(' || line[1] == '<' || line[1] == '{') {
 			if err := p.parseCommand(idx, line, true); err != nil {
 				return nil, NewParseError(lineNum, 1, err.Error(), line)
 			}
-
 			continue
 		}
 

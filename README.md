@@ -8,6 +8,8 @@ A Make-like build tool written in Go for organizing command executions across pl
 go build -o construct
 ```
 
+> Requires Go 1.26 or later.
+
 ## Usage
 
 ```bash
@@ -124,6 +126,16 @@ Construct automatically looks for platform-specific Constfiles:
 - `Constfile-windows` (Windows)
 
 If `Constfile` doesn't exist but a platform-specific file does, it will be used automatically.
+
+## Configuration
+
+Construct runs each command body through a shell. The shell is chosen automatically (`cmd.exe` on Windows, otherwise the `SHELL` environment variable, falling back to `/bin/sh`), but you can override it:
+
+| Env var | Default | Purpose |
+|---------|---------|---------|
+| `CONSTRUCT_SHELL` | platform default | Override the shell binary used to run command bodies (e.g. `bash`, `/usr/local/bin/zsh`) |
+| `CONSTRUCT_CLOUD_FILE` | `fakecloud.json` | Path to the JSON file holding cloud-accessible command definitions |
+| `SHELL` | (system) | Used as the non-Windows shell when `CONSTRUCT_SHELL` is unset |
 
 ## Error Detection
 

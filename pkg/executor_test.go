@@ -1,6 +1,8 @@
 package pkg
 
 import (
+	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -50,12 +52,12 @@ func TestBuildCommand(t *testing.T) {
 		{
 			name:        "simple echo command",
 			input:       "echo hello",
-			expectShell: "/bin/bash",
+			expectShell: defaultShellName(),
 		},
 		{
 			name:        "complex command",
 			input:       "ls -la | grep test",
-			expectShell: "/bin/bash",
+			expectShell: defaultShellName(),
 		},
 	}
 
@@ -71,6 +73,13 @@ func TestBuildCommand(t *testing.T) {
 			}
 		})
 	}
+}
+
+// defaultShellName mirrors the executor's default shell choice so the tests
+// remain platform-portable instead of hardcoding /bin/bash.
+func defaultShellName() string {
+	name, _ := defaultShell()
+	return name
 }
 
 func TestExecutorDryRun(t *testing.T) {
@@ -213,4 +222,351 @@ func TestMissingPrerequisiteValidation(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestEvaluateCommandSimple runs a single command body through the executor
+// using a portable echo so the test works on both cmd.exe and POSIX shells.
+func TestEvaluateCommandSimple(t *testing.T) {
+	data := &ParsedData{
+		Commands: []*Command{
+			{Name: "hello", Body: []string{"echo hello"}},
+		},
+	}
+	data.buildIndexMaps()
+
+	executor := NewExecutor(data, false, false)
+	cmd, err := data.GetCommand("hello")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if err := executor.EvaluateCommand(cmd); err != nil {
+		t.Fatalf("EvaluateCommand failed: %v", err)
+	}
+}
+
+// TestEvaluateCommandFailure verifies that a failing command body surfaces a
+// *CommandError with the child process exit code.
+func TestEvaluateCommandFailure(t *testing.T) {
+	data := &ParsedData{
+		Commands: []*Command{
+			{Name: "fail", Body: []string{exitNonZero()}},
+		},
+	}
+	data.buildIndexMaps()
+
+	executor := NewExecutor(data, false, false)
+	cmd, err := data.GetCommand("fail")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	err = executor.EvaluateCommand(cmd)
+	if err == nil {
+		t.Fatal("expected an error from failing command, got nil")
+	}
+	cmdErr, ok := err.(*CommandError)
+	if !ok {
+		t.Fatalf("expected *CommandError, got %T (%v)", err, err)
+	}
+	if cmdErr.ExitCode == 0 {
+		t.Errorf("expected non-zero exit code, got %d", cmdErr.ExitCode)
+	}
+}
+
+// exitNonZero returns a shell command that exits with a non-zero status on the
+// current platform.
+func exitNonZero() string {
+	if runtime.GOOS == "windows" {
+		return "exit /b 3"
+	}
+	return "false"
+}
+
+// TestExecConcurrent runs several independent commands concurrently and asserts
+// that all of them complete without leaking goroutines or dropping errors.
+func TestExecConcurrent(t *testing.T) {
+	data := &ParsedData{
+		Commands: []*Command{
+			{Name: "a", Body: []string{"echo a"}},
+			{Name: "b", Body: []string{"echo b"}},
+			{Name: "c", Body: []string{"echo c"}},
+		},
+	}
+	data.buildIndexMaps()
+
+	executor := NewExecutor(data, true, false) // concurrent = true
+	if err := executor.Execute([]string{"a", "b", "c"}); err != nil {
+		t.Fatalf("concurrent Execute failed: %v", err)
+	}
+}
+
+// TestExecConcurrentError ensures a failing command in concurrent mode still
+// reports an error back to the caller rather than being silently dropped.
+func TestExecConcurrentError(t *testing.T) {
+	data := &ParsedData{
+		Commands: []*Command{
+			{Name: "ok", Body: []string{"echo ok"}},
+			{Name: "boom", Body: []string{exitNonZero()}},
+		},
+	}
+	data.buildIndexMaps()
+
+	executor := NewExecutor(data, true, false)
+	err := executor.Execute([]string{"ok", "boom"})
+	if err == nil {
+		t.Fatal("expected an error from concurrent execution with a failing command, got nil")
+	}
+}
+
+// TestExecFiltersEmptyAndFlags verifies that empty strings and leftover flags
+// are skipped instead of panicking on cmdName[0].
+func TestExecFiltersEmptyAndFlags(t *testing.T) {
+	data := &ParsedData{
+		Commands: []*Command{
+			{Name: "real", Body: []string{"echo real"}},
+		},
+	}
+	data.buildIndexMaps()
+
+	executor := NewExecutor(data, false, false)
+	// Empty string and a "--"-style token must be skipped, not indexed.
+	err := executor.Execute([]string{"", "--", "real"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+// TestExecUnknownCommand verifies that running an unknown command yields a
+// clear error rather than a nil-pointer dereference.
+func TestExecUnknownCommand(t *testing.T) {
+	data := &ParsedData{
+		Commands: []*Command{
+			{Name: "real", Body: []string{"echo real"}},
+		},
+	}
+	data.buildIndexMaps()
+
+	executor := NewExecutor(data, false, false)
+	err := executor.Execute([]string{"nope"})
+	if err == nil {
+		t.Fatal("expected error for unknown command, got nil")
+	}
+}
+
+// TestExecDefaultCommand verifies that when no commands are passed, the default
+// command (if any) runs.
+func TestExecDefaultCommand(t *testing.T) {
+	data := &ParsedData{
+		Commands: []*Command{
+			{Name: "_", IsDefault: true, Body: []string{"echo default"}},
+		},
+	}
+	data.buildIndexMaps()
+
+	executor := NewExecutor(data, false, false)
+	if err := executor.Execute(nil); err != nil {
+		t.Fatalf("default Execute failed: %v", err)
+	}
+}
+
+// TestParseCommandBodyBraceInString is a parser regression test ensuring that a
+// closing brace appearing inside a shell command does not prematurely end the
+// command body.
+func TestParseCommandBodyBraceInString(t *testing.T) {
+	input := "awk {\n    $ awk '{print $1}'\n}"
+	lines := strings.Split(input, "\n")
+	parser := &Parser{Data: &ParsedData{}, Lines: lines}
+
+	err := parser.parseCommand(0, input, false)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(parser.Data.Commands) != 1 {
+		t.Fatalf("expected 1 command, got %d", len(parser.Data.Commands))
+	}
+	cmd := parser.Data.Commands[0]
+	want := "$ awk '{print $1}'"
+	if len(cmd.Body) != 1 || cmd.Body[0] != want {
+		t.Errorf("expected body [%q], got %#v", want, cmd.Body)
+	}
+}
+
+// TestStripInlineCommentEscapedQuotes covers the escaped-quote path in
+// stripInlineComment so `\"` inside a quoted string doesn't desync tracking.
+func TestStripInlineCommentEscapedQuotes(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{name: "no comment", input: `echo hi`, expected: `echo hi`},
+		{name: "hash comment", input: `echo hi # a comment`, expected: `echo hi`},
+		{name: "slash comment", input: `echo hi // a comment`, expected: `echo hi`},
+		{name: "hash inside quotes", input: `echo "a # b"`, expected: `echo "a # b"`},
+		{name: "escaped quote then comment", input: `echo "he said \"hi\""# x`, expected: `echo "he said \"hi\""`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := stripInlineComment(tt.input)
+			if got != tt.expected {
+				t.Errorf("stripInlineComment(%q) = %q, want %q", tt.input, got, tt.expected)
+			}
+		})
+	}
+}
+
+// TestResolveVarRefs covers the inline variable-reference resolver used by
+// cleanCommandBody for non-$ lines.
+func TestResolveVarRefs(t *testing.T) {
+	lookup := func(name string) (string, bool) {
+		vals := map[string]string{"g": "GV", "name": "nick"}
+		v, ok := vals[name]
+		return v, ok
+	}
+
+	tests := []struct {
+		name string
+		line string
+		want string
+	}{
+		{name: "no refs", line: "echo hi", want: "echo hi"},
+		{name: "single ref", line: "echo &g", want: "echo GV"},
+		{name: "ref embedded in text", line: "hello &name!", want: "hello nick!"},
+		{name: "multiple refs", line: "&g-&name", want: "GV-nick"},
+		{name: "unknown ref passed through", line: "x &nope y", want: "x &nope y"},
+		{name: "bare ampersand not a ref", line: "a & b", want: "a & b"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := resolveVarRefs(tt.line, lookup); got != tt.want {
+				t.Errorf("resolveVarRefs(%q) = %q, want %q", tt.line, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestEvaluateCommandPrereqCapture verifies that prerequisite output is captured
+// into PrereqOutput and made available as &prereq.N variables to the parent.
+func TestEvaluateCommandPrereqCapture(t *testing.T) {
+	data := &ParsedData{
+		Commands: []*Command{
+			{Name: "gen", Body: []string{"echo generated"}},
+			{Name: "use", Prereqs: []string{"gen"}, Body: []string{"$ echo got:&gen.0"}},
+		},
+	}
+	data.buildIndexMaps()
+
+	executor := NewExecutor(data, false, false)
+	if err := executor.Execute([]string{"use"}); err != nil {
+		t.Fatalf("Execute failed: %v", err)
+	}
+
+	gen, _ := data.GetCommand("gen")
+	if len(gen.PrereqOutput) != 1 || gen.PrereqOutput[0] != "generated" {
+		t.Errorf("prereq output = %#v, want [\"generated\"]", gen.PrereqOutput)
+	}
+}
+
+// TestEvaluateCommandLazyVariable verifies that a lazy variable ($ in a var
+// definition) gets its value populated from command stdout at execution time.
+func TestEvaluateCommandLazyVariable(t *testing.T) {
+	data := &ParsedData{
+		Variables: []*Variable{
+			{Name: "dyn", Value: "", Scope: "global"},
+		},
+		Commands: []*Command{
+			{
+				Name:     "__lazy_dyn_global",
+				LazyEval: &LazyOutput{VarName: "dyn", Scope: "global"},
+				Body:     []string{"echo lazyresult"},
+			},
+		},
+	}
+	data.buildIndexMaps()
+
+	executor := NewExecutor(data, false, false)
+	if err := executor.Execute(nil); err != nil {
+		t.Fatalf("Execute failed: %v", err)
+	}
+
+	v, err := data.GetVariable("dyn", "global")
+	if err != nil {
+		t.Fatalf("GetVariable failed: %v", err)
+	}
+	if v.Value != "lazyresult" {
+		t.Errorf("lazy var value = %q, want %q", v.Value, "lazyresult")
+	}
+}
+
+// TestEvaluateCommandVarSubstitution verifies that &variable references inside
+// a command body are substituted before execution.
+func TestEvaluateCommandVarSubstitution(t *testing.T) {
+	data := &ParsedData{
+		Variables: []*Variable{
+			{Name: "who", Value: "world", Scope: "global"},
+		},
+		Commands: []*Command{
+			{Name: "say", Body: []string{"echo hi &who"}},
+		},
+	}
+	data.buildIndexMaps()
+
+	executor := NewExecutor(data, false, false)
+	if err := executor.Execute([]string{"say"}); err != nil {
+		t.Fatalf("Execute failed: %v", err)
+	}
+}
+
+// TestEvaluateCommandIdempotent verifies that running the same command twice
+// does not accumulate substitutions (regression guard for the shared-mutation
+// fix: cleanCommandBody must not write back into command.Body).
+func TestEvaluateCommandIdempotent(t *testing.T) {
+	data := &ParsedData{
+		Variables: []*Variable{
+			{Name: "who", Value: "world", Scope: "global"},
+		},
+		Commands: []*Command{
+			{Name: "say", Body: []string{"echo hi &who"}},
+		},
+	}
+	data.buildIndexMaps()
+
+	executor := NewExecutor(data, false, false)
+
+	for i := 1; i <= 3; i++ {
+		if err := executor.Execute([]string{"say"}); err != nil {
+			t.Fatalf("Execute pass %d failed: %v", i, err)
+		}
+	}
+
+	cmd, _ := data.GetCommand("say")
+	// The stored body must still contain the unresolved reference.
+	if len(cmd.Body) != 1 || cmd.Body[0] != "echo hi &who" {
+		t.Errorf("stored body was mutated: %#v; want [\"echo hi &who\"]", cmd.Body)
+	}
+}
+
+// TestTryApplyCloudBody verifies that a cloud-accessible command gets the cloud
+// body appended, while a non-cloud command is left alone.
+func TestTryApplyCloudBody(t *testing.T) {
+	t.Setenv("CONSTRUCT_CLOUD_FILE", "testdata/cloud_test.json")
+
+	data := &ParsedData{
+		Commands: []*Command{
+			{Name: "local", Body: []string{"echo local"}},
+		},
+	}
+	data.buildIndexMaps()
+
+	executor := NewExecutor(data, false, false)
+
+	t.Run("non-cloud command unchanged", func(t *testing.T) {
+		cmd := &Command{Name: "local", Body: []string{"echo local"}}
+		before := append([]string(nil), cmd.Body...)
+		if err := executor.tryApplyCloudBody(cmd); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(cmd.Body) != len(before) {
+			t.Errorf("body changed: %#v vs %#v", cmd.Body, before)
+		}
+	})
 }
