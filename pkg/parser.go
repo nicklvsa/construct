@@ -117,8 +117,6 @@ type LazyOutput struct {
 	Scope   string `json:"scope"`
 }
 
-// BodyStatement is a single node in a command body: either a shell line or an
-// if/else block. The executor walks this tree rather than a flat string list.
 type BodyStatement struct {
 	Type       string          `json:"type"` // "shell", "if", or "for"
 	Shell      string          `json:"shell,omitempty"`
@@ -156,8 +154,6 @@ func NewParser(file string) (*Parser, error) {
 	return NewParserFromContent(file, string(data)), nil
 }
 
-// NewParserFromContent builds a Parser from in-memory content. Used by the
-// language server to parse live document state without touching disk.
 func NewParserFromContent(file, content string) *Parser {
 	return &Parser{
 		InputFile: file,
@@ -235,8 +231,6 @@ func (p *Parser) tryEvalExpression(expression string, varName *string, varScope 
 			}
 		}
 
-		// A `$` in a variable definition creates a lazy command: the variable's
-		// value is computed by running the command at execution time.
 		if char == '$' && varName != nil && varScope != nil {
 			restOfLine := strings.TrimSpace(string(runes[i+1:]))
 			p.Data.Commands = append(p.Data.Commands, &Command{
@@ -358,8 +352,6 @@ func extractPrerequisiteString(line string) string {
 	return strings.Join(result, ", ")
 }
 
-// extractWorkDir finds the " in <dir>" modifier that sits between the end of
-// the arguments/prereqs and the opening brace. Returns "" if absent.
 func extractWorkDir(line string) string {
 	brace := strings.Index(line, "{")
 	if brace == -1 {
@@ -373,7 +365,6 @@ func extractWorkDir(line string) string {
 	}
 
 	dir := strings.TrimSpace(segment[idx+4:])
-	// The workdir ends at the first comma — anything after is a trailing prereq.
 	if comma := strings.IndexByte(dir, ','); comma >= 0 {
 		dir = strings.TrimSpace(dir[:comma])
 	}
@@ -462,9 +453,6 @@ func isFileDep(token string) bool {
 	return false
 }
 
-// parseCommandBody collects raw body lines until the closing brace, tracking
-// nesting depth so if/else block braces are not mistaken for the command's
-// closing brace.
 func (p *Parser) parseCommandBody(startIdx int, commandName string) ([]string, int, error) {
 	var body []string
 	depth := 0
@@ -473,16 +461,13 @@ func (p *Parser) parseCommandBody(startIdx int, commandName string) ([]string, i
 		line := p.Lines[i]
 		trimmedLine := strings.TrimSpace(line)
 
-		// Count opening braces to detect if-headers.
 		opens := strings.Count(trimmedLine, "{")
 
-		// An "if" line with a brace opens a new block.
 		isIfHeader := strings.HasPrefix(trimmedLine, "if ") && opens > 0
 		isForHeader := strings.HasPrefix(trimmedLine, "for ") && opens > 0
 		isElseCompound := strings.HasPrefix(trimmedLine, "}") && strings.Contains(trimmedLine, "else")
 
 		if isElseCompound {
-			// "} else {" closes the then-block (depth--) and opens else-block (depth++)
 			if depth > 0 {
 				depth-- // close then-block
 			}
@@ -497,7 +482,7 @@ func (p *Parser) parseCommandBody(startIdx int, commandName string) ([]string, i
 				body = append(body, trimmedLine)
 				continue
 			}
-			// This is the command's own closing brace.
+
 			return body, i + 1, nil
 		}
 
@@ -515,16 +500,12 @@ func (p *Parser) parseCommandBody(startIdx int, commandName string) ([]string, i
 	return nil, startIdx, fmt.Errorf("unclosed command body for '%s' (missing '}')", commandName)
 }
 
-// parseBodyStatements builds a statement tree from raw body lines, recognizing
-// if/else blocks. Local "var" declarations are extracted out (the caller passes
-// the command scope so they're registered correctly) and removed from the tree.
 func (p *Parser) parseBodyStatements(raw []string, scope string) ([]BodyStatement, error) {
 	var stmts []BodyStatement
 	i := 0
 	for i < len(raw) {
 		line := raw[i]
 
-		// Local variable declarations are extracted, not executed.
 		if strings.HasPrefix(line, "var ") || strings.HasPrefix(line, "var\t") {
 			if err := p.parseVar(line, scope); err != nil {
 				return nil, err
@@ -533,7 +514,6 @@ func (p *Parser) parseBodyStatements(raw []string, scope string) ([]BodyStatemen
 			continue
 		}
 
-		// if "<cond>" { ... } else { ... }
 		if strings.HasPrefix(line, "if ") || line == "if{" {
 			stmt, consumed, err := p.parseIfBlock(raw[i:], scope)
 			if err != nil {
@@ -555,7 +535,6 @@ func (p *Parser) parseBodyStatements(raw []string, scope string) ([]BodyStatemen
 			continue
 		}
 
-		// Extract "as <name>" output tag if present.
 		shell, outputName := extractOutputName(line)
 		stmts = append(stmts, BodyStatement{Type: "shell", Shell: shell, OutputName: outputName})
 		i++
@@ -563,22 +542,17 @@ func (p *Parser) parseBodyStatements(raw []string, scope string) ([]BodyStatemen
 	return stmts, nil
 }
 
-// extractOutputName splits a trailing " as <name>" from a shell line, returning
-// the cleaned shell text and the output name ("" if none).
 func extractOutputName(line string) (shell, name string) {
-	// Match " as <identifier>" at end of line. Avoid matching inside quotes.
 	idx := strings.LastIndex(line, " as ")
 	if idx < 0 {
 		return line, ""
 	}
+
 	suffix := strings.TrimSpace(line[idx+4:])
-	// The name must be a bare identifier (no spaces, quotes, or special chars).
 	if suffix == "" || !isValidIdent(suffix) {
 		return line, ""
 	}
-	// Don't treat " as " inside a quoted string as an output tag.
-	// Simple heuristic: if there's an odd number of quotes before the " as ",
-	// we're inside a string.
+
 	before := line[:idx]
 	if strings.Count(before, `"`)%2 != 0 {
 		return line, ""
@@ -598,13 +572,10 @@ func isValidIdent(s string) bool {
 	return true
 }
 
-// parseIfBlock parses an if/else block starting at lines[0]. Returns the
-// IfBlock statement and the number of raw lines consumed.
 func (p *Parser) parseIfBlock(raw []string, scope string) (BodyStatement, int, error) {
 	header := raw[0]
 	cond := extractIfCondition(header)
 
-	// Collect the then-body until we hit a line starting with '}' or 'else'.
 	var thenLines []string
 	consumed := 1
 	depth := 0
@@ -753,8 +724,6 @@ func (p *Parser) parseForBlock(raw []string, scope string) (BodyStatement, int, 
 	return stmt, consumed, nil
 }
 
-// extractIfCondition pulls the quoted condition out of an "if ..." header line.
-// Supports:  if "a" == "b" {  →  `"a" == "b"`
 func extractIfCondition(line string) string {
 	line = strings.TrimSpace(line)
 	line = strings.TrimPrefix(line, "if")
@@ -903,8 +872,6 @@ func (p *Parser) validatePrerequisites() error {
 	return nil
 }
 
-// stripInlineComment removes inline comments (// or #), preserving comment
-// markers inside quoted strings and honouring backslash escapes.
 func stripInlineComment(line string) string {
 	inQuote := false
 	for i := 0; i < len(line); i++ {
