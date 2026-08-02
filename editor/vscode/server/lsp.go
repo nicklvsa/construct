@@ -4,7 +4,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 
@@ -307,6 +309,20 @@ func (s *server) handleHover(params json.RawMessage) (interface{}, error) {
 		}
 	}
 
+	// Hover over an @ENV reference — show the environment variable's value.
+	if envName, ok := envRefAtPosition(line, char); ok {
+		val := os.Getenv(envName)
+		var msg string
+		if val != "" {
+			msg = fmt.Sprintf("`@%s` (environment variable)\n\nresolved to: `%s`", envName, val)
+		} else {
+			msg = fmt.Sprintf("`@%s` (environment variable)\n\n⚠ not set (resolves to empty)", envName)
+		}
+		return hoverResult{
+			Contents: markupContent{Kind: "markdown", Value: msg},
+		}, nil
+	}
+
 	// Hover over a command header line.
 	if name, isCmd := commandNameAtLine(line); isCmd {
 		if cmd, err := doc.data.GetCommand(name); err == nil {
@@ -317,6 +333,17 @@ func (s *server) handleHover(params json.RawMessage) (interface{}, error) {
 				},
 			}, nil
 		}
+	}
+
+	// Hover over the directory path in an "in <dir>" modifier.
+	if dir, _, _, ok := workDirAtPosition(line, char); ok {
+		resolved := resolveWorkDir(dir, p.TextDocument.URI)
+		return hoverResult{
+			Contents: markupContent{
+				Kind:  "markdown",
+				Value: fmt.Sprintf("📂 working directory: `%s`\n\nresolved: `%s`", dir, resolved),
+			},
+		}, nil
 	}
 
 	return nil, nil
@@ -345,8 +372,11 @@ func commandHover(c *pkg.Command) string {
 	if len(c.Prereqs) > 0 {
 		fmt.Fprintf(&b, "- depends on: `%s`\n", strings.Join(c.Prereqs, "`, `"))
 	}
+	if c.WorkDir != "" {
+		fmt.Fprintf(&b, "- working dir: `%s`\n", c.WorkDir)
+	}
 	if len(c.Body) > 0 {
-		fmt.Fprintf(&b, "- %d body line(s)\n", len(c.Body))
+		fmt.Fprintf(&b, "- %d body statement(s)\n", len(c.Body))
 	}
 	return b.String()
 }
@@ -414,9 +444,37 @@ func (s *server) handleDefinition(params json.RawMessage) (interface{}, error) {
 		}
 	}
 
-	// Go-to-definition for a command's own name (clicking the header name jumps
-	// nowhere useful, but clicking a reference in another command's prereq list
-	// is handled above).
+	// Ctrl-click on the directory path in "in <dir>" → open the folder.
+	if dir, startCol, endCol, ok := workDirAtPosition(line, char); ok {
+		resolved := resolveWorkDir(dir, p.TextDocument.URI)
+		uri := pathToURI(resolved)
+		return location{
+			URI: uri,
+			Range: range_{
+				Start: position{Line: p.Position.Line, Character: startCol},
+				End:   position{Line: p.Position.Line, Character: endCol},
+			},
+		}, nil
+	}
+
+	// Ctrl-click on a command's own header name → jump to itself (so the click
+	// registers and VSCode reveals the definition location).
+	if name, isCmd := commandNameAtLine(line); isCmd {
+		if _, err := doc.data.GetCommand(name); err == nil {
+			col := strings.Index(line, name)
+			if col < 0 {
+				col = 0
+			}
+			return location{
+				URI: p.TextDocument.URI,
+				Range: range_{
+					Start: position{Line: p.Position.Line, Character: col},
+					End:   position{Line: p.Position.Line, Character: col + len(name)},
+				},
+			}, nil
+		}
+	}
+
 	return nil, nil
 }
 
@@ -499,6 +557,33 @@ func refAtPosition(line string, char int) (string, string) {
 	return string(runes[idx : idx+1+len(name.String())]), clean
 }
 
+// envRefAtPosition finds an @ENVNAME reference overlapping the given character.
+// Returns the env var name (without the @) and whether a reference was found.
+func envRefAtPosition(line string, char int) (string, bool) {
+	runes := []rune(line)
+	idx := -1
+	for i, r := range runes {
+		if i <= char && r == '@' {
+			idx = i
+		}
+	}
+	if idx < 0 {
+		return "", false
+	}
+	var name strings.Builder
+	for j := idx + 1; j < len(runes); j++ {
+		r := runes[j]
+		if !(r == '_' || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9')) {
+			break
+		}
+		name.WriteRune(r)
+	}
+	if name.Len() == 0 {
+		return "", false
+	}
+	return name.String(), true
+}
+
 func isIdentRune(r rune) bool {
 	return r == '_' || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z')
 }
@@ -521,13 +606,24 @@ func commandNameAtLine(line string) (string, bool) {
 		return "_", true
 	}
 
-	// Regular command name followed by ( < or {
+	// Regular command name followed by (, <, {, or " in " workdir modifier.
+	// Find the earliest terminator.
+	inIdx := strings.Index(trimmed, " in ")
+	endIdx := len(trimmed)
 	for i, r := range trimmed {
 		if r == '(' || r == '<' || r == '{' {
-			return strings.TrimSpace(trimmed[:i]), true
+			endIdx = i
+			break
 		}
 	}
-	return "", false
+	if inIdx >= 0 && inIdx < endIdx {
+		endIdx = inIdx
+	}
+	name := strings.TrimSpace(trimmed[:endIdx])
+	if name == "" {
+		return "", false
+	}
+	return name, true
 }
 
 func extractVarDeclName(line string) string {
@@ -584,6 +680,112 @@ func prereqNameAtPosition(line string, char int) (string, bool) {
 
 func isPrereqIdentRune(r rune) bool {
 	return isIdentRune(r) || (r >= '0' && r <= '9') || r == '-'
+}
+
+// workDirAtPosition returns the directory path text and its column span if the
+// cursor sits within the "in <dir>" portion of a command header line.
+func workDirAtPosition(line string, char int) (dir string, startCol, endCol int, ok bool) {
+	// Find " in " in the line (the workdir modifier keyword).
+	inIdx := strings.Index(line, " in ")
+	if inIdx < 0 {
+		return "", 0, 0, false
+	}
+	dirStart := inIdx + 4 // skip " in "
+
+	// The directory extends to the opening brace or end of line.
+	rest := line[dirStart:]
+	braceIdx := strings.IndexByte(rest, '{')
+	var dirEnd int
+	if braceIdx >= 0 {
+		dirEnd = dirStart + braceIdx
+	} else {
+		dirEnd = len(line)
+	}
+
+	dir = strings.TrimSpace(line[dirStart:dirEnd])
+	if dir == "" {
+		return "", 0, 0, false
+	}
+
+	// Recompute the trimmed column span for the actual directory text.
+	trimStart := dirStart + strings.Index(line[dirStart:dirEnd], dir)
+	trimEnd := trimStart + len(dir)
+
+	if char < trimStart || char > trimEnd {
+		return "", 0, 0, false
+	}
+
+	return dir, trimStart, trimEnd, true
+}
+
+// resolveWorkDir resolves a workdir path (which may be relative) against the
+// document's directory. Also resolves @env references.
+func resolveWorkDir(dir, docURI string) string {
+	// Resolve @env references in the directory.
+	dir = resolveEnvRefsInString(dir)
+
+	// If already absolute, use as-is.
+	if filepath.IsAbs(dir) {
+		return filepath.Clean(dir)
+	}
+
+	// Resolve relative to the document's directory.
+	docPath := uriToPath(docURI)
+	if docPath == "" {
+		return dir
+	}
+	docDir := filepath.Dir(docPath)
+	resolved := filepath.Join(docDir, dir)
+	return filepath.Clean(resolved)
+}
+
+// pathToURI converts a native filesystem path to a file:// URI.
+func pathToURI(p string) string {
+	abs, err := filepath.Abs(p)
+	if err != nil {
+		abs = p
+	}
+	u := &url.URL{Scheme: "file", Path: filepath.ToSlash(abs)}
+	return u.String()
+}
+
+// uriToPath converts a file:// URI to a native filesystem path.
+func uriToPath(uri string) string {
+	u, err := url.Parse(uri)
+	if err != nil || u.Scheme != "file" {
+		return ""
+	}
+	p := u.Path
+	// On Windows, file URIs are like /c%3A/Users/... — strip leading / and
+	// the URL package already decodes %3A to ':'.
+	if len(p) > 2 && p[0] == '/' && p[2] == ':' {
+		p = p[1:]
+	}
+	return filepath.FromSlash(p)
+}
+
+// resolveEnvRefsInString replaces @ENVNAME with env values.
+func resolveEnvRefsInString(s string) string {
+	var result strings.Builder
+	runes := []rune(s)
+	for i := 0; i < len(runes); {
+		if runes[i] == '@' {
+			var name strings.Builder
+			j := i + 1
+			for j < len(runes) && (isIdentRune(runes[j]) || (runes[j] >= '0' && runes[j] <= '9')) {
+				name.WriteRune(runes[j])
+				j++
+			}
+			if name.Len() > 0 {
+				result.WriteString(os.Getenv(name.String()))
+				i = j
+				continue
+			}
+		}
+		result.WriteRune(runes[i])
+		i++
+	}
+	return result.String()
 }
 
 // completionTriggerVar reports whether the cursor is positioned right after

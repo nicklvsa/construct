@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"unicode"
@@ -115,15 +116,52 @@ func (e *Executor) SetDebug(debug bool) {
 }
 
 func (e *Executor) EvaluateCommand(command *Command) error {
-	execCommandBody := func(target *Command, body []string) error {
+	// resolveValue resolves &var and @env references in a string at execution
+	// time, scoped to the given command scope.
+	resolveValue := func(s, scope string) string {
+		s = resolveVarRefs(s, func(name string) (string, bool) {
+			v, err := e.StructuredParse.GetVariable(name, scope)
+			if err != nil || v == nil {
+				return "", false
+			}
+			return v.Value, true
+		})
+		return resolveEnvRefs(s)
+	}
+
+	// execCommandBody walks the statement tree, running shell lines and
+	// branching on if/else blocks.
+	var execCommandBody func(target *Command, body []BodyStatement) error
+	execCommandBody = func(target *Command, body []BodyStatement) error {
 		isPrereq := target.IsPrereq
-		for lineIdx, cmdLine := range body {
+		for _, stmt := range body {
+			if stmt.Type == "if" {
+				cond := resolveValue(stmt.Cond, target.Name)
+				if e.debug {
+					fmt.Printf("[DEBUG] Evaluating condition: %s\n", cond)
+				}
+				if evaluateCondition(cond) {
+					if err := execCommandBody(target, stmt.ThenBody); err != nil {
+						return err
+					}
+				} else if stmt.ElseBody != nil {
+					if err := execCommandBody(target, stmt.ElseBody); err != nil {
+						return err
+					}
+				}
+				continue
+			}
+
+			cmdLine := stmt.Shell
 			if cmdLine == "" {
 				continue
 			}
 
 			args := append(e.shellArgs, cmdLine)
 			cmd := exec.Command(e.shellName, args...)
+			if target.WorkDir != "" {
+				cmd.Dir = resolveValue(target.WorkDir, target.Name)
+			}
 
 			var fullCommand string
 			if e.debug {
@@ -133,11 +171,11 @@ func (e *Executor) EvaluateCommand(command *Command) error {
 			if e.debug {
 				switch {
 				case isPrereq:
-					fmt.Printf("[DEBUG] Running prerequisite %s[%d]: %s\n", target.Name, lineIdx, fullCommand)
+					fmt.Printf("[DEBUG] Running prerequisite %s: %s\n", target.Name, fullCommand)
 				case target.LazyEval != nil:
 					fmt.Printf("[DEBUG] Running lazy command for variable %s: %s\n", target.LazyEval.VarName, fullCommand)
 				default:
-					fmt.Printf("[DEBUG] Running command %s[%d]: %s\n", target.Name, lineIdx, fullCommand)
+					fmt.Printf("[DEBUG] Running command %s: %s\n", target.Name, fullCommand)
 				}
 			}
 
@@ -212,8 +250,8 @@ func (e *Executor) EvaluateCommand(command *Command) error {
 	}
 
 	// cleanCommandBody resolves &variable references and arguments, returning a
-	// new body slice. It does not mutate the command's stored Body.
-	cleanCommandBody := func(cmd *Command) ([]string, error) {
+	// new statement tree. It does not mutate the command's stored Body.
+	cleanCommandBody := func(cmd *Command) ([]BodyStatement, error) {
 		if len(cmd.Prereqs) > 0 {
 			for _, prereq := range cmd.PrereqCmds {
 				for idx, arg := range prereq.PrereqOutput {
@@ -229,75 +267,33 @@ func (e *Executor) EvaluateCommand(command *Command) error {
 			}
 		}
 
-		cleanedBody := make([]string, len(cmd.Body))
-		copy(cleanedBody, cmd.Body)
-
 		argFlags := make(map[string]bool, len(cmd.Arguments))
 		for _, arg := range cmd.Arguments {
 			argFlags[cmd.Name+":"+arg.Name] = true
 		}
 
-		for lineIdx, line := range cleanedBody {
-			line = strings.TrimSpace(line)
-			if line == "" {
-				continue
-			}
-
-			// `$` execution lines may contain argument placeholders and &vars.
-			if line[0] == '$' {
-				executionLine := strings.TrimSpace(line[1:])
-				linePieces := strings.Fields(executionLine)
-
-				for pieceIdx, piece := range linePieces {
-					if idx := strings.IndexByte(piece, '&'); idx >= 0 {
-						varName := piece[idx+1:]
-						if variable, err := e.StructuredParse.GetVariable(varName, cmd.Name); err == nil && variable != nil {
-							linePieces[pieceIdx] = strings.ReplaceAll(piece, "&"+varName, variable.Value)
-						}
+		var cleanStmts func(stmts []BodyStatement) []BodyStatement
+		cleanStmts = func(stmts []BodyStatement) []BodyStatement {
+			out := make([]BodyStatement, len(stmts))
+			for i, stmt := range stmts {
+				if stmt.Type == "if" {
+					out[i] = BodyStatement{
+						Type:     "if",
+						Cond:     stmt.Cond, // resolved at exec time
+						ThenBody: cleanStmts(stmt.ThenBody),
+						ElseBody: cleanStmts(stmt.ElseBody),
 					}
-
-					lookupKey := cmd.Name + ":" + piece
-					if argFlags[lookupKey] {
-						if e.debug {
-							fmt.Printf("[DEBUG] Handling argument --%s for command %s\n", piece, cmd.Name)
-						}
-
-						v, err := pflag.CommandLine.GetString(lookupKey)
-						if err != nil || v == "" {
-							isOptional := false
-							for _, arg := range cmd.Arguments {
-								if arg.Name == piece {
-									isOptional = arg.IsOptional
-									break
-								}
-							}
-							if !isOptional {
-								return nil, fmt.Errorf("%s is not optional", lookupKey)
-							}
-						}
-
-						linePieces[pieceIdx] = v
-					}
+					continue
 				}
-
-				cleanedBody[lineIdx] = strings.Join(linePieces, " ")
-				continue
+				out[i] = BodyStatement{Type: "shell", Shell: e.cleanShellLine(cmd, stmt.Shell, argFlags)}
 			}
-
-			// Non-$ lines: resolve any &variable references inline.
-			cleanedBody[lineIdx] = resolveVarRefs(line, func(name string) (string, bool) {
-				v, err := e.StructuredParse.GetVariable(name, cmd.Name)
-				if err != nil || v == nil {
-					return "", false
-				}
-				return v.Value, true
-			})
+			return out
 		}
 
-		return cleanedBody, nil
+		return cleanStmts(cmd.Body), nil
 	}
 
-	// Run prerequisites first. Each prereq is executed with a copy of its body
+	// Run prerequisites first. Each prereq is executed with a resolved body
 	// so repeated invocations don't accumulate substitutions.
 	for _, prereqName := range command.Prereqs {
 		if command.PrereqCmds == nil {
@@ -347,6 +343,62 @@ func (e *Executor) EvaluateCommand(command *Command) error {
 	return execCommandBody(command, body)
 }
 
+// cleanShellLine resolves &var/@env references and argument placeholders in a
+// single shell body line for the given command.
+func (e *Executor) cleanShellLine(cmd *Command, line string, argFlags map[string]bool) string {
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return ""
+	}
+
+	if line[0] == '$' {
+		executionLine := strings.TrimSpace(line[1:])
+		linePieces := strings.Fields(executionLine)
+
+		for pieceIdx, piece := range linePieces {
+			if idx := strings.IndexByte(piece, '&'); idx >= 0 {
+				varName := piece[idx+1:]
+				if variable, err := e.StructuredParse.GetVariable(varName, cmd.Name); err == nil && variable != nil {
+					linePieces[pieceIdx] = strings.ReplaceAll(piece, "&"+varName, variable.Value)
+				}
+			}
+
+			lookupKey := cmd.Name + ":" + piece
+			if argFlags[lookupKey] {
+				if e.debug {
+					fmt.Printf("[DEBUG] Handling argument --%s for command %s\n", piece, cmd.Name)
+				}
+
+				v, err := pflag.CommandLine.GetString(lookupKey)
+				if err != nil || v == "" {
+					isOptional := false
+					for _, arg := range cmd.Arguments {
+						if arg.Name == piece {
+							isOptional = arg.IsOptional
+							break
+						}
+					}
+					if !isOptional {
+						return line
+					}
+				}
+
+				linePieces[pieceIdx] = v
+			}
+		}
+
+		return strings.Join(linePieces, " ")
+	}
+
+	return resolveVarRefs(line, func(name string) (string, bool) {
+		v, err := e.StructuredParse.GetVariable(name, cmd.Name)
+		if err != nil || v == nil {
+			return "", false
+		}
+		return v.Value, true
+	})
+}
+
 // resolveVarRefs replaces &name references in a line using lookup, leaving
 // unknown references untouched.
 func resolveVarRefs(line string, lookup func(string) (string, bool)) string {
@@ -373,6 +425,94 @@ func resolveVarRefs(line string, lookup func(string) (string, bool)) string {
 		i++
 	}
 	return result.String()
+}
+
+// resolveEnvRefs replaces @ENVNAME references with the corresponding env var.
+func resolveEnvRefs(s string) string {
+	var result strings.Builder
+	runes := []rune(s)
+	for i := 0; i < len(runes); {
+		if runes[i] == '@' {
+			var name strings.Builder
+			j := i + 1
+			for j < len(runes) && (unicode.IsLetter(runes[j]) || unicode.IsDigit(runes[j]) || runes[j] == '_') {
+				name.WriteRune(runes[j])
+				j++
+			}
+			if name.Len() > 0 {
+				result.WriteString(os.Getenv(name.String()))
+				i = j
+				continue
+			}
+		}
+		result.WriteRune(runes[i])
+		i++
+	}
+	return result.String()
+}
+
+// evaluateCondition parses a resolved condition string like `"18" >= "2"` and
+// returns the boolean result. Numeric comparison is used when both operands
+// parse as integers; otherwise lexicographic. Supported ops: == != < > <= >=.
+func evaluateCondition(cond string) bool {
+	cond = strings.TrimSpace(cond)
+
+	ops := []string{"==", "!=", ">=", "<=", ">", "<"}
+	for _, op := range ops {
+		if idx := strings.Index(cond, op); idx > 0 {
+			left := strings.TrimSpace(cond[:idx])
+			right := strings.TrimSpace(cond[idx+len(op):])
+			left = strings.Trim(left, "\"")
+			right = strings.Trim(right, "\"")
+			return compareValues(left, right, op)
+		}
+	}
+	return false
+}
+
+func compareValues(left, right, op string) bool {
+	if li, err := strconv.Atoi(left); err == nil {
+		if ri, err := strconv.Atoi(right); err == nil {
+			return compareInt(li, ri, op)
+		}
+	}
+	return compareString(left, right, op)
+}
+
+func compareInt(l, r int, op string) bool {
+	switch op {
+	case "==":
+		return l == r
+	case "!=":
+		return l != r
+	case "<":
+		return l < r
+	case ">":
+		return l > r
+	case "<=":
+		return l <= r
+	case ">=":
+		return l >= r
+	}
+	return false
+}
+
+func compareString(l, r, op string) bool {
+	switch op {
+	case "==":
+		return l == r
+	case "!=":
+		return l != r
+	case "<":
+		return l < r
+	case ">":
+		return l > r
+	case "<=":
+		return l <= r
+	case ">=":
+		return l >= r
+	}
+	return false
 }
 
 func (e *Executor) tryApplyCloudBody(cmd *Command) error {

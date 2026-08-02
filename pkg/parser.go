@@ -117,17 +117,28 @@ type LazyOutput struct {
 	Scope   string `json:"scope"`
 }
 
+// BodyStatement is a single node in a command body: either a shell line or an
+// if/else block. The executor walks this tree rather than a flat string list.
+type BodyStatement struct {
+	Type     string          `json:"type"` // "shell" or "if"
+	Shell    string          `json:"shell,omitempty"`
+	Cond     string          `json:"cond,omitempty"`
+	ThenBody []BodyStatement `json:"then,omitempty"`
+	ElseBody []BodyStatement `json:"else,omitempty"`
+}
+
 type Command struct {
-	Name            string      `json:"name"`
-	CloudAccessible bool        `json:"cloud_accessible"`
-	IsDefault       bool        `json:"is_default"`
-	LazyEval        *LazyOutput `json:"lazy_output"`
-	IsPrereq        bool        `json:"is_prereq"`
-	PrereqOutput    []string    `json:"prereq_output"`
-	Arguments       []*Argument `json:"arguments"`
-	Prereqs         []string    `json:"prereqs"`
-	PrereqCmds      []*Command  `json:"prereq_cmds"`
-	Body            []string    `json:"body"`
+	Name            string          `json:"name"`
+	CloudAccessible bool            `json:"cloud_accessible"`
+	IsDefault       bool            `json:"is_default"`
+	LazyEval        *LazyOutput     `json:"lazy_output"`
+	IsPrereq        bool            `json:"is_prereq"`
+	PrereqOutput    []string        `json:"prereq_output"`
+	Arguments       []*Argument     `json:"arguments"`
+	Prereqs         []string        `json:"prereqs"`
+	PrereqCmds      []*Command      `json:"prereq_cmds"`
+	WorkDir         string          `json:"work_dir"`
+	Body            []BodyStatement `json:"body"`
 }
 
 func NewParser(file string) (*Parser, error) {
@@ -225,7 +236,7 @@ func (p *Parser) tryEvalExpression(expression string, varName *string, varScope 
 			p.Data.Commands = append(p.Data.Commands, &Command{
 				Name:     fmt.Sprintf("__lazy_%s_%s", *varName, *varScope),
 				LazyEval: &LazyOutput{VarName: *varName, Scope: *varScope},
-				Body:     []string{fmt.Sprintf("$ %s", restOfLine)},
+				Body:     []BodyStatement{{Type: "shell", Shell: fmt.Sprintf("$ %s", restOfLine)}},
 			})
 			i = len(runes)
 			continue
@@ -280,13 +291,27 @@ func parseCommandName(line string) string {
 		}
 	}
 
+	// Find the earliest terminator: (, <, {, or " in " workdir modifier.
+	inIdx := strings.Index(line, " in ")
+	terminators := []rune{'(', '<', '{'}
+	endIdx := len(line)
 	for i, r := range line {
-		if r == '(' || r == '<' || r == '{' {
-			return strings.TrimSpace(line[:i])
+		found := false
+		for _, t := range terminators {
+			if r == t {
+				found = true
+				break
+			}
+		}
+		if found {
+			endIdx = i
+			break
 		}
 	}
-
-	return strings.TrimSpace(line)
+	if inIdx >= 0 && inIdx < endIdx {
+		endIdx = inIdx
+	}
+	return strings.TrimSpace(line[:endIdx])
 }
 
 func extractArgumentString(line string) string {
@@ -314,7 +339,35 @@ func extractPrerequisiteString(line string) string {
 		return ""
 	}
 
-	return strings.TrimSpace(line[start+1 : start+end])
+	segment := line[start+1 : start+end]
+
+	// If there's an " in <dir>" workdir modifier in this segment, the prereqs
+	// end before it.
+	if inIdx := strings.Index(segment, " in "); inIdx >= 0 {
+		segment = segment[:inIdx]
+	}
+
+	return strings.TrimSpace(segment)
+}
+
+// extractWorkDir finds the " in <dir>" modifier that sits between the end of
+// the arguments/prereqs and the opening brace. Returns "" if absent.
+func extractWorkDir(line string) string {
+	brace := strings.Index(line, "{")
+	if brace == -1 {
+		return ""
+	}
+
+	segment := line[:brace]
+	// The header portion before '{' may contain: name, (args), < prereqs, in dir.
+	// Find the last " in " token — the workdir is whatever follows it.
+	idx := strings.LastIndex(segment, " in ")
+	if idx == -1 {
+		return ""
+	}
+
+	dir := strings.TrimSpace(segment[idx+4:])
+	return dir
 }
 
 func parseArgumentName(argStr string) (string, bool) {
@@ -389,17 +442,46 @@ func parsePrerequisiteList(prereqStr string) ([]string, error) {
 	return prereqs, nil
 }
 
+// parseCommandBody collects raw body lines until the closing brace, tracking
+// nesting depth so if/else block braces are not mistaken for the command's
+// closing brace.
 func (p *Parser) parseCommandBody(startIdx int, commandName string) ([]string, int, error) {
 	var body []string
+	depth := 0
 
 	for i := startIdx; i < len(p.Lines); i++ {
 		line := p.Lines[i]
 		trimmedLine := strings.TrimSpace(line)
 
-		// A closing brace only ends the block when it begins the trimmed line,
-		// so braces inside shell commands (e.g. `awk '{print $1}'`) are preserved.
+		// Count opening braces to detect if-headers.
+		opens := strings.Count(trimmedLine, "{")
+
+		// An "if" line with a brace opens a new block.
+		isIfHeader := strings.HasPrefix(trimmedLine, "if ") && opens > 0
+		isElseCompound := strings.HasPrefix(trimmedLine, "}") && strings.Contains(trimmedLine, "else")
+
+		if isElseCompound {
+			// "} else {" closes the then-block (depth--) and opens else-block (depth++)
+			if depth > 0 {
+				depth-- // close then-block
+			}
+			depth++ // open else-block
+			body = append(body, trimmedLine)
+			continue
+		}
+
 		if strings.HasPrefix(trimmedLine, "}") {
+			if depth > 0 {
+				depth--
+				body = append(body, trimmedLine)
+				continue
+			}
+			// This is the command's own closing brace.
 			return body, i + 1, nil
+		}
+
+		if isIfHeader {
+			depth++
 		}
 
 		if trimmedLine == "" {
@@ -412,10 +494,130 @@ func (p *Parser) parseCommandBody(startIdx int, commandName string) ([]string, i
 	return nil, startIdx, fmt.Errorf("unclosed command body for '%s' (missing '}')", commandName)
 }
 
-func (p *Parser) parseCommand(idx int, line string, isDefault bool) error {
+// parseBodyStatements builds a statement tree from raw body lines, recognizing
+// if/else blocks. Local "var" declarations are extracted out (the caller passes
+// the command scope so they're registered correctly) and removed from the tree.
+func (p *Parser) parseBodyStatements(raw []string, scope string) ([]BodyStatement, error) {
+	var stmts []BodyStatement
+	i := 0
+	for i < len(raw) {
+		line := raw[i]
+
+		// Local variable declarations are extracted, not executed.
+		if strings.HasPrefix(line, "var ") || strings.HasPrefix(line, "var\t") {
+			if err := p.parseVar(line, scope); err != nil {
+				return nil, err
+			}
+			i++
+			continue
+		}
+
+		// if "<cond>" { ... } else { ... }
+		if strings.HasPrefix(line, "if ") || line == "if{" {
+			stmt, consumed, err := p.parseIfBlock(raw[i:], scope)
+			if err != nil {
+				return nil, err
+			}
+			stmts = append(stmts, stmt)
+			i += consumed
+			continue
+		}
+
+		stmts = append(stmts, BodyStatement{Type: "shell", Shell: line})
+		i++
+	}
+	return stmts, nil
+}
+
+// parseIfBlock parses an if/else block starting at lines[0]. Returns the
+// IfBlock statement and the number of raw lines consumed.
+func (p *Parser) parseIfBlock(raw []string, scope string) (BodyStatement, int, error) {
+	header := raw[0]
+	cond := extractIfCondition(header)
+
+	// Collect the then-body until we hit a line starting with '}' or 'else'.
+	var thenLines []string
+	consumed := 1
+	for consumed < len(raw) {
+		l := raw[consumed]
+		trimmed := strings.TrimSpace(l)
+		if trimmed == "}" || strings.HasPrefix(trimmed, "}") {
+			break
+		}
+		if trimmed == "else" || strings.HasPrefix(trimmed, "else ") || strings.HasPrefix(trimmed, "else{") {
+			break
+		}
+		thenLines = append(thenLines, l)
+		consumed++
+	}
+
+	if consumed >= len(raw) {
+		return BodyStatement{}, 0, fmt.Errorf("unclosed if block (missing '}')")
+	}
+
+	thenStmts, err := p.parseBodyStatements(thenLines, scope)
+	if err != nil {
+		return BodyStatement{}, 0, err
+	}
+
+	stmt := BodyStatement{
+		Type:     "if",
+		Cond:     cond,
+		ThenBody: thenStmts,
+	}
+
+	// Check for else. The closing line may be "}", "} else {", or "else".
+	closingLine := strings.TrimSpace(raw[consumed])
+	hasElse := strings.Contains(closingLine, "else")
+
+	if hasElse {
+		// The else-body starts on the same line as "} else {" — no header to
+		// consume separately. Just gather lines until the closing "}".
+		consumed++ // consume the "} else {" line
+		var elseLines []string
+		for consumed < len(raw) {
+			l := raw[consumed]
+			trimmed := strings.TrimSpace(l)
+			if trimmed == "}" || strings.HasPrefix(trimmed, "}") {
+				break
+			}
+			elseLines = append(elseLines, l)
+			consumed++
+		}
+		if consumed >= len(raw) {
+			return BodyStatement{}, 0, fmt.Errorf("unclosed else block (missing '}')")
+		}
+		elseStmts, err := p.parseBodyStatements(elseLines, scope)
+		if err != nil {
+			return BodyStatement{}, 0, err
+		}
+		stmt.ElseBody = elseStmts
+		consumed++ // consume the closing '}'
+	} else {
+		consumed++ // consume the closing '}'
+	}
+
+	return stmt, consumed, nil
+}
+
+// extractIfCondition pulls the quoted condition out of an "if ..." header line.
+// Supports:  if "a" == "b" {  →  `"a" == "b"`
+func extractIfCondition(line string) string {
+	line = strings.TrimSpace(line)
+	line = strings.TrimPrefix(line, "if")
+	line = strings.TrimSpace(line)
+
+	// Strip a trailing "{" and whitespace.
+	if brace := strings.Index(line, "{"); brace >= 0 {
+		line = strings.TrimSpace(line[:brace])
+	}
+	return line
+}
+
+func (p *Parser) parseCommand(idx int, line string, isDefault bool) (int, error) {
 	trimmedLine := strings.TrimSpace(line)
 	if !strings.Contains(trimmedLine, "{") {
-		return nil
+		return 0, nil
 	}
 
 	commandName := parseCommandName(line)
@@ -424,31 +626,24 @@ func (p *Parser) parseCommand(idx int, line string, isDefault bool) error {
 
 	commandArgs, err := parseArgumentList(extractArgumentString(line))
 	if err != nil {
-		return fmt.Errorf("failed to parse arguments for '%s': %w", commandName, err)
+		return 0, fmt.Errorf("failed to parse arguments for '%s': %w", commandName, err)
 	}
 
 	prereqs, err := parsePrerequisiteList(extractPrerequisiteString(line))
 	if err != nil {
-		return fmt.Errorf("failed to parse prerequisites for '%s': %w", commandName, err)
+		return 0, fmt.Errorf("failed to parse prerequisites for '%s': %w", commandName, err)
 	}
 
-	rawBody, _, err := p.parseCommandBody(idx+1, commandName)
+	workDir := extractWorkDir(line)
+
+	rawBody, endIdx, err := p.parseCommandBody(idx+1, commandName)
 	if err != nil {
-		return err
+		return 0, err
 	}
 
-	// Local variable declarations ("var ...") inside a body are extracted into
-	// command scope and removed from the executable body.
-	var commandBody []string
-	for _, cmdLine := range rawBody {
-		cmdLine = strings.TrimSpace(cmdLine)
-		if strings.HasPrefix(cmdLine, "var") {
-			if err := p.parseVar(cmdLine, commandName); err != nil {
-				return err
-			}
-			continue
-		}
-		commandBody = append(commandBody, cmdLine)
+	commandBody, err := p.parseBodyStatements(rawBody, commandName)
+	if err != nil {
+		return 0, err
 	}
 
 	if commandName != "" && len(commandBody) > 0 {
@@ -458,11 +653,13 @@ func (p *Parser) parseCommand(idx int, line string, isDefault bool) error {
 			IsDefault:       isDefault,
 			Arguments:       commandArgs,
 			Prereqs:         prereqs,
+			WorkDir:         workDir,
 			Body:            commandBody,
 		})
 	}
 
-	return nil
+	// Return how many lines were consumed (header + body lines).
+	return endIdx - idx, nil
 }
 
 func (p *Parser) detectCircularDependencies() error {
@@ -560,36 +757,49 @@ func stripInlineComment(line string) string {
 }
 
 func (p *Parser) Parse() (*ParsedData, error) {
-	for idx, line := range p.Lines {
+	idx := 0
+	for idx < len(p.Lines) {
+		line := p.Lines[idx]
 		lineNum := idx + 1
 
 		line = stripInlineComment(line)
 		if line == "" {
+			idx++
 			continue
 		}
 
 		if strings.HasPrefix(line, "//") || strings.HasPrefix(line, "#") {
+			idx++
 			continue
 		}
 
-		// "var " (with the trailing space) marks a global variable declaration.
 		if strings.HasPrefix(line, "var ") {
 			if err := p.parseVar(line, "global"); err != nil {
 				return nil, NewParseError(lineNum, 1, err.Error(), line)
 			}
+			idx++
 			continue
 		}
 
-		// "_" marks the default command.
 		if len(line) > 0 && line[0] == '_' && (len(line) == 1 || line[1] == ' ' || line[1] == '(' || line[1] == '<' || line[1] == '{') {
-			if err := p.parseCommand(idx, line, true); err != nil {
+			consumed, err := p.parseCommand(idx, line, true)
+			if err != nil {
 				return nil, NewParseError(lineNum, 1, err.Error(), line)
+			}
+			idx += consumed
+			if consumed == 0 {
+				idx++
 			}
 			continue
 		}
 
-		if err := p.parseCommand(idx, line, false); err != nil {
+		consumed, err := p.parseCommand(idx, line, false)
+		if err != nil {
 			return nil, NewParseError(lineNum, 1, err.Error(), line)
+		}
+		idx += consumed
+		if consumed == 0 {
+			idx++
 		}
 	}
 

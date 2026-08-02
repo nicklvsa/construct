@@ -1,0 +1,20 @@
+var node_major = $ node -p "process.versions.node.split('.')[0]"
+
+hello {
+    $ echo "hello, world"
+}
+
+build-lsp in editor/vscode/server {
+    $ go build -o construct-lsp .
+}
+
+build-ext < hello, build-lsp in editor/vscode {
+    $ npm install --silent
+    $ npm run compile
+    if "&node_major" >= "18" {
+        $ npx @vscode/vsce@latest package --no-git-tag-version --allow-star-registration
+    } else {
+        $ npx vsce@2.19.0 package --no-git-tag-version --allow-star-registration
+    }
+    $ code --install-extension constfile-0.1.0.vsix --force
+}

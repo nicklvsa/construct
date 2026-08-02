@@ -5,6 +5,7 @@ import (
 	"os"
 	"runtime"
 	"slices"
+	"strings"
 
 	"github.com/nicklvsa/construct/pkg"
 	flag "github.com/spf13/pflag"
@@ -58,13 +59,16 @@ func fileExists(path string) bool {
 func listCommands(data *pkg.ParsedData) {
 	fmt.Println("Available commands:")
 	for _, cmd := range data.Commands {
-		if cmd.Name == "_" {
+		if cmd.Name == "_" || strings.HasPrefix(cmd.Name, "__lazy_") {
 			continue
 		}
 		if cmd.IsDefault {
 			fmt.Printf("  %s (default)\n", cmd.Name)
 		} else {
 			fmt.Printf("  %s\n", cmd.Name)
+		}
+		if cmd.WorkDir != "" {
+			fmt.Printf("    Working dir: %s\n", cmd.WorkDir)
 		}
 		if len(cmd.Arguments) > 0 {
 			fmt.Printf("    Arguments: ")
@@ -82,6 +86,23 @@ func listCommands(data *pkg.ParsedData) {
 		}
 		if len(cmd.Prereqs) > 0 {
 			fmt.Printf("    Depends on: %s\n", cmd.Prereqs)
+		}
+	}
+}
+
+func printDryRunBody(body []pkg.BodyStatement, indent int) {
+	prefix := strings.Repeat("  ", indent+1)
+	for _, stmt := range body {
+		if stmt.Type == "if" {
+			fmt.Printf("%sif %s {\n", prefix, stmt.Cond)
+			printDryRunBody(stmt.ThenBody, indent+1)
+			if len(stmt.ElseBody) > 0 {
+				fmt.Printf("%s} else {\n", prefix)
+				printDryRunBody(stmt.ElseBody, indent+1)
+			}
+			fmt.Printf("%s}\n", prefix)
+		} else {
+			fmt.Printf("%s%s\n", prefix, stmt.Shell)
 		}
 	}
 }
@@ -164,11 +185,15 @@ func main() {
 	if dryRun {
 		fmt.Println("Dry run mode - commands that would be executed:")
 		for _, cmd := range data.Commands {
+			if strings.HasPrefix(cmd.Name, "__lazy_") {
+				continue
+			}
 			if len(inputs.Commands) == 0 || slices.Contains(inputs.Commands, cmd.Name) {
 				fmt.Printf("  %s\n", cmd.Name)
-				for _, line := range cmd.Body {
-					fmt.Printf("    %s\n", line)
+				if cmd.WorkDir != "" {
+					fmt.Printf("    (in %s)\n", cmd.WorkDir)
 				}
+				printDryRunBody(cmd.Body, 1)
 			}
 		}
 		os.Exit(0)

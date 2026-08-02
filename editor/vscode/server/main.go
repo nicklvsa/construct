@@ -14,7 +14,14 @@ import (
 // Minimal LSP-over-stdio server. Reads Content-Length-framed JSON-RPC messages
 // from stdin, dispatches to handlers, and writes responses to stdout.
 
+const lspVersion = "0.2.0"
+
 func main() {
+	if len(os.Args) > 1 && (os.Args[1] == "--version" || os.Args[1] == "-v") {
+		fmt.Printf("construct-lsp %s\n", lspVersion)
+		return
+	}
+
 	log.SetOutput(os.Stderr)
 	srv := newServer()
 	serve(os.Stdin, os.Stdout, srv)

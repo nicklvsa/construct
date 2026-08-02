@@ -544,7 +544,7 @@ func TestParseCommand(t *testing.T) {
 				Lines: lines,
 			}
 
-			err := parser.parseCommand(0, tt.input, tt.isDefault)
+			_, err := parser.parseCommand(0, tt.input, tt.isDefault)
 			if err != nil {
 				t.Errorf("unexpected error: %v", err)
 			}
@@ -588,7 +588,7 @@ func TestParseUnclosedBrace(t *testing.T) {
 		Lines: lines,
 	}
 
-	err := parser.parseCommand(0, input, false)
+	_, err := parser.parseCommand(0, input, false)
 	if err == nil {
 		t.Errorf("expected error for unclosed brace, got nil")
 	}
@@ -797,7 +797,7 @@ func TestPrereqWhitespace(t *testing.T) {
 		Lines: lines,
 	}
 
-	err := parser.parseCommand(0, input, false)
+	_, err := parser.parseCommand(0, input, false)
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}
@@ -861,7 +861,7 @@ func TestArgumentParsing(t *testing.T) {
 		Lines: lines,
 	}
 
-	err := parser.parseCommand(0, input, false)
+	_, err := parser.parseCommand(0, input, false)
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}
@@ -903,7 +903,7 @@ func TestScopedVariableParsing(t *testing.T) {
 		Lines: lines,
 	}
 
-	err := parser.parseCommand(0, input, false)
+	_, err := parser.parseCommand(0, input, false)
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}
@@ -1002,9 +1002,9 @@ func TestTryEvalExpression(t *testing.T) {
 		if lc.LazyEval.VarName != "myvar" || lc.LazyEval.Scope != "global" {
 			t.Errorf("lazy eval = %+v", lc.LazyEval)
 		}
-		wantBody := []string{"$ echo hi"}
-		if len(lc.Body) != len(wantBody) || lc.Body[0] != wantBody[0] {
-			t.Errorf("body = %#v, want %#v", lc.Body, wantBody)
+		wantBody := "$ echo hi"
+		if len(lc.Body) != 1 || lc.Body[0].Shell != wantBody {
+			t.Errorf("body = %#v, want [%q]", lc.Body, wantBody)
 		}
 	})
 
@@ -1056,4 +1056,144 @@ func TestParseVarValidation(t *testing.T) {
 			t.Errorf("expected empty value, got %q", p.Data.Variables[0].Value)
 		}
 	})
+}
+
+// TestExtractWorkDir covers the "in <dir>" modifier extraction.
+func TestExtractWorkDir(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{name: "no workdir", input: "build {", want: ""},
+		{name: "no workdir with args", input: "build (arg1) {", want: ""},
+		{name: "no workdir with prereqs", input: "build < test {", want: ""},
+		{name: "simple workdir", input: "build in subdir {", want: "subdir"},
+		{name: "workdir with args", input: "build (arg1) in subdir {", want: "subdir"},
+		{name: "workdir with prereqs", input: "build < test in subdir {", want: "subdir"},
+		{name: "workdir with args and prereqs", input: "deploy (env) < build in deep/dir {", want: "deep/dir"},
+		{name: "cloud command with workdir", input: "|deploy| in cloud/dir {", want: "cloud/dir"},
+		{name: "workdir with dot path", input: "build in ./local {", want: "./local"},
+		{name: "workdir with env ref", input: "build in @HOMEDIR/projects {", want: "@HOMEDIR/projects"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := extractWorkDir(tt.input)
+			if got != tt.want {
+				t.Errorf("extractWorkDir(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestParseCommandWorkDir verifies the WorkDir field is populated on parsed commands.
+func TestParseCommandWorkDir(t *testing.T) {
+	input := "build in subdir {\n    echo hi\n}"
+	lines := strings.Split(input, "\n")
+	parser := &Parser{Data: &ParsedData{}, Lines: lines}
+
+	if _, err := parser.parseCommand(0, input, false); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(parser.Data.Commands) != 1 {
+		t.Fatalf("expected 1 command, got %d", len(parser.Data.Commands))
+	}
+	if parser.Data.Commands[0].WorkDir != "subdir" {
+		t.Errorf("WorkDir = %q, want %q", parser.Data.Commands[0].WorkDir, "subdir")
+	}
+}
+
+// TestParseIfBlock verifies that if/else blocks are parsed into the body tree.
+func TestParseIfBlock(t *testing.T) {
+	input := `build {
+    $ echo before
+    if "1" == "1" {
+        $ echo then-branch
+    } else {
+        $ echo else-branch
+    }
+    $ echo after
+}`
+	lines := strings.Split(input, "\n")
+	parser := &Parser{Data: &ParsedData{}, Lines: lines}
+
+	if _, err := parser.parseCommand(0, "build {", false); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(parser.Data.Commands) != 1 {
+		t.Fatalf("expected 1 command, got %d", len(parser.Data.Commands))
+	}
+	cmd := parser.Data.Commands[0]
+	// Expected body: [shell:before, if, shell:after]
+	if len(cmd.Body) != 3 {
+		t.Fatalf("expected 3 body statements, got %d: %#v", len(cmd.Body), cmd.Body)
+	}
+	if cmd.Body[0].Type != "shell" || cmd.Body[0].Shell != "$ echo before" {
+		t.Errorf("stmt[0] = %#v, want shell '$ echo before'", cmd.Body[0])
+	}
+	if cmd.Body[1].Type != "if" {
+		t.Errorf("stmt[1] type = %q, want 'if'", cmd.Body[1].Type)
+	}
+	if cmd.Body[1].Cond != `"1" == "1"` {
+		t.Errorf("stmt[1] cond = %q, want %q", cmd.Body[1].Cond, `"1" == "1"`)
+	}
+	if len(cmd.Body[1].ThenBody) != 1 || cmd.Body[1].ThenBody[0].Shell != "$ echo then-branch" {
+		t.Errorf("then body = %#v", cmd.Body[1].ThenBody)
+	}
+	if len(cmd.Body[1].ElseBody) != 1 || cmd.Body[1].ElseBody[0].Shell != "$ echo else-branch" {
+		t.Errorf("else body = %#v", cmd.Body[1].ElseBody)
+	}
+	if cmd.Body[2].Type != "shell" || cmd.Body[2].Shell != "$ echo after" {
+		t.Errorf("stmt[2] = %#v, want shell '$ echo after'", cmd.Body[2])
+	}
+}
+
+// TestParseIfBlockNoElse verifies if without else.
+func TestParseIfBlockNoElse(t *testing.T) {
+	input := `build {
+    if "1" == "1" {
+        $ echo only-then
+    }
+}`
+	lines := strings.Split(input, "\n")
+	parser := &Parser{Data: &ParsedData{}, Lines: lines}
+
+	if _, err := parser.parseCommand(0, "build {", false); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	cmd := parser.Data.Commands[0]
+	if len(cmd.Body) != 1 || cmd.Body[0].Type != "if" {
+		t.Fatalf("expected single if statement, got %#v", cmd.Body)
+	}
+	if len(cmd.Body[0].ElseBody) != 0 {
+		t.Errorf("expected empty else body, got %#v", cmd.Body[0].ElseBody)
+	}
+}
+
+// TestEvaluateCondition covers the condition evaluator.
+func TestEvaluateCondition(t *testing.T) {
+	tests := []struct {
+		name string
+		cond string
+		want bool
+	}{
+		{name: "string equal true", cond: `"hello" == "hello"`, want: true},
+		{name: "string equal false", cond: `"hello" == "world"`, want: false},
+		{name: "string not equal true", cond: `"a" != "b"`, want: true},
+		{name: "numeric equal true", cond: `"18" == "18"`, want: true},
+		{name: "numeric gt true", cond: `"20" > "18"`, want: true},
+		{name: "numeric gt false", cond: `"18" > "20"`, want: false},
+		{name: "numeric gte equal", cond: `"18" >= "18"`, want: true},
+		{name: "numeric lt true", cond: `"2" < "10"`, want: true},
+		{name: "numeric lte equal", cond: `"5" <= "5"`, want: true},
+		{name: "lexicographic when non-numeric", cond: `"abc" < "abd"`, want: true},
+		{name: "mixed numeric and string", cond: `"18" > "abc"`, want: false}, // falls back to string
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := evaluateCondition(tt.cond); got != tt.want {
+				t.Errorf("evaluateCondition(%q) = %v, want %v", tt.cond, got, tt.want)
+			}
+		})
+	}
 }

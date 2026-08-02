@@ -12,7 +12,7 @@ func TestNewExecutor(t *testing.T) {
 			{Name: "test", Value: "value", Scope: "global"},
 		},
 		Commands: []*Command{
-			{Name: "build", IsDefault: false, Body: []string{"echo hello"}},
+			{Name: "build", IsDefault: false, Body: shellBody("echo hello")},
 		},
 	}
 
@@ -85,7 +85,7 @@ func defaultShellName() string {
 func TestExecutorDryRun(t *testing.T) {
 	data := &ParsedData{
 		Commands: []*Command{
-			{Name: "build", IsDefault: false, Body: []string{"echo hello"}},
+			{Name: "build", IsDefault: false, Body: shellBody("echo hello")},
 		},
 	}
 
@@ -229,7 +229,7 @@ func TestMissingPrerequisiteValidation(t *testing.T) {
 func TestEvaluateCommandSimple(t *testing.T) {
 	data := &ParsedData{
 		Commands: []*Command{
-			{Name: "hello", Body: []string{"echo hello"}},
+			{Name: "hello", Body: shellBody("echo hello")},
 		},
 	}
 	data.buildIndexMaps()
@@ -249,7 +249,7 @@ func TestEvaluateCommandSimple(t *testing.T) {
 func TestEvaluateCommandFailure(t *testing.T) {
 	data := &ParsedData{
 		Commands: []*Command{
-			{Name: "fail", Body: []string{exitNonZero()}},
+			{Name: "fail", Body: shellBody(exitNonZero())},
 		},
 	}
 	data.buildIndexMaps()
@@ -281,14 +281,23 @@ func exitNonZero() string {
 	return "false"
 }
 
+// shellBody builds a []BodyStatement from plain shell lines, for test brevity.
+func shellBody(lines ...string) []BodyStatement {
+	stmts := make([]BodyStatement, len(lines))
+	for i, l := range lines {
+		stmts[i] = BodyStatement{Type: "shell", Shell: l}
+	}
+	return stmts
+}
+
 // TestExecConcurrent runs several independent commands concurrently and asserts
 // that all of them complete without leaking goroutines or dropping errors.
 func TestExecConcurrent(t *testing.T) {
 	data := &ParsedData{
 		Commands: []*Command{
-			{Name: "a", Body: []string{"echo a"}},
-			{Name: "b", Body: []string{"echo b"}},
-			{Name: "c", Body: []string{"echo c"}},
+			{Name: "a", Body: shellBody("echo a")},
+			{Name: "b", Body: shellBody("echo b")},
+			{Name: "c", Body: shellBody("echo c")},
 		},
 	}
 	data.buildIndexMaps()
@@ -304,8 +313,8 @@ func TestExecConcurrent(t *testing.T) {
 func TestExecConcurrentError(t *testing.T) {
 	data := &ParsedData{
 		Commands: []*Command{
-			{Name: "ok", Body: []string{"echo ok"}},
-			{Name: "boom", Body: []string{exitNonZero()}},
+			{Name: "ok", Body: shellBody("echo ok")},
+			{Name: "boom", Body: shellBody(exitNonZero())},
 		},
 	}
 	data.buildIndexMaps()
@@ -322,7 +331,7 @@ func TestExecConcurrentError(t *testing.T) {
 func TestExecFiltersEmptyAndFlags(t *testing.T) {
 	data := &ParsedData{
 		Commands: []*Command{
-			{Name: "real", Body: []string{"echo real"}},
+			{Name: "real", Body: shellBody("echo real")},
 		},
 	}
 	data.buildIndexMaps()
@@ -340,7 +349,7 @@ func TestExecFiltersEmptyAndFlags(t *testing.T) {
 func TestExecUnknownCommand(t *testing.T) {
 	data := &ParsedData{
 		Commands: []*Command{
-			{Name: "real", Body: []string{"echo real"}},
+			{Name: "real", Body: shellBody("echo real")},
 		},
 	}
 	data.buildIndexMaps()
@@ -357,7 +366,7 @@ func TestExecUnknownCommand(t *testing.T) {
 func TestExecDefaultCommand(t *testing.T) {
 	data := &ParsedData{
 		Commands: []*Command{
-			{Name: "_", IsDefault: true, Body: []string{"echo default"}},
+			{Name: "_", IsDefault: true, Body: shellBody("echo default")},
 		},
 	}
 	data.buildIndexMaps()
@@ -376,7 +385,7 @@ func TestParseCommandBodyBraceInString(t *testing.T) {
 	lines := strings.Split(input, "\n")
 	parser := &Parser{Data: &ParsedData{}, Lines: lines}
 
-	err := parser.parseCommand(0, input, false)
+	_, err := parser.parseCommand(0, input, false)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -385,7 +394,7 @@ func TestParseCommandBodyBraceInString(t *testing.T) {
 	}
 	cmd := parser.Data.Commands[0]
 	want := "$ awk '{print $1}'"
-	if len(cmd.Body) != 1 || cmd.Body[0] != want {
+	if len(cmd.Body) != 1 || cmd.Body[0].Shell != want {
 		t.Errorf("expected body [%q], got %#v", want, cmd.Body)
 	}
 }
@@ -449,8 +458,8 @@ func TestResolveVarRefs(t *testing.T) {
 func TestEvaluateCommandPrereqCapture(t *testing.T) {
 	data := &ParsedData{
 		Commands: []*Command{
-			{Name: "gen", Body: []string{"echo generated"}},
-			{Name: "use", Prereqs: []string{"gen"}, Body: []string{"$ echo got:&gen.0"}},
+			{Name: "gen", Body: shellBody("echo generated")},
+			{Name: "use", Prereqs: []string{"gen"}, Body: shellBody("$ echo got:&gen.0")},
 		},
 	}
 	data.buildIndexMaps()
@@ -477,7 +486,7 @@ func TestEvaluateCommandLazyVariable(t *testing.T) {
 			{
 				Name:     "__lazy_dyn_global",
 				LazyEval: &LazyOutput{VarName: "dyn", Scope: "global"},
-				Body:     []string{"echo lazyresult"},
+				Body:     shellBody("echo lazyresult"),
 			},
 		},
 	}
@@ -505,7 +514,7 @@ func TestEvaluateCommandVarSubstitution(t *testing.T) {
 			{Name: "who", Value: "world", Scope: "global"},
 		},
 		Commands: []*Command{
-			{Name: "say", Body: []string{"echo hi &who"}},
+			{Name: "say", Body: shellBody("echo hi &who")},
 		},
 	}
 	data.buildIndexMaps()
@@ -525,7 +534,7 @@ func TestEvaluateCommandIdempotent(t *testing.T) {
 			{Name: "who", Value: "world", Scope: "global"},
 		},
 		Commands: []*Command{
-			{Name: "say", Body: []string{"echo hi &who"}},
+			{Name: "say", Body: shellBody("echo hi &who")},
 		},
 	}
 	data.buildIndexMaps()
@@ -540,7 +549,7 @@ func TestEvaluateCommandIdempotent(t *testing.T) {
 
 	cmd, _ := data.GetCommand("say")
 	// The stored body must still contain the unresolved reference.
-	if len(cmd.Body) != 1 || cmd.Body[0] != "echo hi &who" {
+	if len(cmd.Body) != 1 || cmd.Body[0].Shell != "echo hi &who" {
 		t.Errorf("stored body was mutated: %#v; want [\"echo hi &who\"]", cmd.Body)
 	}
 }
@@ -552,7 +561,7 @@ func TestTryApplyCloudBody(t *testing.T) {
 
 	data := &ParsedData{
 		Commands: []*Command{
-			{Name: "local", Body: []string{"echo local"}},
+			{Name: "local", Body: shellBody("echo local")},
 		},
 	}
 	data.buildIndexMaps()
@@ -560,8 +569,8 @@ func TestTryApplyCloudBody(t *testing.T) {
 	executor := NewExecutor(data, false, false)
 
 	t.Run("non-cloud command unchanged", func(t *testing.T) {
-		cmd := &Command{Name: "local", Body: []string{"echo local"}}
-		before := append([]string(nil), cmd.Body...)
+		cmd := &Command{Name: "local", Body: shellBody("echo local")}
+		before := append([]BodyStatement(nil), cmd.Body...)
 		if err := executor.tryApplyCloudBody(cmd); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -569,4 +578,110 @@ func TestTryApplyCloudBody(t *testing.T) {
 			t.Errorf("body changed: %#v vs %#v", cmd.Body, before)
 		}
 	})
+}
+
+// TestEvaluateCommandWorkDir verifies that cmd.Dir is set from WorkDir, causing
+// the command to execute in the specified directory.
+func TestEvaluateCommandWorkDir(t *testing.T) {
+	// Create a temp subdir to use as the workdir.
+	tmpDir := t.TempDir()
+
+	// On Windows, echo %CD% prints the current dir; on POSIX, pwd does.
+	var pwdCmd string
+	if runtime.GOOS == "windows" {
+		pwdCmd = "echo %CD%"
+	} else {
+		pwdCmd = "pwd"
+	}
+
+	data := &ParsedData{
+		Commands: []*Command{
+			{Name: "whereami", WorkDir: tmpDir, Body: shellBody(pwdCmd)},
+		},
+	}
+	data.buildIndexMaps()
+
+	executor := NewExecutor(data, false, false)
+	if err := executor.Execute([]string{"whereami"}); err != nil {
+		t.Fatalf("Execute failed: %v", err)
+	}
+}
+
+// TestIfBlockTrueBranch verifies the then-branch executes when condition is true.
+func TestIfBlockTrueBranch(t *testing.T) {
+	data := &ParsedData{
+		Commands: []*Command{
+			{Name: "testif", Body: []BodyStatement{
+				{
+					Type: "if",
+					Cond: `"1" == "1"`,
+					ThenBody: []BodyStatement{
+						{Type: "shell", Shell: "echo then-ran"},
+					},
+					ElseBody: []BodyStatement{
+						{Type: "shell", Shell: exitNonZero()},
+					},
+				},
+			}},
+		},
+	}
+	data.buildIndexMaps()
+
+	executor := NewExecutor(data, false, false)
+	// If the wrong branch ran, exitNonZero would cause an error.
+	if err := executor.Execute([]string{"testif"}); err != nil {
+		t.Fatalf("expected then-branch (no error), got: %v", err)
+	}
+}
+
+// TestIfBlockFalseBranch verifies the else-branch executes when condition is false.
+func TestIfBlockFalseBranch(t *testing.T) {
+	data := &ParsedData{
+		Commands: []*Command{
+			{Name: "testif", Body: []BodyStatement{
+				{
+					Type: "if",
+					Cond: `"1" == "2"`,
+					ThenBody: []BodyStatement{
+						{Type: "shell", Shell: exitNonZero()},
+					},
+					ElseBody: []BodyStatement{
+						{Type: "shell", Shell: "echo else-ran"},
+					},
+				},
+			}},
+		},
+	}
+	data.buildIndexMaps()
+
+	executor := NewExecutor(data, false, false)
+	// If the wrong branch ran, exitNonZero would cause an error.
+	if err := executor.Execute([]string{"testif"}); err != nil {
+		t.Fatalf("expected else-branch (no error), got: %v", err)
+	}
+}
+
+// TestIfBlockNoElseSkipped verifies that when condition is false and there's no
+// else, execution continues past the if without error.
+func TestIfBlockNoElseSkipped(t *testing.T) {
+	data := &ParsedData{
+		Commands: []*Command{
+			{Name: "testif", Body: []BodyStatement{
+				{
+					Type: "if",
+					Cond: `"1" == "2"`,
+					ThenBody: []BodyStatement{
+						{Type: "shell", Shell: exitNonZero()},
+					},
+				},
+				{Type: "shell", Shell: "echo after-if"},
+			}},
+		},
+	}
+	data.buildIndexMaps()
+
+	executor := NewExecutor(data, false, false)
+	if err := executor.Execute([]string{"testif"}); err != nil {
+		t.Fatalf("expected no error (if skipped, no else), got: %v", err)
+	}
 }
