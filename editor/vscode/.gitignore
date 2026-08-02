@@ -1,0 +1,8 @@
+node_modules/
+out/
+server/construct-lsp
+server/construct-lsp.exe
+server/construct-lsp.exe~
+server/server
+server/server.exe
+*.vsix

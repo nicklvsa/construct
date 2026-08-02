@@ -1,0 +1,207 @@
+{
+	"$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+	"name": "Constfile",
+	"patterns": [
+		{ "include": "#comments" },
+		{ "include": "#variable-declaration" },
+		{ "include": "#command-header" },
+		{ "include": "#body-content" }
+	],
+	"repository": {
+		"comments": {
+			"patterns": [
+				{
+					"name": "comment.line.double-slash.constfile",
+					"match": "(\\/\\/.*$)"
+				},
+				{
+					"name": "comment.line.number-sign.constfile",
+					"match": "(#.*$)"
+				}
+			]
+		},
+		"strings": {
+			"name": "string.quoted.double.constfile",
+			"begin": "\"",
+			"end": "\"",
+			"patterns": [
+				{
+					"name": "constant.character.escape.constfile",
+					"match": "\\\\."
+				}
+			]
+		},
+		"numbers": {
+			"name": "constant.numeric.constfile",
+			"match": "\\b\\d+\\b"
+		},
+		"keywords": {
+			"patterns": [
+				{
+					"name": "keyword.control.constfile",
+					"match": "\\b(opt)\\b"
+				}
+			]
+		},
+		"env-ref": {
+			"name": "support.variable.constfile",
+			"match": "@[A-Za-z_][A-Za-z0-9_]*"
+		},
+		"var-ref": {
+			"patterns": [
+				{
+					"name": "variable.other.readwrite.constfile",
+					"match": "&[A-Za-z_][A-Za-z0-9_]*\\.\\d+"
+				},
+				{
+					"name": "variable.other.readwrite.constfile",
+					"match": "&[A-Za-z_][A-Za-z0-9_]*"
+				}
+			]
+		},
+		"shell-prefix": {
+			"name": "keyword.operator.shell.constfile",
+			"match": "^\\s*(\\$)\\s"
+		},
+		"operators": {
+			"patterns": [
+				{
+					"name": "keyword.operator.assignment.constfile",
+					"match": "(=)"
+				},
+				{
+					"name": "keyword.operator.prerequisite.constfile",
+					"match": "(<)"
+				},
+				{
+					"name": "punctuation.separator.comma.constfile",
+					"match": "(,)"
+				},
+				{
+					"name": "punctuation.accessor.constfile",
+					"match": "(\\.)"
+				}
+			]
+		},
+		"variable-declaration": {
+			"begin": "^\\s*(var)\\s+",
+			"beginCaptures": {
+				"1": { "name": "keyword.control.var.constfile" }
+			},
+			"end": "$",
+			"patterns": [
+				{
+					"name": "entity.name.function.constfile",
+					"match": "([A-Za-z_][A-Za-z0-9_]*)"
+				},
+				{ "include": "#operators" },
+				{ "include": "#value-content" }
+			]
+		},
+		"command-header": {
+			"patterns": [
+				{
+					"comment": "Cloud command: |name| (args) < prereqs {",
+					"match": "^\\s*(\\|)([A-Za-z_][A-Za-z0-9_-]*)(\\|)",
+					"captures": {
+						"1": { "name": "punctuation.definition.cloud.constfile" },
+						"2": { "name": "entity.name.function.cloud.constfile" },
+						"3": { "name": "punctuation.definition.cloud.constfile" }
+					}
+				},
+				{
+					"comment": "Default command: _ (args) < prereqs {",
+					"match": "^\\s*(_)(?=\\s*[({<])",
+					"captures": {
+						"1": { "name": "entity.name.function.default.constfile" }
+					}
+				},
+				{
+					"comment": "Regular command: name (args) < prereqs {",
+					"match": "^\\s*([A-Za-z_][A-Za-z0-9_-]*)(?=\\s*[({<])",
+					"captures": {
+						"1": { "name": "entity.name.function.constfile" }
+					}
+				},
+				{ "include": "#argument-list" },
+				{ "include": "#prerequisite-list" },
+				{
+					"name": "punctuation.definition.block.constfile",
+					"match": "[{}]"
+				}
+			]
+		},
+		"argument-list": {
+			"begin": "(\\()",
+			"beginCaptures": {
+				"1": { "name": "punctuation.definition.parameters.begin.constfile" }
+			},
+			"end": "(\\))",
+			"endCaptures": {
+				"1": { "name": "punctuation.definition.parameters.end.constfile" }
+			},
+			"patterns": [
+				{ "include": "#keywords" },
+				{
+					"name": "variable.parameter.constfile",
+					"match": "[A-Za-z_][A-Za-z0-9_]*"
+				},
+				{ "include": "#operators" }
+			]
+		},
+		"prerequisite-list": {
+			"begin": "(<)",
+			"beginCaptures": {
+				"1": { "name": "keyword.operator.prerequisite.constfile" }
+			},
+			"end": "({)",
+			"endCaptures": {
+				"1": { "name": "punctuation.definition.block.constfile" }
+			},
+			"patterns": [
+				{
+					"name": "entity.name.type.constfile",
+					"match": "[A-Za-z_][A-Za-z0-9_-]*"
+				},
+				{
+					"name": "punctuation.separator.comma.constfile",
+					"match": "(,)"
+				}
+			]
+		},
+		"body-content": {
+			"patterns": [
+				{ "include": "#variable-declaration" },
+				{ "include": "#shell-prefix" },
+				{ "include": "#comments" },
+				{ "include": "#strings" },
+				{ "include": "#var-ref" },
+				{ "include": "#env-ref" },
+				{ "include": "#numbers" },
+				{
+					"name": "punctuation.definition.block.constfile",
+					"match": "[{}]"
+				},
+				{
+					"comment": "Body line braces inside shell commands like awk {print} are literal.",
+					"name": "string.unquoted.constfile",
+					"match": "[^{}\\s][^{}]*"
+				}
+			]
+		},
+		"value-content": {
+			"patterns": [
+				{ "include": "#env-ref" },
+				{ "include": "#var-ref" },
+				{
+					"comment": "$ prefix in a variable value creates a lazy command.",
+					"name": "keyword.operator.shell.constfile",
+					"match": "(\\$)"
+				},
+				{ "include": "#strings" },
+				{ "include": "#numbers" }
+			]
+		}
+	},
+	"scopeName": "source.constfile"
+}

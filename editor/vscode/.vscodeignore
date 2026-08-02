@@ -1,0 +1,7 @@
+.vscode/**
+src/**
+tsconfig.json
+server/**/*.go
+server/go.sum
+**/*.ts
+**/*.map

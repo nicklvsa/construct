@@ -136,11 +136,17 @@ func NewParser(file string) (*Parser, error) {
 		return nil, fmt.Errorf("failed to read file '%s': %w", file, err)
 	}
 
+	return NewParserFromContent(file, string(data)), nil
+}
+
+// NewParserFromContent builds a Parser from in-memory content. Used by the
+// language server to parse live document state without touching disk.
+func NewParserFromContent(file, content string) *Parser {
 	return &Parser{
 		InputFile: file,
 		Data:      &ParsedData{},
-		Lines:     strings.Split(string(data), "\n"),
-	}, nil
+		Lines:     strings.Split(content, "\n"),
+	}
 }
 
 func (p *Parser) findVariable(varName string, scope *string) (*Variable, error) {
