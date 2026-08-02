@@ -383,13 +383,20 @@ func (e *Executor) EvaluateCommand(command *Command) error {
 			return err
 		}
 
-		preBody, err := cleanCommandBody(preCmd)
-		if err != nil {
-			return err
-		}
-
-		if err := execCommandBody(preCmd, preBody); err != nil {
-			return err
+		// If this prereq has its own prereqs, recurse into EvaluateCommand so
+		// nested prereq outputs are registered before cleaning the body.
+		if len(preCmd.Prereqs) > 0 {
+			if err := e.EvaluateCommand(preCmd); err != nil {
+				return err
+			}
+		} else {
+			preBody, err := cleanCommandBody(preCmd)
+			if err != nil {
+				return err
+			}
+			if err := execCommandBody(preCmd, preBody); err != nil {
+				return err
+			}
 		}
 
 		command.PrereqCmds = append(command.PrereqCmds, preCmd)

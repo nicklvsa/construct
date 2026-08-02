@@ -7,8 +7,8 @@ build-lsp in editor/vscode/server {
     $ go build -o construct-lsp . as out
 }
 
-another {
-    $ echo "testing" as out
+another < hello {
+    $ echo "testing &hello.out"
 }
 
 build-ext < hello, build-lsp in editor/vscode {
@@ -17,4 +17,8 @@ build-ext < hello, build-lsp in editor/vscode {
     $ npx @vscode/vsce@latest package --no-git-tag-version
     $ code --install-extension constfile-0.2.0.vsix --force
     echo "&hello.out"
+}
+
+_ < another, build-ext {
+    echo "&another.0"
 }
