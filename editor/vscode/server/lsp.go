@@ -203,7 +203,9 @@ func (s *server) updateDoc(uri, text string, version int) {
 	}
 
 	s.docs[uri] = &docState{text: text, version: version, data: data}
-	s.publishDiagnostics(uri, namedOutputHints(text, data))
+	diags := namedOutputHints(text, data)
+	diags = append(diags, duplicatePrereqWarnings(text, data)...)
+	s.publishDiagnostics(uri, diags)
 }
 
 func (s *server) publishDiagnostics(uri string, diags []diagnostic) {
@@ -274,6 +276,69 @@ func fullRange(text string) range_ {
 		Start: position{Line: 0, Character: 0},
 		End:   position{Line: endLine, Character: endChar},
 	}
+}
+
+// duplicatePrereqWarnings scans command headers for duplicate prerequisites and
+// generates warning diagnostics on the duplicate occurrences.
+func duplicatePrereqWarnings(text string, data *pkg.ParsedData) []diagnostic {
+	diags := []diagnostic{}
+	lines := strings.Split(text, "\n")
+	for lineIdx, line := range lines {
+		lt := strings.IndexByte(line, '<')
+		if lt < 0 {
+			continue
+		}
+		brace := strings.IndexByte(line[lt:], '{')
+		if brace < 0 {
+			continue
+		}
+		segment := line[lt+1 : lt+brace]
+
+		// Split on commas and identify prereq names (tokens that are known commands).
+		seen := map[string]bool{}
+		searchPos := 0
+		for _, part := range strings.Split(segment, ",") {
+			part = strings.TrimSpace(part)
+			if part == "" {
+				continue
+			}
+			// Skip the "in <dir>" workdir modifier and path-like tokens.
+			if part == "in" || strings.Contains(part, " in ") || strings.ContainsAny(part, "/\\") {
+				searchPos += len(part) + 1
+				continue
+			}
+			// Check if this is a known command name.
+			if _, err := data.GetCommand(part); err != nil {
+				searchPos += len(part) + 1
+				continue
+			}
+			if seen[part] {
+				// Find the second occurrence's column in the full line.
+				absCol := strings.Index(line[searchPos:], part)
+				if absCol >= 0 {
+					absCol += searchPos
+				} else {
+					absCol = strings.LastIndex(line, part)
+				}
+				if absCol < 0 {
+					absCol = 0
+				}
+				diags = append(diags, diagnostic{
+					Range:    refRange(lineIdx, absCol, len(part)),
+					Severity: sevWarning,
+					Source:   "constfile",
+					Message:  fmt.Sprintf("duplicate prerequisite `%s`", part),
+				})
+			}
+			seen[part] = true
+			// Advance searchPos past this occurrence.
+			idx := strings.Index(line[searchPos:], part)
+			if idx >= 0 {
+				searchPos += idx + len(part)
+			}
+		}
+	}
+	return diags
 }
 
 // namedOutputHints scans the document for &prereq.suffix references and validates

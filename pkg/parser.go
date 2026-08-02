@@ -343,13 +343,28 @@ func extractPrerequisiteString(line string) string {
 
 	segment := line[start+1 : start+end]
 
-	// If there's an " in <dir>" workdir modifier in this segment, the prereqs
-	// end before it.
-	if inIdx := strings.Index(segment, " in "); inIdx >= 0 {
-		segment = segment[:inIdx]
+	// The segment may contain prereqs, an " in <dir>" modifier, and more prereqs
+	// after the workdir. Split on commas, remove the workdir token and "in"
+	// keyword, and keep the rest as prereq names.
+	parts := strings.Split(segment, ",")
+	var prereqs []string
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" || part == "in" {
+			continue
+		}
+		// Skip path-like tokens (the workdir directory).
+		if strings.ContainsAny(part, "/\\") {
+			continue
+		}
+		// Skip "in <path>" combined tokens.
+		if strings.HasPrefix(part, "in ") {
+			continue
+		}
+		prereqs = append(prereqs, part)
 	}
 
-	return strings.TrimSpace(segment)
+	return strings.Join(prereqs, ", ")
 }
 
 // extractWorkDir finds the " in <dir>" modifier that sits between the end of
@@ -361,14 +376,16 @@ func extractWorkDir(line string) string {
 	}
 
 	segment := line[:brace]
-	// The header portion before '{' may contain: name, (args), < prereqs, in dir.
-	// Find the last " in " token — the workdir is whatever follows it.
 	idx := strings.LastIndex(segment, " in ")
 	if idx == -1 {
 		return ""
 	}
 
 	dir := strings.TrimSpace(segment[idx+4:])
+	// The workdir ends at the first comma — anything after is a trailing prereq.
+	if comma := strings.IndexByte(dir, ','); comma >= 0 {
+		dir = strings.TrimSpace(dir[:comma])
+	}
 	return dir
 }
 

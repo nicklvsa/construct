@@ -7,6 +7,10 @@ build-lsp in editor/vscode/server {
     $ go build -o construct-lsp . as out
 }
 
+another {
+    $ echo "testing" as out
+}
+
 build-ext < hello, build-lsp in editor/vscode {
     $ npm install --silent
     $ npm run compile

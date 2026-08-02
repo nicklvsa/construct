@@ -145,7 +145,7 @@ func TestExtractPrerequisiteString(t *testing.T) {
 		{
 			name:     "prerequisites with spaces",
 			input:    "run < build , test , lint {",
-			expected: "build , test , lint",
+			expected: "build, test, lint",
 		},
 		{
 			name:     "cloud command with prereqs",
