@@ -147,6 +147,31 @@ build {
 }
 ```
 
+Conditions support the comparison operators `==`, `!=`, `>`, `>=`, `<`, `<=`
+(numeric when both sides are integers, otherwise lexicographic), plus the
+`contains` operator for substring tests:
+
+```
+package {
+    if "&target" contains "windows" {
+        $ build.exe
+    } else {
+        $ build
+    }
+}
+```
+
+Conditionals can be nested inside `for` loops, where they're re-evaluated on
+each iteration with the current loop variable:
+
+```
+for spec in darwin/arm64, windows/amd64 {
+    if "&spec" contains "windows" {
+        $ echo "windows target: &spec"
+    }
+}
+```
+
 ## Example Constfile
 
 ```

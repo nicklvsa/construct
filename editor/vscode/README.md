@@ -12,37 +12,42 @@ Syntax highlighting and language intelligence for [Constfiles](https://github.co
 
 ## Prerequisites
 
-- [Go 1.26+](https://go.dev/dl/) installed and on your `PATH` (to build the language server).
 - VSCode 1.75+.
 
-## Setup
-
-The language server is a small Go binary that ships as source in this folder. Build it once:
-
-```bash
-cd editor/vscode/server
-go build -o construct-lsp .        # Windows: -o construct-lsp.exe
-```
-
-> On Windows, name the binary `construct-lsp.exe`. On macOS/Linux, name it `construct-lsp`.
+Go is **not** required to use the published extension — the language server ships as a prebuilt binary (one per platform). Go is only needed if you're building/packaging the extension from source.
 
 ## Installing the extension locally
 
-### Option A — Install from this folder
+### Option A — Install a prebuilt `.vsix`
 
-1. Open VSCode.
-2. Run the command **"Developer: Install Extension from Location..."**.
-3. Select the `editor/vscode/` folder.
+Grab the `.vsix` for your platform and install it:
 
-### Option B — Package as a `.vsix`
+```bash
+code --install-extension constfile-<platform>-0.2.0.vsix
+```
+
+where `<platform>` is one of `darwin-arm64`, `darwin-x64`, `linux-x64`, `linux-arm64`, `win32-x64`, `win32-arm64`.
+
+### Option B — Package from source
+
+The language server is a native Go binary, so each platform gets its own VSIX. A packaging script cross-compiles the server for the right `GOOS`/`GOARCH` and tags the package with `vsce --target` so VS Code auto-selects the correct one.
 
 ```bash
 cd editor/vscode
 npm install
-npm run compile        # compile the TS client
-npm run package        # produces constfile-0.1.0.vsix
-code --install-extension constfile-0.1.0.vsix
+
+# Build for every supported platform (produces 6 .vsix files):
+npm run package:all
+
+# Or a single platform:
+./scripts/package.sh darwin-arm64
+
+# Or a universal (untagged) VSIX using the host's native binary,
+# handy for local dev installs:
+npm run package:native
 ```
+
+Go cross-compiles, so all 6 targets build from a single host (e.g. your Mac) — no target-platform toolchain needed.
 
 After installation, open any `Constfile` or `Constfile-*` file. You should see syntax highlighting immediately; the language server starts automatically and provides diagnostics, hover, and go-to-definition.
 

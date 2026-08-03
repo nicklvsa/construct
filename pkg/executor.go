@@ -605,6 +605,16 @@ func resolveEnvRefs(s string) string {
 func evaluateCondition(cond string) bool {
 	cond = strings.TrimSpace(cond)
 
+	// Keyword operators (checked before symbol operators so the words are
+	// claimed as operators rather than scanned as operands).
+	if idx := strings.Index(cond, " contains "); idx > 0 {
+		left := strings.TrimSpace(cond[:idx])
+		right := strings.TrimSpace(cond[idx+len(" contains "):])
+		left = strings.Trim(left, "\"")
+		right = strings.Trim(right, "\"")
+		return strings.Contains(left, right)
+	}
+
 	ops := []string{"==", "!=", ">=", "<=", ">", "<"}
 	for _, op := range ops {
 		if idx := strings.Index(cond, op); idx > 0 {

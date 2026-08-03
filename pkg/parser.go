@@ -696,12 +696,31 @@ func (p *Parser) parseForBlock(raw []string, scope string) (BodyStatement, int, 
 
 	var bodyLines []string
 	consumed := 1
+	depth := 0
 	for consumed < len(raw) {
 		l := raw[consumed]
 		trimmed := strings.TrimSpace(l)
-		if trimmed == "}" || strings.HasPrefix(trimmed, "}") {
+
+		isInnerIf := strings.HasPrefix(trimmed, "if ") && strings.Contains(trimmed, "{")
+		isInnerFor := strings.HasPrefix(trimmed, "for ") && strings.Contains(trimmed, "{")
+		if isInnerIf || isInnerFor {
+			depth++
+		}
+
+		if strings.HasPrefix(trimmed, "}") {
+			if depth > 0 {
+				if !strings.Contains(trimmed, "else") {
+					depth--
+				} else {
+					// "} else {" closes the then-block and opens the else-block: depth unchanged.
+				}
+				bodyLines = append(bodyLines, l)
+				consumed++
+				continue
+			}
 			break
 		}
+
 		bodyLines = append(bodyLines, l)
 		consumed++
 	}

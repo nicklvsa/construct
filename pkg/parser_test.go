@@ -1170,6 +1170,133 @@ func TestParseIfBlockNoElse(t *testing.T) {
 	}
 }
 
+// TestParseForBlock verifies a basic for loop parses to the right structure.
+func TestParseForBlock(t *testing.T) {
+	input := `build {
+    $ echo before
+    for item in a, b, c {
+        $ echo &item
+    }
+    $ echo after
+}`
+	lines := strings.Split(input, "\n")
+	parser := &Parser{Data: &ParsedData{}, Lines: lines}
+
+	if _, err := parser.parseCommand(0, "build {", false); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(parser.Data.Commands) != 1 {
+		t.Fatalf("expected 1 command, got %d", len(parser.Data.Commands))
+	}
+	cmd := parser.Data.Commands[0]
+	// Expected body: [shell:before, for, shell:after]
+	if len(cmd.Body) != 3 {
+		t.Fatalf("expected 3 body statements, got %d: %#v", len(cmd.Body), cmd.Body)
+	}
+	if cmd.Body[0].Type != "shell" || cmd.Body[0].Shell != "$ echo before" {
+		t.Errorf("stmt[0] = %#v, want shell '$ echo before'", cmd.Body[0])
+	}
+	if cmd.Body[1].Type != "for" {
+		t.Fatalf("stmt[1] type = %q, want 'for'", cmd.Body[1].Type)
+	}
+	if cmd.Body[1].LoopVar != "item" {
+		t.Errorf("loop var = %q, want 'item'", cmd.Body[1].LoopVar)
+	}
+	if cmd.Body[1].LoopItems != "a, b, c" {
+		t.Errorf("loop items = %q, want 'a, b, c'", cmd.Body[1].LoopItems)
+	}
+	if len(cmd.Body[1].LoopBody) != 1 || cmd.Body[1].LoopBody[0].Shell != "$ echo &item" {
+		t.Errorf("loop body = %#v", cmd.Body[1].LoopBody)
+	}
+	if cmd.Body[2].Type != "shell" || cmd.Body[2].Shell != "$ echo after" {
+		t.Errorf("stmt[2] = %#v, want shell '$ echo after'", cmd.Body[2])
+	}
+}
+
+// TestParseForBlockWithIf verifies an if block nests inside a for loop.
+// Regression test: parseForBlock previously broke on any line starting with
+// '}', so a nested if's closing brace terminated the for early.
+func TestParseForBlockWithIf(t *testing.T) {
+	input := `build {
+    for item in a, b {
+        if "&item" == "a" {
+            $ echo yes
+        } else {
+            $ echo no
+        }
+        $ echo tail
+    }
+    $ echo after
+}`
+	lines := strings.Split(input, "\n")
+	parser := &Parser{Data: &ParsedData{}, Lines: lines}
+
+	if _, err := parser.parseCommand(0, "build {", false); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	cmd := parser.Data.Commands[0]
+	// Expected body: [for, shell:after]
+	if len(cmd.Body) != 2 {
+		t.Fatalf("expected 2 body statements, got %d: %#v", len(cmd.Body), cmd.Body)
+	}
+	if cmd.Body[0].Type != "for" {
+		t.Fatalf("stmt[0] type = %q, want 'for'", cmd.Body[0].Type)
+	}
+	loopBody := cmd.Body[0].LoopBody
+	// Loop body should contain: [if, shell:tail] — proving the if's closing
+	// braces did NOT terminate the for, and the tail line is still inside.
+	if len(loopBody) != 2 {
+		t.Fatalf("expected 2 statements in loop body, got %d: %#v", len(loopBody), loopBody)
+	}
+	if loopBody[0].Type != "if" {
+		t.Errorf("loop body[0] type = %q, want 'if'", loopBody[0].Type)
+	}
+	if len(loopBody[0].ThenBody) != 1 || loopBody[0].ThenBody[0].Shell != "$ echo yes" {
+		t.Errorf("then body = %#v", loopBody[0].ThenBody)
+	}
+	if len(loopBody[0].ElseBody) != 1 || loopBody[0].ElseBody[0].Shell != "$ echo no" {
+		t.Errorf("else body = %#v", loopBody[0].ElseBody)
+	}
+	if loopBody[1].Type != "shell" || loopBody[1].Shell != "$ echo tail" {
+		t.Errorf("loop body[1] = %#v, want shell '$ echo tail'", loopBody[1])
+	}
+	if cmd.Body[1].Type != "shell" || cmd.Body[1].Shell != "$ echo after" {
+		t.Errorf("stmt[1] = %#v, want shell '$ echo after'", cmd.Body[1])
+	}
+}
+
+// TestParseForBlockNestedFor verifies a for loop nests inside another for.
+func TestParseForBlockNestedFor(t *testing.T) {
+	input := `build {
+    for outer in x, y {
+        for inner in 1, 2 {
+            $ echo &outer &inner
+        }
+    }
+    $ echo done
+}`
+	lines := strings.Split(input, "\n")
+	parser := &Parser{Data: &ParsedData{}, Lines: lines}
+
+	if _, err := parser.parseCommand(0, "build {", false); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	cmd := parser.Data.Commands[0]
+	if len(cmd.Body) != 2 || cmd.Body[0].Type != "for" {
+		t.Fatalf("expected [for, shell], got %#v", cmd.Body)
+	}
+	outer := cmd.Body[0].LoopBody
+	if len(outer) != 1 || outer[0].Type != "for" {
+		t.Fatalf("expected nested for in outer loop body, got %#v", outer)
+	}
+	if len(outer[0].LoopBody) != 1 || outer[0].LoopBody[0].Shell != "$ echo &outer &inner" {
+		t.Errorf("inner loop body = %#v", outer[0].LoopBody)
+	}
+	if cmd.Body[1].Shell != "$ echo done" {
+		t.Errorf("stmt after loops = %#v", cmd.Body[1])
+	}
+}
+
 // TestEvaluateCondition covers the condition evaluator.
 func TestEvaluateCondition(t *testing.T) {
 	tests := []struct {
@@ -1188,6 +1315,12 @@ func TestEvaluateCondition(t *testing.T) {
 		{name: "numeric lte equal", cond: `"5" <= "5"`, want: true},
 		{name: "lexicographic when non-numeric", cond: `"abc" < "abd"`, want: true},
 		{name: "mixed numeric and string", cond: `"18" > "abc"`, want: false}, // falls back to string
+		{name: "contains true", cond: `"windows/amd64" contains "windows"`, want: true},
+		{name: "contains false", cond: `"darwin/arm64" contains "windows"`, want: false},
+		{name: "contains substring mid", cond: `"darwin-arm64" contains "arm"`, want: true},
+		{name: "contains exact match", cond: `"abc" contains "abc"`, want: true},
+		{name: "contains empty needle", cond: `"abc" contains ""`, want: true},
+		{name: "contains unquoted left operand", cond: `windows/amd64 contains "windows"`, want: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

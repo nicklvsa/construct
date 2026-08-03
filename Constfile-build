@@ -11,15 +11,28 @@ another < hello {
     $ echo "testing &hello.out"
 }
 
-build-ext < hello, build-lsp in editor/vscode {
+install in editor/vscode {
     $ npm install --silent
-    $ npm run compile
-    $ npx @vscode/vsce@latest package --no-git-tag-version
-    $ code --install-extension constfile-0.2.0.vsix --force
-    echo "&hello.out"
+}
+
+build-ext < build-lsp, install {
+    $ cd editor/vscode && npx @vscode/vsce@latest package --no-yarn
+}
+
+build-all < install {
+    for spec in darwin/arm64/darwin-arm64, darwin/amd64/darwin-x64, linux/amd64/linux-x64, linux/arm64/linux-arm64, windows/amd64/win32-x64, windows/arm64/win32-arm64 {
+        $ IFS=/ read -r goos goarch vscetarget <<< "&spec" && echo "==> $vscetarget (GOOS=$goos GOARCH=$goarch)"
+        $ rm -f editor/vscode/server/construct-lsp editor/vscode/server/construct-lsp.exe
+        if "&spec" contains "windows" {
+            $ IFS=/ read -r goos goarch vscetarget <<< "&spec" && cd editor/vscode/server && GOOS=$goos GOARCH=$goarch go build -o construct-lsp.exe .
+        } else {
+            $ IFS=/ read -r goos goarch vscetarget <<< "&spec" && cd editor/vscode/server && GOOS=$goos GOARCH=$goarch go build -o construct-lsp .
+        }
+        $ IFS=/ read -r goos goarch vscetarget <<< "&spec" && cd editor/vscode && npx @vscode/vsce@latest package --target "$vscetarget" --no-yarn
+    }
 }
 
 _ < another, build-ext {
-    echo "&build-ext.1"
     echo "&another.0"
+    echo "&build-ext.0"
 }

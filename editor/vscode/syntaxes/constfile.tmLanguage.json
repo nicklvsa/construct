@@ -12,11 +12,11 @@
 			"patterns": [
 				{
 					"name": "comment.line.double-slash.constfile",
-					"match": "(\\/\\/.*$)"
+					"match": "(?<![A-Za-z0-9_:])\\/\\/.*$"
 				},
 				{
 					"name": "comment.line.number-sign.constfile",
-					"match": "(#.*$)"
+					"match": "(?<![A-Za-z0-9_])#.*$"
 				}
 			]
 		},
@@ -39,7 +39,7 @@
 			"patterns": [
 				{
 					"name": "keyword.control.constfile",
-					"match": "\\b(opt|if|else|for|in)\\b"
+					"match": "\\b(opt|if|else|for|in|contains)\\b"
 				}
 			]
 		},
