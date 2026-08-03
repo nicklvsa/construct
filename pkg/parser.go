@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"unicode"
 )
 
@@ -14,6 +15,8 @@ type ParsedData struct {
 
 	variableMap map[string]*Variable // key: "scope.name"
 	commandMap  map[string]*Command  // key: command name
+
+	mu sync.RWMutex
 }
 
 func (p *ParsedData) buildIndexMaps() {
@@ -29,18 +32,87 @@ func (p *ParsedData) buildIndexMaps() {
 }
 
 func (p *ParsedData) AddVariable(v *Variable) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
 	p.Variables = append(p.Variables, v)
 	if p.variableMap != nil {
 		p.variableMap[v.Scope+"."+v.Name] = v
 	}
 }
 
+func (p *ParsedData) SetVariable(name, scope, value string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if p.variableMap != nil {
+		key := scope + "." + name
+		if v, ok := p.variableMap[key]; ok {
+			v.Value = value
+			return
+		}
+		v := &Variable{Name: name, Value: value, Scope: scope}
+		p.Variables = append(p.Variables, v)
+		p.variableMap[key] = v
+		return
+	}
+
+	for _, v := range p.Variables {
+		if v.Name == name && v.Scope == scope {
+			v.Value = value
+			return
+		}
+	}
+	p.Variables = append(p.Variables, &Variable{Name: name, Value: value, Scope: scope})
+}
+
+func (p *ParsedData) LookupVariable(name, scope string) (string, bool) {
+	if strings.IndexByte(name, '"') >= 0 {
+		name = strings.ReplaceAll(name, `"`, "")
+	}
+	if scope == "" {
+		scope = "global"
+	}
+
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	if p.variableMap != nil {
+		if v, ok := p.variableMap[scope+"."+name]; ok {
+			return v.Value, true
+		}
+		if scope != "global" {
+			if v, ok := p.variableMap["global."+name]; ok {
+				return v.Value, true
+			}
+		}
+		return "", false
+	}
+
+	for _, v := range p.Variables {
+		if v.Name == name && v.Scope == scope {
+			return v.Value, true
+		}
+	}
+	for _, v := range p.Variables {
+		if v.Name == name && v.Scope == "global" {
+			return v.Value, true
+		}
+	}
+	return "", false
+}
+
 func (p *ParsedData) GetVariable(variableName, scope string) (*Variable, error) {
-	variableName = strings.ReplaceAll(variableName, `"`, "")
+	if strings.IndexByte(variableName, '"') >= 0 {
+		variableName = strings.ReplaceAll(variableName, `"`, "")
+	}
 
 	if scope == "" {
 		scope = "global"
 	}
+
+	p.mu.RLock()
+	defer p.mu.RUnlock()
 
 	if p.variableMap != nil {
 		if v, ok := p.variableMap[scope+"."+variableName]; ok {

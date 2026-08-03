@@ -326,8 +326,52 @@ func TestExecConcurrentError(t *testing.T) {
 	}
 }
 
-// TestExecFiltersEmptyAndFlags verifies that empty strings and leftover flags
-// are skipped instead of panicking on cmdName[0].
+func TestExecSharedPrereq(t *testing.T) {
+	run := func(concurrent bool) {
+		data := &ParsedData{
+			Commands: []*Command{
+				{Name: "gen", Body: shellBody("echo shared")},
+				{Name: "a", Prereqs: []string{"gen"}, Body: shellBody("$ echo a:&gen.0")},
+				{Name: "b", Prereqs: []string{"gen"}, Body: shellBody("$ echo b:&gen.0")},
+			},
+		}
+		data.buildIndexMaps()
+
+		executor := NewExecutor(data, concurrent, false)
+		if err := executor.Execute([]string{"a", "b"}); err != nil {
+			t.Fatalf("concurrent=%v Execute failed: %v", concurrent, err)
+		}
+
+		gen, _ := data.GetCommand("gen")
+		if len(gen.PrereqOutput) != 1 || gen.PrereqOutput[0] != "shared" {
+			t.Errorf("concurrent=%v shared prereq output = %#v, want [\"shared\"]", concurrent, gen.PrereqOutput)
+		}
+	}
+
+	run(false)
+	run(true)
+}
+
+// TestExecSameTargetTwice verifies that listing a command twice within one
+// invocation executes it once (make-style dedup), while separate Exec calls
+// re-run it.
+func TestExecSameTargetTwice(t *testing.T) {
+	data := &ParsedData{
+		Commands: []*Command{
+			{Name: "say", Body: shellBody("echo hi")},
+		},
+	}
+	data.buildIndexMaps()
+
+	executor := NewExecutor(data, false, false)
+	if err := executor.Execute([]string{"say", "say"}); err != nil {
+		t.Fatalf("Execute failed: %v", err)
+	}
+	if err := executor.Execute([]string{"say"}); err != nil {
+		t.Fatalf("second Execute failed: %v", err)
+	}
+}
+
 func TestExecFiltersEmptyAndFlags(t *testing.T) {
 	data := &ParsedData{
 		Commands: []*Command{
@@ -344,8 +388,6 @@ func TestExecFiltersEmptyAndFlags(t *testing.T) {
 	}
 }
 
-// TestExecUnknownCommand verifies that running an unknown command yields a
-// clear error rather than a nil-pointer dereference.
 func TestExecUnknownCommand(t *testing.T) {
 	data := &ParsedData{
 		Commands: []*Command{
@@ -377,9 +419,6 @@ func TestExecDefaultCommand(t *testing.T) {
 	}
 }
 
-// TestParseCommandBodyBraceInString is a parser regression test ensuring that a
-// closing brace appearing inside a shell command does not prematurely end the
-// command body.
 func TestParseCommandBodyBraceInString(t *testing.T) {
 	input := "awk {\n    $ awk '{print $1}'\n}"
 	lines := strings.Split(input, "\n")
@@ -399,8 +438,6 @@ func TestParseCommandBodyBraceInString(t *testing.T) {
 	}
 }
 
-// TestStripInlineCommentEscapedQuotes covers the escaped-quote path in
-// stripInlineComment so `\"` inside a quoted string doesn't desync tracking.
 func TestStripInlineCommentEscapedQuotes(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -423,8 +460,6 @@ func TestStripInlineCommentEscapedQuotes(t *testing.T) {
 	}
 }
 
-// TestResolveVarRefs covers the inline variable-reference resolver used by
-// cleanCommandBody for non-$ lines.
 func TestResolveVarRefs(t *testing.T) {
 	lookup := func(name string) (string, bool) {
 		vals := map[string]string{"g": "GV", "name": "nick", "build-lsp.0": "output1"}
@@ -454,8 +489,41 @@ func TestResolveVarRefs(t *testing.T) {
 	}
 }
 
-// TestEvaluateCommandPrereqCapture verifies that prerequisite output is captured
-// into PrereqOutput and made available as &prereq.N variables to the parent.
+func TestResolveRefsByteRuneParity(t *testing.T) {
+	lookup := func(name string) (string, bool) {
+		vals := map[string]string{"g": "GV", "name": "nick", "build-lsp.0": "output1", "café": "nonascii"}
+		v, ok := vals[name]
+		return v, ok
+	}
+
+	t.Setenv("CONSTRUCT_PARITY_ENV", "envval")
+
+	cases := []string{
+		"echo hi",
+		"echo &g and &name",
+		"echo &build-lsp.0",
+		"x &nope y",
+		"a & b",
+		"& at start &name at end",
+		"tail &g&name",
+		"&g.5",
+		"echo @CONSTRUCT_PARITY_ENV",
+		"@ & @CONSTRUCT_PARITY_ENV x",
+		"mix &g and @CONSTRUCT_PARITY_ENV",
+		"café &café café",
+		"日本語 &name テスト",
+		"line with trailing &",
+	}
+	for _, tc := range cases {
+		if got, want := resolveVarRefs(tc, lookup), resolveVarRefsRunes(tc, lookup); got != want {
+			t.Errorf("resolveVarRefs(%q): byte=%q rune=%q", tc, got, want)
+		}
+		if got, want := resolveEnvRefs(tc), resolveEnvRefsRunes(tc); got != want {
+			t.Errorf("resolveEnvRefs(%q): byte=%q rune=%q", tc, got, want)
+		}
+	}
+}
+
 func TestEvaluateCommandPrereqCapture(t *testing.T) {
 	data := &ParsedData{
 		Commands: []*Command{
@@ -476,8 +544,6 @@ func TestEvaluateCommandPrereqCapture(t *testing.T) {
 	}
 }
 
-// TestEvaluateCommandLazyVariable verifies that a lazy variable ($ in a var
-// definition) gets its value populated from command stdout at execution time.
 func TestEvaluateCommandLazyVariable(t *testing.T) {
 	data := &ParsedData{
 		Variables: []*Variable{
@@ -507,8 +573,6 @@ func TestEvaluateCommandLazyVariable(t *testing.T) {
 	}
 }
 
-// TestEvaluateCommandVarSubstitution verifies that &variable references inside
-// a command body are substituted before execution.
 func TestEvaluateCommandVarSubstitution(t *testing.T) {
 	data := &ParsedData{
 		Variables: []*Variable{
@@ -526,9 +590,6 @@ func TestEvaluateCommandVarSubstitution(t *testing.T) {
 	}
 }
 
-// TestEvaluateCommandIdempotent verifies that running the same command twice
-// does not accumulate substitutions (regression guard for the shared-mutation
-// fix: cleanCommandBody must not write back into command.Body).
 func TestEvaluateCommandIdempotent(t *testing.T) {
 	data := &ParsedData{
 		Variables: []*Variable{
@@ -555,8 +616,6 @@ func TestEvaluateCommandIdempotent(t *testing.T) {
 	}
 }
 
-// TestTryApplyCloudBody verifies that a cloud-accessible command gets the cloud
-// body appended, while a non-cloud command is left alone.
 func TestTryApplyCloudBody(t *testing.T) {
 	t.Setenv("CONSTRUCT_CLOUD_FILE", "testdata/cloud_test.json")
 
@@ -581,8 +640,6 @@ func TestTryApplyCloudBody(t *testing.T) {
 	})
 }
 
-// TestEvaluateCommandWorkDir verifies that cmd.Dir is set from WorkDir, causing
-// the command to execute in the specified directory.
 func TestEvaluateCommandWorkDir(t *testing.T) {
 	// Create a temp subdir to use as the workdir.
 	tmpDir := t.TempDir()

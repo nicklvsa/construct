@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/spf13/pflag"
 )
@@ -41,7 +42,15 @@ type Executor struct {
 	cloudLoaded     bool
 	shellName       string
 	shellArgs       []string
+	cache           fileCache
+	cacheLoaded     bool
+	runs            map[string]*commandRun
 	mu              sync.Mutex
+}
+
+type commandRun struct {
+	done chan struct{}
+	err  error
 }
 
 func defaultShell() (string, []string) {
@@ -115,6 +124,9 @@ func NewExecutor(data *ParsedData, concurrent bool, debug bool) *Executor {
 }
 
 func (e *Executor) loadCloudDefs() error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
 	if e.cloudLoaded {
 		return nil
 	}
@@ -152,27 +164,50 @@ func (e *Executor) SetDebug(debug bool) {
 }
 
 func (e *Executor) EvaluateCommand(command *Command) error {
+	if e.runs == nil {
+		return e.executeCommand(command)
+	}
+
+	e.mu.Lock()
+	if r, ok := e.runs[command.Name]; ok {
+		e.mu.Unlock()
+		<-r.done
+		return r.err
+	}
+	r := &commandRun{done: make(chan struct{})}
+	e.runs[command.Name] = r
+	e.mu.Unlock()
+
+	r.err = e.executeCommand(command)
+	close(r.done)
+	return r.err
+}
+
+func (e *Executor) executeCommand(command *Command) error {
+	isPrereq := false
+	e.mu.Lock()
+	if command.IsPrereq {
+		isPrereq = true
+		command.PrereqOutput = []string{}
+	}
+	e.mu.Unlock()
+
 	resolveValue := func(s, scope string) string {
 		s = resolveVarRefs(s, func(name string) (string, bool) {
-			v, err := e.StructuredParse.GetVariable(name, scope)
-			if err != nil || v == nil {
-				return "", false
-			}
-			return v.Value, true
+			return e.StructuredParse.LookupVariable(name, scope)
 		})
 		return resolveEnvRefs(s)
 	}
 
-	if len(command.FileDeps) > 0 && !command.IsPrereq {
+	if len(command.FileDeps) > 0 && !isPrereq {
 		if e.shouldSkip(command, resolveValue) {
 			fmt.Printf("(%s cached)\n", command.Name)
 			return nil
 		}
 	}
 
-	var execCommandBody func(target *Command, body []BodyStatement) error
-	execCommandBody = func(target *Command, body []BodyStatement) error {
-		isPrereq := target.IsPrereq
+	var execCommandBody func(target *Command, body []BodyStatement, isPrereq bool) error
+	execCommandBody = func(target *Command, body []BodyStatement, isPrereq bool) error {
 		for _, stmt := range body {
 			if stmt.Type == "if" {
 				cond := resolveValue(stmt.Cond, target.Name)
@@ -180,11 +215,11 @@ func (e *Executor) EvaluateCommand(command *Command) error {
 					fmt.Printf("[DEBUG] Evaluating condition: %s\n", cond)
 				}
 				if evaluateCondition(cond) {
-					if err := execCommandBody(target, stmt.ThenBody); err != nil {
+					if err := execCommandBody(target, stmt.ThenBody, isPrereq); err != nil {
 						return err
 					}
 				} else if stmt.ElseBody != nil {
-					if err := execCommandBody(target, stmt.ElseBody); err != nil {
+					if err := execCommandBody(target, stmt.ElseBody, isPrereq); err != nil {
 						return err
 					}
 				}
@@ -215,23 +250,18 @@ func (e *Executor) EvaluateCommand(command *Command) error {
 					}
 				}
 
+				argFlags := make(map[string]bool)
+				for _, arg := range target.Arguments {
+					argFlags[target.Name+":"+arg.Name] = true
+				}
+
 				for _, item := range expanded {
-					e.mu.Lock()
-					e.StructuredParse.AddVariable(&Variable{
-						Name:  stmt.LoopVar,
-						Value: item,
-						Scope: target.Name,
-					})
-					e.mu.Unlock()
+					e.StructuredParse.SetVariable(stmt.LoopVar, target.Name, item)
 					if e.debug {
 						fmt.Printf("[DEBUG] For loop %s = %s\n", stmt.LoopVar, item)
 					}
-					argFlags := make(map[string]bool)
-					for _, arg := range target.Arguments {
-						argFlags[target.Name+":"+arg.Name] = true
-					}
 					cleaned := e.cleanStatements(stmt.LoopBody, target, argFlags)
-					if err := execCommandBody(target, cleaned); err != nil {
+					if err := execCommandBody(target, cleaned, isPrereq); err != nil {
 						return err
 					}
 				}
@@ -326,14 +356,7 @@ func (e *Executor) EvaluateCommand(command *Command) error {
 					}
 				}
 			case target.LazyEval != nil:
-				e.mu.Lock()
-				variable, err := e.StructuredParse.GetVariable(target.LazyEval.VarName, target.LazyEval.Scope)
-				if err != nil {
-					e.mu.Unlock()
-					return err
-				}
-				variable.Value = strOutput
-				e.mu.Unlock()
+				e.StructuredParse.SetVariable(target.LazyEval.VarName, target.LazyEval.Scope, strOutput)
 				if e.debug {
 					fmt.Printf("[DEBUG] Set variable %s.%s = %s\n", target.LazyEval.Scope, target.LazyEval.VarName, strOutput)
 				}
@@ -350,24 +373,12 @@ func (e *Executor) EvaluateCommand(command *Command) error {
 			for _, prereq := range cmd.PrereqCmds {
 				for idx, arg := range prereq.PrereqOutput {
 					varName := prereq.Name + "." + fmt.Sprintf("%d", idx)
-					e.mu.Lock()
-					e.StructuredParse.AddVariable(&Variable{
-						Name:  strings.TrimSpace(varName),
-						Value: strings.TrimSpace(arg),
-						Scope: cmd.Name,
-					})
-					e.mu.Unlock()
+					e.StructuredParse.SetVariable(strings.TrimSpace(varName), cmd.Name, strings.TrimSpace(arg))
 				}
 				// Register named outputs (&prereq.name)
 				for name, val := range prereq.NamedOutput {
 					varName := prereq.Name + "." + name
-					e.mu.Lock()
-					e.StructuredParse.AddVariable(&Variable{
-						Name:  varName,
-						Value: strings.TrimSpace(val),
-						Scope: cmd.Name,
-					})
-					e.mu.Unlock()
+					e.StructuredParse.SetVariable(varName, cmd.Name, strings.TrimSpace(val))
 				}
 			}
 		}
@@ -424,27 +435,10 @@ func (e *Executor) EvaluateCommand(command *Command) error {
 
 		e.mu.Lock()
 		preCmd.IsPrereq = true
-		preCmd.PrereqOutput = []string{}
 		e.mu.Unlock()
 
-		if err := e.tryApplyCloudBody(preCmd); err != nil {
+		if err := e.EvaluateCommand(preCmd); err != nil {
 			return err
-		}
-
-		// If this prereq has its own prereqs, recurse into EvaluateCommand so
-		// nested prereq outputs are registered before cleaning the body.
-		if len(preCmd.Prereqs) > 0 {
-			if err := e.EvaluateCommand(preCmd); err != nil {
-				return err
-			}
-		} else {
-			preBody, err := cleanCommandBody(preCmd)
-			if err != nil {
-				return err
-			}
-			if err := execCommandBody(preCmd, preBody); err != nil {
-				return err
-			}
 		}
 
 		command.PrereqCmds = append(command.PrereqCmds, preCmd)
@@ -459,11 +453,11 @@ func (e *Executor) EvaluateCommand(command *Command) error {
 		return err
 	}
 
-	if err := execCommandBody(command, body); err != nil {
+	if err := execCommandBody(command, body, isPrereq); err != nil {
 		return err
 	}
 
-	if len(command.FileDeps) > 0 && !command.IsPrereq {
+	if len(command.FileDeps) > 0 && !isPrereq {
 		e.updateCache(command, resolveValue)
 	}
 
@@ -506,11 +500,7 @@ func (e *Executor) cleanShellLine(cmd *Command, line string, argFlags map[string
 	}
 
 	line = resolveVarRefs(line, func(name string) (string, bool) {
-		v, err := e.StructuredParse.GetVariable(name, cmd.Name)
-		if err != nil || v == nil {
-			return "", false
-		}
-		return v.Value, true
+		return e.StructuredParse.LookupVariable(name, cmd.Name)
 	})
 
 	for _, arg := range cmd.Arguments {
@@ -538,7 +528,68 @@ func (e *Executor) cleanShellLine(cmd *Command, line string, argFlags map[string
 	return line
 }
 
+func isVarIdentByte(c byte) bool {
+	return c == '_' || c == '-' ||
+		(c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
+}
+
+func isPlainIdentByte(c byte) bool {
+	return c == '_' ||
+		(c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
+}
+
+func isASCII(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] >= utf8.RuneSelf {
+			return false
+		}
+	}
+	return true
+}
+
 func resolveVarRefs(line string, lookup func(string) (string, bool)) string {
+	if strings.IndexByte(line, '&') < 0 {
+		return line
+	}
+	if !isASCII(line) {
+		return resolveVarRefsRunes(line, lookup)
+	}
+
+	var result strings.Builder
+	result.Grow(len(line))
+	i := 0
+	for i < len(line) {
+		if line[i] == '&' {
+			j := i + 1
+			start := j
+			for j < len(line) && isVarIdentByte(line[j]) {
+				j++
+			}
+			if j < len(line) && line[j] == '.' {
+				k := j + 1
+				ks := k
+				for k < len(line) && isPlainIdentByte(line[k]) {
+					k++
+				}
+				if k > ks {
+					j = k
+				}
+			}
+			if name := line[start:j]; name != "" {
+				if val, ok := lookup(name); ok {
+					result.WriteString(val)
+					i = j
+					continue
+				}
+			}
+		}
+		result.WriteByte(line[i])
+		i++
+	}
+	return result.String()
+}
+
+func resolveVarRefsRunes(line string, lookup func(string) (string, bool)) string {
 	var result strings.Builder
 	runes := []rune(line)
 	i := 0
@@ -580,6 +631,35 @@ func resolveVarRefs(line string, lookup func(string) (string, bool)) string {
 
 // resolveEnvRefs replaces @ENVNAME references with the corresponding env var.
 func resolveEnvRefs(s string) string {
+	if strings.IndexByte(s, '@') < 0 {
+		return s
+	}
+	if !isASCII(s) {
+		return resolveEnvRefsRunes(s)
+	}
+
+	var result strings.Builder
+	result.Grow(len(s))
+	for i := 0; i < len(s); {
+		if s[i] == '@' {
+			j := i + 1
+			start := j
+			for j < len(s) && isPlainIdentByte(s[j]) {
+				j++
+			}
+			if j > start {
+				result.WriteString(os.Getenv(s[start:j]))
+				i = j
+				continue
+			}
+		}
+		result.WriteByte(s[i])
+		i++
+	}
+	return result.String()
+}
+
+func resolveEnvRefsRunes(s string) string {
 	var result strings.Builder
 	runes := []rune(s)
 	for i := 0; i < len(runes); {
@@ -691,6 +771,8 @@ func (e *Executor) tryApplyCloudBody(cmd *Command) error {
 }
 
 func (e *Executor) Exec(commands []string) error {
+	e.runs = make(map[string]*commandRun)
+
 	targets := make([]string, 0, len(commands))
 	for _, cmdName := range commands {
 		if cmdName == "" || cmdName[0] == '-' {
@@ -861,12 +943,17 @@ func (fc fileCache) save() {
 }
 
 func hashFile(path string) string {
-	data, err := os.ReadFile(path)
+	f, err := os.Open(path)
 	if err != nil {
 		return ""
 	}
-	h := sha256.Sum256(data)
-	return hex.EncodeToString(h[:])
+	defer f.Close()
+
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return ""
+	}
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 func expandFileDeps(patterns []string, workDir string) []string {
@@ -887,6 +974,17 @@ func expandFileDeps(patterns []string, workDir string) []string {
 	return files
 }
 
+func (e *Executor) cacheManifest() fileCache {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	if !e.cacheLoaded {
+		e.cache = loadFileCache()
+		e.cacheLoaded = true
+	}
+	return e.cache
+}
+
 func (e *Executor) shouldSkip(cmd *Command, resolve func(string, string) string) bool {
 	wd := resolve(cmd.WorkDir, cmd.Name)
 	files := expandFileDeps(cmd.FileDeps, wd)
@@ -894,7 +992,7 @@ func (e *Executor) shouldSkip(cmd *Command, resolve func(string, string) string)
 		return false
 	}
 
-	fc := loadFileCache()
+	fc := e.cacheManifest()
 	cached, exists := fc[cmd.Name]
 	if !exists {
 		return false
@@ -915,7 +1013,15 @@ func (e *Executor) shouldSkip(cmd *Command, resolve func(string, string) string)
 func (e *Executor) updateCache(cmd *Command, resolve func(string, string) string) {
 	wd := resolve(cmd.WorkDir, cmd.Name)
 	files := expandFileDeps(cmd.FileDeps, wd)
-	fc := loadFileCache()
+
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	if !e.cacheLoaded {
+		e.cache = loadFileCache()
+		e.cacheLoaded = true
+	}
+	fc := e.cache
 	if fc[cmd.Name] == nil {
 		fc[cmd.Name] = make(map[string]string)
 	}
