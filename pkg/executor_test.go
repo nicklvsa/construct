@@ -654,6 +654,41 @@ func TestResolveRefsByteRuneParity(t *testing.T) {
 	}
 }
 
+func TestEscapeShellValue(t *testing.T) {
+	tests := []struct {
+		in   string
+		want string
+	}{
+		{in: "plain text", want: "plain text"},
+		{in: "hello world", want: "hello world"},
+		{in: "a`b", want: "a\\`b"},
+		{in: "cost $5", want: "cost \\$5"},
+		{in: `back\slash`, want: `back\\slash`},
+		{in: `say "hi"`, want: `say \"hi\"`},
+		{in: "multi\nline", want: "multi\nline"},
+	}
+	for _, tt := range tests {
+		if got := escapeShellValue(tt.in); got != tt.want {
+			t.Errorf("escapeShellValue(%q) = %q, want %q", tt.in, got, tt.want)
+		}
+	}
+}
+
+func TestPrereqOutputInjectionEscaped(t *testing.T) {
+	data := &ParsedData{
+		Commands: []*Command{
+			{Name: "gen", Body: shellBody(`echo 'has ` + "`" + `code` + "`" + ` and $var'`)},
+			{Name: "use", Prereqs: []string{"gen"}, Body: shellBody("$ echo &gen.0")},
+		},
+	}
+	data.buildIndexMaps()
+
+	executor := NewExecutor(data, false, true)
+	if err := executor.Execute([]string{"use"}); err != nil {
+		t.Fatalf("Execute failed: %v", err)
+	}
+}
+
 func TestEvaluateCommandPrereqCapture(t *testing.T) {
 	data := &ParsedData{
 		Commands: []*Command{

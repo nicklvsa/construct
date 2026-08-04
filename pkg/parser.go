@@ -418,6 +418,13 @@ func extractPrerequisiteString(line string) string {
 		if strings.HasPrefix(part, "in ") {
 			continue
 		}
+
+		if inIdx := strings.Index(part, " in "); inIdx >= 0 {
+			part = strings.TrimSpace(part[:inIdx])
+			if part == "" {
+				continue
+			}
+		}
 		result = append(result, part)
 	}
 

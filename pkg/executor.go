@@ -539,7 +539,11 @@ func (e *Executor) cleanShellLine(cmd *Command, line string, argFlags map[string
 	}
 
 	line = resolveVarRefs(line, func(name string) (string, bool) {
-		return e.StructuredParse.LookupVariable(name, cmd.Name)
+		val, ok := e.StructuredParse.LookupVariable(name, cmd.Name)
+		if !ok {
+			return "", false
+		}
+		return escapeShellValue(val), true
 	})
 
 	for _, arg := range cmd.Arguments {
@@ -560,7 +564,7 @@ func (e *Executor) cleanShellLine(cmd *Command, line string, argFlags map[string
 		}
 
 		v, _ := fs.GetString(lookupKey)
-		line = strings.ReplaceAll(line, "&"+arg.Name, v)
+		line = strings.ReplaceAll(line, "&"+arg.Name, escapeShellValue(v))
 	}
 
 	return line
@@ -569,6 +573,22 @@ func (e *Executor) cleanShellLine(cmd *Command, line string, argFlags map[string
 func isVarIdentByte(c byte) bool {
 	return c == '_' || c == '-' ||
 		(c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
+}
+
+func escapeShellValue(s string) string {
+	if !strings.ContainsAny(s, "`\"\\$") {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s) + 8)
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case '`', '"', '\\', '$':
+			b.WriteByte('\\')
+		}
+		b.WriteByte(s[i])
+	}
+	return b.String()
 }
 
 func isPlainIdentByte(c byte) bool {

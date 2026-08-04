@@ -152,6 +152,21 @@ func TestExtractPrerequisiteString(t *testing.T) {
 			input:    "|deploy| < build {",
 			expected: "build",
 		},
+		{
+			name:     "prereq with in dir modifier",
+			input:    "run < build in subdir {",
+			expected: "build",
+		},
+		{
+			name:     "multiple prereqs with trailing in dir",
+			input:    "deploy < build, test in deep/dir {",
+			expected: "build, test",
+		},
+		{
+			name:     "each prereq with its own in dir",
+			input:    "deploy < build in a, test in b {",
+			expected: "build, test",
+		},
 	}
 
 	for _, tt := range tests {
