@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"unicode"
@@ -363,13 +364,7 @@ func parseCommandName(line string) string {
 	terminators := []rune{'(', '<', '{'}
 	endIdx := len(line)
 	for i, r := range line {
-		found := false
-		for _, t := range terminators {
-			if r == t {
-				found = true
-				break
-			}
-		}
+		found := slices.Contains(terminators, r)
 		if found {
 			endIdx = i
 			break
@@ -432,12 +427,12 @@ func extractPrerequisiteString(line string) string {
 }
 
 func extractWorkDir(line string) string {
-	brace := strings.Index(line, "{")
-	if brace == -1 {
+	before, _, ok := strings.Cut(line, "{")
+	if !ok {
 		return ""
 	}
 
-	segment := line[:brace]
+	segment := before
 	idx := strings.LastIndex(segment, " in ")
 	if idx == -1 {
 		return ""
@@ -462,15 +457,7 @@ func parseArgumentName(argStr string) (string, bool) {
 	}
 
 	argName := parts[len(parts)-1]
-
-	isOptional := false
-	for _, part := range parts[:len(parts)-1] {
-		if part == "opt" {
-			isOptional = true
-			break
-		}
-	}
-
+	isOptional := slices.Contains(parts[:len(parts)-1], "opt")
 	return argName, isOptional
 }
 
@@ -481,9 +468,9 @@ func parseArgumentList(argStr string) ([]*Argument, error) {
 	}
 
 	args := []*Argument{}
-	parts := strings.Split(argStr, ",")
+	parts := strings.SplitSeq(argStr, ",")
 
-	for _, part := range parts {
+	for part := range parts {
 		part = strings.TrimSpace(part)
 		if part == "" {
 			continue
@@ -603,7 +590,6 @@ func (p *Parser) parseBodyStatements(raw []string, scope string) ([]BodyStatemen
 			continue
 		}
 
-		// for <var> in <items> { ... }
 		if strings.HasPrefix(line, "for ") && strings.Contains(line, "{") {
 			stmt, consumed, err := p.parseForBlock(raw[i:], scope)
 			if err != nil {
@@ -759,11 +745,11 @@ func (p *Parser) parseForBlock(raw []string, scope string) (BodyStatement, int, 
 	header := strings.TrimSpace(raw[0])
 	header = strings.TrimPrefix(header, "for")
 
-	brace := strings.Index(header, "{")
-	if brace < 0 {
+	before, _, ok := strings.Cut(header, "{")
+	if !ok {
 		return BodyStatement{}, 0, fmt.Errorf("malformed for loop: missing '{'")
 	}
-	headerPart := strings.TrimSpace(header[:brace])
+	headerPart := strings.TrimSpace(before)
 
 	inIdx := strings.Index(headerPart, " in ")
 	if inIdx < 0 {
@@ -790,8 +776,6 @@ func (p *Parser) parseForBlock(raw []string, scope string) (BodyStatement, int, 
 			if depth > 0 {
 				if !strings.Contains(trimmed, "else") {
 					depth--
-				} else {
-					// "} else {" closes the then-block and opens the else-block: depth unchanged.
 				}
 				bodyLines = append(bodyLines, l)
 				consumed++
@@ -851,7 +835,6 @@ func (p *Parser) parseCommand(idx int, line string, isDefault bool) (int, error)
 	}
 
 	commandName := parseCommandName(line)
-
 	cloudAccessible := len(trimmedLine) >= 2 && trimmedLine[0] == '|'
 
 	commandArgs, err := parseArgumentList(extractArgumentString(line))
@@ -898,7 +881,6 @@ func (p *Parser) parseCommand(idx int, line string, isDefault bool) (int, error)
 		})
 	}
 
-	// Return how many lines were consumed (header + body lines).
 	return endIdx - idx, nil
 }
 

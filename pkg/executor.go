@@ -20,7 +20,6 @@ import (
 	"github.com/spf13/pflag"
 )
 
-// CommandError wraps a command execution failure with its exit code.
 type CommandError struct {
 	Cmd      string
 	ExitCode int
@@ -265,7 +264,7 @@ func (e *Executor) executeCommand(command *Command) error {
 						}
 					}
 				} else {
-					for _, item := range strings.Split(items, ",") {
+					for item := range strings.SplitSeq(items, ",") {
 						expanded = append(expanded, strings.TrimSpace(item))
 					}
 				}
