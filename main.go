@@ -94,7 +94,8 @@ func listCommands(data *pkg.ParsedData) {
 func printDryRunBody(body []pkg.BodyStatement, indent int) {
 	prefix := strings.Repeat("  ", indent+1)
 	for _, stmt := range body {
-		if stmt.Type == "if" {
+		switch stmt.Type {
+		case "if":
 			fmt.Printf("%sif %s {\n", prefix, stmt.Cond)
 			printDryRunBody(stmt.ThenBody, indent+1)
 			if len(stmt.ElseBody) > 0 {
@@ -102,11 +103,11 @@ func printDryRunBody(body []pkg.BodyStatement, indent int) {
 				printDryRunBody(stmt.ElseBody, indent+1)
 			}
 			fmt.Printf("%s}\n", prefix)
-		} else if stmt.Type == "for" {
+		case "for":
 			fmt.Printf("%sfor %s in %s {\n", prefix, stmt.LoopVar, stmt.LoopItems)
 			printDryRunBody(stmt.LoopBody, indent+1)
 			fmt.Printf("%s}\n", prefix)
-		} else {
+		default:
 			fmt.Printf("%s%s\n", prefix, stmt.Shell)
 		}
 	}
