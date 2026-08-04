@@ -44,6 +44,7 @@ type Executor struct {
 	shellName       string
 	shellArgs       []string
 	env             []string
+	flagSet         *pflag.FlagSet
 	cache           fileCache
 	cacheLoaded     bool
 	runs            map[string]*commandRun
@@ -169,6 +170,7 @@ func (e *Executor) loadCloudDefs() error {
 }
 
 func (e *Executor) RegisterArgumentFlags(flagSet *pflag.FlagSet) {
+	e.flagSet = flagSet
 	for _, cmd := range e.StructuredParse.Commands {
 		for _, arg := range cmd.Arguments {
 			flagName := fmt.Sprintf("%s:%s", cmd.Name, arg.Name)
@@ -546,20 +548,19 @@ func (e *Executor) cleanShellLine(cmd *Command, line string, argFlags map[string
 			continue
 		}
 
-		if !strings.Contains(line, arg.Name) {
+		if !strings.Contains(line, "&"+arg.Name) {
 			continue
 		}
 		if e.debug {
 			fmt.Printf("[DEBUG] Handling argument --%s for command %s\n", arg.Name, cmd.Name)
 		}
-		v, err := pflag.CommandLine.GetString(lookupKey)
-		if err != nil || v == "" {
-			if !arg.IsOptional {
-				return line
-			}
-			continue
+		fs := e.flagSet
+		if fs == nil {
+			fs = pflag.CommandLine
 		}
-		line = strings.ReplaceAll(line, arg.Name, v)
+
+		v, _ := fs.GetString(lookupKey)
+		line = strings.ReplaceAll(line, "&"+arg.Name, v)
 	}
 
 	return line

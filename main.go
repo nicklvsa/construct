@@ -112,6 +112,31 @@ func printDryRunBody(body []pkg.BodyStatement, indent int) {
 	}
 }
 
+func determineInputs(remaining []string) *ConstructInput {
+	defaultFileName := "Constfile"
+	platformFile := getPlatformConstfile()
+	if fileExists(platformFile) && !fileExists(defaultFileName) {
+		defaultFileName = platformFile
+	}
+
+	if len(remaining) > 0 {
+		info, err := os.Stat(remaining[0])
+		if err == nil && !info.IsDir() {
+			return &ConstructInput{
+				FileName: remaining[0],
+				Commands: remaining[1:],
+			}
+		}
+		return &ConstructInput{
+			FileName: defaultFileName,
+			Commands: remaining,
+		}
+	}
+	return &ConstructInput{
+		FileName: defaultFileName,
+	}
+}
+
 func main() {
 	var showHelp bool
 	var showVersion bool
@@ -130,6 +155,7 @@ func main() {
 	flagSet.BoolVar(&dryRun, "dry-run", false, "Dry run")
 	flagSet.StringArrayVarP(&overrides, "env", "e", []string{}, "Override variable (key=value)")
 
+	flagSet.ParseErrorsWhitelist.UnknownFlags = true
 	if err := flagSet.Parse(os.Args[1:]); err != nil {
 		fmt.Fprintf(os.Stderr, "Error parsing flags: %v\n", err)
 		os.Exit(1)
@@ -145,32 +171,7 @@ func main() {
 		os.Exit(0)
 	}
 
-	remaining := flagSet.Args()
-	defaultFileName := "Constfile"
-	platformFile := getPlatformConstfile()
-	if fileExists(platformFile) && !fileExists(defaultFileName) {
-		defaultFileName = platformFile
-	}
-
-	var inputs *ConstructInput
-	if len(remaining) > 0 {
-		info, err := os.Stat(remaining[0])
-		if err == nil && !info.IsDir() {
-			inputs = &ConstructInput{
-				FileName: remaining[0],
-				Commands: remaining[1:],
-			}
-		} else {
-			inputs = &ConstructInput{
-				FileName: defaultFileName,
-				Commands: remaining,
-			}
-		}
-	} else {
-		inputs = &ConstructInput{
-			FileName: defaultFileName,
-		}
-	}
+	inputs := determineInputs(flagSet.Args())
 
 	p, err := pkg.NewParser(inputs.FileName)
 	if err != nil {
@@ -183,6 +184,16 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
+
+	executor := pkg.NewExecutor(data, concurrent, debug)
+	executor.RegisterArgumentFlags(flagSet)
+
+	flagSet.ParseErrorsWhitelist.UnknownFlags = false
+	if err := flagSet.Parse(os.Args[1:]); err != nil {
+		fmt.Fprintf(os.Stderr, "Error parsing flags: %v\n", err)
+		os.Exit(1)
+	}
+	inputs = determineInputs(flagSet.Args())
 
 	for _, ov := range overrides {
 		eq := strings.IndexByte(ov, '=')
@@ -236,8 +247,6 @@ func main() {
 		os.Exit(0)
 	}
 
-	executor := pkg.NewExecutor(data, concurrent, debug)
-	executor.RegisterArgumentFlags(flagSet)
 	if err := executor.Execute(inputs.Commands); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		if cmdErr, ok := err.(*pkg.CommandError); ok {

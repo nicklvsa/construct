@@ -65,6 +65,21 @@ commandName (args) < prerequisites {
 - `|cloudcmd|` - Cloud-accessible command (can fetch remote definitions)
 - `_` - Default command (runs first when no commands specified)
 - Arguments: `arg1` (required), `opt arg2` (optional)
+
+Arguments are passed as flags and referenced with the same `&` marker as variables:
+
+```bash
+construct deploy --deploy:env=prod --deploy:region=us-east
+```
+
+```
+deploy (env, opt region) {
+    $ echo "Deploying &env to &region"
+}
+```
+
+An argument that isn't provided substitutes the empty string, so references never leak into the shell.
+
 - Prerequisites: `cmd1, cmd2`
 
 ### Variable Scopes

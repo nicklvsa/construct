@@ -6,7 +6,10 @@ import (
 	"runtime"
 	"slices"
 	"strings"
+
 	"testing"
+
+	"github.com/spf13/pflag"
 )
 
 func TestNewExecutor(t *testing.T) {
@@ -743,6 +746,93 @@ func TestEvaluateCommandIdempotent(t *testing.T) {
 	}
 }
 
+func TestEvaluateCommandArgumentRef(t *testing.T) {
+	data := &ParsedData{
+		Commands: []*Command{
+			{
+				Name:      "log",
+				Arguments: []*Argument{{Name: "thing_to_log"}},
+				Body: []BodyStatement{
+					{Type: "shell", Shell: `echo "Thing to log: &thing_to_log"`, OutputName: "out"},
+				},
+			},
+			{Name: "use", Prereqs: []string{"log"}, Body: shellBody("$ echo got:&log.out")},
+		},
+	}
+	data.buildIndexMaps()
+
+	flagSet := pflag.NewFlagSet("test", pflag.ContinueOnError)
+	executor := NewExecutor(data, false, false)
+	executor.RegisterArgumentFlags(flagSet)
+	if err := flagSet.Parse([]string{"--log:thing_to_log=hello"}); err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+
+	if err := executor.Execute([]string{"use"}); err != nil {
+		t.Fatalf("Execute failed: %v", err)
+	}
+
+	log, _ := data.GetCommand("log")
+	if len(log.PrereqOutput) != 1 || log.PrereqOutput[0] != "Thing to log: hello" {
+		t.Errorf("prereq output = %#v, want [\"Thing to log: hello\"]", log.PrereqOutput)
+	}
+}
+
+func TestEvaluateCommandBareArgNotSubstituted(t *testing.T) {
+	data := &ParsedData{
+		Commands: []*Command{
+			{
+				Name:      "greet",
+				Arguments: []*Argument{{Name: "out"}},
+				Body:      shellBody("echo output of the build"),
+			},
+		},
+	}
+	data.buildIndexMaps()
+
+	flagSet := pflag.NewFlagSet("test", pflag.ContinueOnError)
+	executor := NewExecutor(data, false, false)
+	executor.RegisterArgumentFlags(flagSet)
+	if err := flagSet.Parse([]string{"--greet:out=OVERRIDE"}); err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+
+	if err := executor.Execute([]string{"greet"}); err != nil {
+		t.Fatalf("Execute failed: %v", err)
+	}
+}
+func TestEvaluateCommandUnsetArgEmpty(t *testing.T) {
+	data := &ParsedData{
+		Commands: []*Command{
+			{
+				Name:      "log",
+				Arguments: []*Argument{{Name: "thing_to_log"}},
+				Body: []BodyStatement{
+					{Type: "shell", Shell: `echo "Thing to log: &thing_to_log"`, OutputName: "out"},
+				},
+			},
+			{Name: "use", Prereqs: []string{"log"}, Body: shellBody("$ echo got:&log.out")},
+		},
+	}
+	data.buildIndexMaps()
+
+	flagSet := pflag.NewFlagSet("test", pflag.ContinueOnError)
+	executor := NewExecutor(data, false, false)
+	executor.RegisterArgumentFlags(flagSet)
+	if err := flagSet.Parse(nil); err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+
+	if err := executor.Execute([]string{"use"}); err != nil {
+		t.Fatalf("Execute failed: %v", err)
+	}
+
+	log, _ := data.GetCommand("log")
+	if len(log.PrereqOutput) != 1 || log.PrereqOutput[0] != "Thing to log:" {
+		t.Errorf("prereq output = %#v, want [\"Thing to log:\"]", log.PrereqOutput)
+	}
+}
+
 func TestTryApplyCloudBody(t *testing.T) {
 	t.Setenv("CONSTRUCT_CLOUD_FILE", "testdata/cloud_test.json")
 
@@ -846,8 +936,6 @@ func TestIfBlockFalseBranch(t *testing.T) {
 	}
 }
 
-// TestIfBlockNoElseSkipped verifies that when condition is false and there's no
-// else, execution continues past the if without error.
 func TestIfBlockNoElseSkipped(t *testing.T) {
 	data := &ParsedData{
 		Commands: []*Command{
@@ -871,8 +959,6 @@ func TestIfBlockNoElseSkipped(t *testing.T) {
 	}
 }
 
-// TestNamedOutput verifies that "as <name>" tagged prereq output is accessible
-// as &prereq.name in the consuming command.
 func TestNamedOutput(t *testing.T) {
 	data := &ParsedData{
 		Commands: []*Command{

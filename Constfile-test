@@ -1,0 +1,7 @@
+log (thing_to_log) {
+    echo "Thing to log: &thing_to_log" as out
+}
+
+_ < log {
+    echo "&log.out"
+}
