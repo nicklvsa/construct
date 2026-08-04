@@ -1,9 +1,9 @@
 log (thing_to_log) {
-    $ echo "Thing to log: &thing_to_log" as out
+    echo "Thing to log: &thing_to_log" as out
 }
 
 ls in examples {
-    $ cat README.md as out
+    $ ls -l as out
 }
 
 _ < log, ls {
