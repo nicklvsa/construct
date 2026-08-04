@@ -2,6 +2,7 @@ package pkg
 
 import (
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -75,11 +76,42 @@ func TestBuildCommand(t *testing.T) {
 	}
 }
 
-// defaultShellName mirrors the executor's default shell choice so the tests
-// remain platform-portable instead of hardcoding /bin/bash.
 func defaultShellName() string {
 	name, _ := defaultShell()
 	return name
+}
+
+func TestNonInteractiveArgs(t *testing.T) {
+	tests := []struct {
+		shell string
+		want  []string
+	}{
+		{shell: "/bin/zsh", want: []string{"-f", "-c"}},
+		{shell: "/usr/local/bin/zsh", want: []string{"-f", "-c"}},
+		{shell: "/bin/bash", want: []string{"--noprofile", "--norc", "-c"}},
+		{shell: "/usr/bin/sh", want: []string{"-c"}},
+		{shell: "/opt/homebrew/bin/fish", want: []string{"-c"}},
+		{shell: "C:\\Git\\usr\\bin\\bash.exe", want: []string{"--noprofile", "--norc", "-c"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.shell, func(t *testing.T) {
+			if got := nonInteractiveArgs(tt.shell); !slices.Equal(got, tt.want) {
+				t.Errorf("nonInteractiveArgs(%q) = %v, want %v", tt.shell, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestExecutorCachesChildEnv(t *testing.T) {
+	executor := NewExecutor(&ParsedData{}, false, false)
+	if executor.env == nil {
+		t.Fatal("expected env to be populated at construction")
+	}
+	for range 3 {
+		if got := executor.childEnv(); &got[0] != &executor.env[0] {
+			t.Fatal("childEnv returned a fresh copy instead of the cached env")
+		}
+	}
 }
 
 func TestExecutorDryRun(t *testing.T) {

@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -42,6 +43,7 @@ type Executor struct {
 	cloudLoaded     bool
 	shellName       string
 	shellArgs       []string
+	env             []string
 	cache           fileCache
 	cacheLoaded     bool
 	runs            map[string]*commandRun
@@ -71,12 +73,26 @@ func defaultShell() (string, []string) {
 		return "cmd", []string{"/c"}
 	}
 	if sh := os.Getenv("SHELL"); sh != "" {
-		return sh, []string{"-c"}
+		return sh, nonInteractiveArgs(sh)
 	}
 	return "/bin/sh", []string{"-c"}
 }
 
+func nonInteractiveArgs(shell string) []string {
+	switch base := path.Base(strings.ReplaceAll(shell, "\\", "/")); base {
+	case "zsh":
+		return []string{"-f", "-c"}
+	case "bash", "bash.exe":
+		return []string{"--noprofile", "--norc", "-c"}
+	}
+	return []string{"-c"}
+}
+
 func (e *Executor) childEnv() []string {
+	return e.env
+}
+
+func (e *Executor) computeChildEnv() []string {
 	env := os.Environ()
 	if runtime.GOOS != "windows" {
 		return env
@@ -109,11 +125,11 @@ func NewExecutor(data *ParsedData, concurrent bool, debug bool) *Executor {
 		if runtime.GOOS == "windows" {
 			shellName, shellArgs = sh, []string{"/c"}
 		} else {
-			shellName, shellArgs = sh, []string{"-c"}
+			shellName, shellArgs = sh, nonInteractiveArgs(sh)
 		}
 	}
 
-	return &Executor{
+	executor := &Executor{
 		concurrent:      concurrent,
 		debug:           debug,
 		cloudFile:       cloudFile,
@@ -121,6 +137,8 @@ func NewExecutor(data *ParsedData, concurrent bool, debug bool) *Executor {
 		shellArgs:       shellArgs,
 		StructuredParse: data,
 	}
+	executor.env = executor.computeChildEnv()
+	return executor
 }
 
 func (e *Executor) loadCloudDefs() error {
@@ -685,8 +703,6 @@ func resolveEnvRefsRunes(s string) string {
 func evaluateCondition(cond string) bool {
 	cond = strings.TrimSpace(cond)
 
-	// Keyword operators (checked before symbol operators so the words are
-	// claimed as operators rather than scanned as operands).
 	if idx := strings.Index(cond, " contains "); idx > 0 {
 		left := strings.TrimSpace(cond[:idx])
 		right := strings.TrimSpace(cond[idx+len(" contains "):])

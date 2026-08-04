@@ -207,7 +207,7 @@ If `Constfile` doesn't exist but a platform-specific file does, it will be used 
 
 ## Configuration
 
-Construct runs each command body through a shell. The shell is chosen automatically (`cmd.exe` on Windows, otherwise the `SHELL` environment variable, falling back to `/bin/sh`), but you can override it:
+Construct runs each command body through a shell. The shell is chosen automatically (`cmd.exe` on Windows, otherwise the `SHELL` environment variable, falling back to `/bin/sh`), but you can override it. When `zsh` or `bash` is used, startup files (`.zshrc`, `.bashrc`, etc.) are skipped — command bodies are batch scripts, and this keeps per-statement startup in the single-digit milliseconds. If a command needs aliases or functions from your rc files, set `CONSTRUCT_SHELL` to a plain `sh` or export the setup yourself.
 
 | Env var | Default | Purpose |
 |---------|---------|---------|
