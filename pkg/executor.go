@@ -314,6 +314,25 @@ func (e *Executor) executeCommand(command *Command) error {
 				}
 			}
 
+			if !e.debug && !isPrereq && target.LazyEval == nil {
+				cmd.Stdout = os.Stdout
+				cmd.Stderr = os.Stderr
+				if err := cmd.Run(); err != nil {
+					exitCode := 1
+					if ee, ok := err.(*exec.ExitError); ok {
+						exitCode = ee.ExitCode()
+					}
+					if fullCommand == "" {
+						fullCommand = e.shellName + " " + strings.Join(args, " ")
+					}
+					return &CommandError{
+						Cmd:      fullCommand,
+						ExitCode: exitCode,
+					}
+				}
+				continue
+			}
+
 			var stdout, stderr []byte
 			var err error
 			if e.debug {

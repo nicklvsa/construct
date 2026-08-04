@@ -1,6 +1,8 @@
 package pkg
 
 import (
+	"io"
+	"os"
 	"runtime"
 	"slices"
 	"strings"
@@ -111,6 +113,114 @@ func TestExecutorCachesChildEnv(t *testing.T) {
 		if got := executor.childEnv(); &got[0] != &executor.env[0] {
 			t.Fatal("childEnv returned a fresh copy instead of the cached env")
 		}
+	}
+}
+
+func captureStreams(t *testing.T) (stdout, stderr *os.File, restore func()) {
+	t.Helper()
+	so, sw, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("stdout pipe: %v", err)
+	}
+	se, ew, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("stderr pipe: %v", err)
+	}
+	oldOut, oldErr := os.Stdout, os.Stderr
+	os.Stdout, os.Stderr = sw, ew
+	restore = func() {
+		os.Stdout, os.Stderr = oldOut, oldErr
+		sw.Close()
+		ew.Close()
+	}
+	return so, se, restore
+}
+
+func TestStreamingTargetOutput(t *testing.T) {
+	r, _, restore := captureStreams(t)
+	data := &ParsedData{
+		Commands: []*Command{
+			{Name: "stream", Body: shellBody("echo one", "echo two")},
+		},
+	}
+	data.buildIndexMaps()
+
+	executor := NewExecutor(data, false, false)
+	err := executor.Execute([]string{"stream"})
+	restore()
+	if err != nil {
+		t.Fatalf("Execute failed: %v", err)
+	}
+
+	out, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("read stdout: %v", err)
+	}
+	got := strings.ReplaceAll(string(out), "\r\n", "\n")
+	if got != "one\ntwo\n" {
+		t.Errorf("streamed stdout = %q, want %q", got, "one\ntwo\n")
+	}
+}
+
+func TestStreamingTargetStderr(t *testing.T) {
+	r, e, restore := captureStreams(t)
+	data := &ParsedData{
+		Commands: []*Command{
+			{Name: "stream", Body: shellBody("echo err 1>&2", "echo out")},
+		},
+	}
+	data.buildIndexMaps()
+
+	executor := NewExecutor(data, false, false)
+	err := executor.Execute([]string{"stream"})
+	restore()
+	if err != nil {
+		t.Fatalf("Execute failed: %v", err)
+	}
+
+	out, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("read stdout: %v", err)
+	}
+	errOut, err := io.ReadAll(e)
+	if err != nil {
+		t.Fatalf("read stderr: %v", err)
+	}
+
+	if got := strings.ReplaceAll(string(out), "\r\n", "\n"); got != "out\n" {
+		t.Errorf("stdout = %q, want %q", got, "out\n")
+	}
+	if got := strings.ReplaceAll(string(errOut), "\r\n", "\n"); got != "err\n" {
+		t.Errorf("stderr = %q, want %q", got, "err\n")
+	}
+}
+
+func TestStreamingEmptyOutputNoBlankLine(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("no portable empty-output command on Windows")
+	}
+
+	r, _, restore := captureStreams(t)
+	data := &ParsedData{
+		Commands: []*Command{
+			{Name: "quiet", Body: shellBody("true", "echo after")},
+		},
+	}
+	data.buildIndexMaps()
+
+	executor := NewExecutor(data, false, false)
+	err := executor.Execute([]string{"quiet"})
+	restore()
+	if err != nil {
+		t.Fatalf("Execute failed: %v", err)
+	}
+
+	out, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("read stdout: %v", err)
+	}
+	if got := strings.ReplaceAll(string(out), "\r\n", "\n"); got != "after\n" {
+		t.Errorf("stdout = %q, want %q", got, "after\n")
 	}
 }
 
@@ -256,8 +366,6 @@ func TestMissingPrerequisiteValidation(t *testing.T) {
 	}
 }
 
-// TestEvaluateCommandSimple runs a single command body through the executor
-// using a portable echo so the test works on both cmd.exe and POSIX shells.
 func TestEvaluateCommandSimple(t *testing.T) {
 	data := &ParsedData{
 		Commands: []*Command{
@@ -276,8 +384,6 @@ func TestEvaluateCommandSimple(t *testing.T) {
 	}
 }
 
-// TestEvaluateCommandFailure verifies that a failing command body surfaces a
-// *CommandError with the child process exit code.
 func TestEvaluateCommandFailure(t *testing.T) {
 	data := &ParsedData{
 		Commands: []*Command{
@@ -304,8 +410,6 @@ func TestEvaluateCommandFailure(t *testing.T) {
 	}
 }
 
-// exitNonZero returns a shell command that exits with a non-zero status on the
-// current platform.
 func exitNonZero() string {
 	if runtime.GOOS == "windows" {
 		return "exit /b 3"
@@ -322,8 +426,6 @@ func shellBody(lines ...string) []BodyStatement {
 	return stmts
 }
 
-// TestExecConcurrent runs several independent commands concurrently and asserts
-// that all of them complete without leaking goroutines or dropping errors.
 func TestExecConcurrent(t *testing.T) {
 	data := &ParsedData{
 		Commands: []*Command{
@@ -340,8 +442,6 @@ func TestExecConcurrent(t *testing.T) {
 	}
 }
 
-// TestExecConcurrentError ensures a failing command in concurrent mode still
-// reports an error back to the caller rather than being silently dropped.
 func TestExecConcurrentError(t *testing.T) {
 	data := &ParsedData{
 		Commands: []*Command{
@@ -384,9 +484,6 @@ func TestExecSharedPrereq(t *testing.T) {
 	run(true)
 }
 
-// TestExecSameTargetTwice verifies that listing a command twice within one
-// invocation executes it once (make-style dedup), while separate Exec calls
-// re-run it.
 func TestExecSameTargetTwice(t *testing.T) {
 	data := &ParsedData{
 		Commands: []*Command{
@@ -435,8 +532,6 @@ func TestExecUnknownCommand(t *testing.T) {
 	}
 }
 
-// TestExecDefaultCommand verifies that when no commands are passed, the default
-// command (if any) runs.
 func TestExecDefaultCommand(t *testing.T) {
 	data := &ParsedData{
 		Commands: []*Command{
