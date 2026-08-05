@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -54,6 +55,11 @@ type commandRun struct {
 	done chan struct{}
 	err  error
 }
+
+var (
+	errLoopContinue = errors.New("continue used outside of a loop")
+	errLoopBreak    = errors.New("break used outside of a loop")
+)
 
 func defaultShell() (string, []string) {
 	if runtime.GOOS == "windows" {
@@ -277,17 +283,31 @@ func (e *Executor) executeCommand(command *Command) error {
 					argFlags[target.Name+":"+arg.Name] = true
 				}
 
+			iterLoop:
 				for _, item := range expanded {
 					e.StructuredParse.SetVariable(stmt.LoopVar, target.Name, item)
 					if e.debug {
 						fmt.Printf("[DEBUG] For loop %s = %s\n", stmt.LoopVar, item)
 					}
 					cleaned := e.cleanStatements(stmt.LoopBody, target, argFlags)
-					if err := execCommandBody(target, cleaned, isPrereq, workDir); err != nil {
+					err := execCommandBody(target, cleaned, isPrereq, workDir)
+					switch {
+					case errors.Is(err, errLoopContinue):
+						continue
+					case errors.Is(err, errLoopBreak):
+						break iterLoop
+					case err != nil:
 						return err
 					}
 				}
 				continue
+			}
+
+			if stmt.Type == "continue" {
+				return errLoopContinue
+			}
+			if stmt.Type == "break" {
+				return errLoopBreak
 			}
 
 			cmdLine := stmt.Shell
@@ -468,6 +488,10 @@ func (e *Executor) executeCommand(command *Command) error {
 					}
 					continue
 				}
+				if stmt.Type == "continue" || stmt.Type == "break" {
+					out[i] = stmt
+					continue
+				}
 				out[i] = BodyStatement{Type: "shell", Shell: e.cleanShellLine(cmd, stmt.Shell, argFlags), OutputName: stmt.OutputName}
 			}
 			return out
@@ -569,6 +593,8 @@ func (e *Executor) cleanStatements(stmts []BodyStatement, cmd *Command, argFlags
 				LoopItems: e.cleanShellLine(cmd, stmt.LoopItems, argFlags),
 				LoopBody:  stmt.LoopBody,
 			}
+		case "continue", "break":
+			out[i] = stmt
 		default:
 			out[i] = BodyStatement{Type: "shell", Shell: e.cleanShellLine(cmd, stmt.Shell, argFlags), OutputName: stmt.OutputName}
 		}

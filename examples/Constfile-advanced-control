@@ -41,3 +41,10 @@ matrix {
         }
     }
 }
+
+build_matrix {
+    matrix os in windows, linux; arch in amd64, arm64 {
+        continue if "&os" == "windows" && "&arch" == "arm64"
+        $ echo "building &os/&arch"
+    }
+}

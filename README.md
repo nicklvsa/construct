@@ -216,6 +216,41 @@ for spec in darwin/arm64, windows/amd64 {
 }
 ```
 
+### Build Matrices
+
+For multi-axis builds, `matrix` iterates the cross product of several
+variable lists (it expands to nested `for` loops; the last variable varies
+fastest):
+
+```
+build_matrix {
+    matrix os in windows, linux; arch in amd64, arm64 {
+        if "&os" == "windows" && "&arch" == "arm64" {
+            $ echo "skip &os/&arch"
+        } else {
+            $ echo "building &os/&arch"
+        }
+    }
+}
+```
+
+Each clause is `var in items` separated by `;`, and any axis supports globs.
+Combinations can be filtered declaratively with `continue if` / `break if`
+(also usable inside regular `for` loops):
+
+```
+build_matrix {
+    matrix os in windows, linux; arch in amd64, arm64 {
+        continue if "&os" == "windows" && "&arch" == "arm64"
+        $ echo "building &os/&arch"
+    }
+}
+```
+
+Bare `continue` (skip the rest of this iteration) and `break` (exit the loop)
+work inside any `for` or `matrix` body, including nested in `if` blocks. Use
+`$ continue` if you actually need the shell builtin.
+
 ## Example Constfile
 
 ```

@@ -549,6 +549,7 @@ func (p *Parser) parseCommandBody(startIdx int, commandName string) ([]string, i
 
 		isIfHeader := strings.HasPrefix(trimmedLine, "if ") && opens > 0
 		isForHeader := strings.HasPrefix(trimmedLine, "for ") && opens > 0
+		isMatrixHeader := strings.HasPrefix(trimmedLine, "matrix ") && opens > 0
 		isElseCompound := strings.HasPrefix(trimmedLine, "}") && strings.Contains(trimmedLine, "else")
 
 		if isElseCompound {
@@ -570,7 +571,7 @@ func (p *Parser) parseCommandBody(startIdx int, commandName string) ([]string, i
 			return body, i + 1, nil
 		}
 
-		if isIfHeader || isForHeader {
+		if isIfHeader || isForHeader || isMatrixHeader {
 			depth++
 		}
 
@@ -621,6 +622,43 @@ func (p *Parser) parseBodyStatements(raw []string, scope string) ([]BodyStatemen
 			}
 			stmts = append(stmts, stmt)
 			i += consumed
+			continue
+		}
+
+		// matrix <var> in <items>; <var> in <items>; ... { body }
+		if strings.HasPrefix(line, "matrix ") && strings.Contains(line, "{") {
+			stmt, consumed, err := p.parseMatrixBlock(raw[i:], scope)
+			if err != nil {
+				return nil, err
+			}
+			stmts = append(stmts, stmt)
+			i += consumed
+			continue
+		}
+
+		if strings.HasPrefix(line, "continue if ") {
+			cond := strings.TrimSpace(line[len("continue if "):])
+			stmts = append(stmts, BodyStatement{
+				Type:     "if",
+				Cond:     cond,
+				ThenBody: []BodyStatement{{Type: "continue"}},
+			})
+			i++
+			continue
+		}
+		if strings.HasPrefix(line, "break if ") {
+			cond := strings.TrimSpace(line[len("break if "):])
+			stmts = append(stmts, BodyStatement{
+				Type:     "if",
+				Cond:     cond,
+				ThenBody: []BodyStatement{{Type: "break"}},
+			})
+			i++
+			continue
+		}
+		if line == "continue" || line == "break" {
+			stmts = append(stmts, BodyStatement{Type: line})
+			i++
 			continue
 		}
 
@@ -795,35 +833,8 @@ func (p *Parser) parseForBlock(raw []string, scope string) (BodyStatement, int, 
 	loopVar := strings.TrimSpace(headerPart[:inIdx])
 	loopItems := strings.TrimSpace(headerPart[inIdx+4:])
 
-	var bodyLines []string
-	consumed := 1
-	depth := 0
-	for consumed < len(raw) {
-		l := raw[consumed]
-		trimmed := strings.TrimSpace(l)
-
-		isInnerIf := strings.HasPrefix(trimmed, "if ") && strings.Contains(trimmed, "{")
-		isInnerFor := strings.HasPrefix(trimmed, "for ") && strings.Contains(trimmed, "{")
-		if isInnerIf || isInnerFor {
-			depth++
-		}
-
-		if strings.HasPrefix(trimmed, "}") {
-			if depth > 0 {
-				if !strings.Contains(trimmed, "else") {
-					depth--
-				}
-				bodyLines = append(bodyLines, l)
-				consumed++
-				continue
-			}
-			break
-		}
-
-		bodyLines = append(bodyLines, l)
-		consumed++
-	}
-	if consumed >= len(raw) {
+	bodyLines, endIdx, err := collectBodyLines(raw, 1)
+	if err != nil {
 		return BodyStatement{}, 0, fmt.Errorf("unclosed for block (missing '}')")
 	}
 
@@ -838,8 +849,93 @@ func (p *Parser) parseForBlock(raw []string, scope string) (BodyStatement, int, 
 		LoopItems: loopItems,
 		LoopBody:  bodyStmts,
 	}
-	consumed++
-	return stmt, consumed, nil
+	return stmt, endIdx, nil
+}
+
+func (p *Parser) parseMatrixBlock(raw []string, scope string) (BodyStatement, int, error) {
+	header := strings.TrimSpace(raw[0])
+	header = strings.TrimPrefix(header, "matrix")
+
+	before, _, ok := strings.Cut(header, "{")
+	if !ok {
+		return BodyStatement{}, 0, fmt.Errorf("malformed matrix: missing '{'")
+	}
+	headerPart := strings.TrimSpace(before)
+
+	var vars, items []string
+	for _, clause := range strings.Split(headerPart, ";") {
+		clause = strings.TrimSpace(clause)
+		inIdx := strings.Index(clause, " in ")
+		if inIdx < 0 {
+			return BodyStatement{}, 0, fmt.Errorf("malformed matrix clause %q: missing 'in'", clause)
+		}
+		v := strings.TrimSpace(clause[:inIdx])
+		it := strings.TrimSpace(clause[inIdx+4:])
+		if v == "" || it == "" {
+			return BodyStatement{}, 0, fmt.Errorf("malformed matrix clause %q", clause)
+		}
+		vars = append(vars, v)
+		items = append(items, it)
+	}
+
+	bodyLines, endIdx, err := collectBodyLines(raw, 1)
+	if err != nil {
+		return BodyStatement{}, 0, fmt.Errorf("unclosed matrix block (missing '}')")
+	}
+
+	bodyStmts, err := p.parseBodyStatements(bodyLines, scope)
+	if err != nil {
+		return BodyStatement{}, 0, err
+	}
+
+	stmt := BodyStatement{
+		Type:      "for",
+		LoopVar:   vars[len(vars)-1],
+		LoopItems: items[len(items)-1],
+		LoopBody:  bodyStmts,
+	}
+	for i := len(vars) - 2; i >= 0; i-- {
+		stmt = BodyStatement{
+			Type:      "for",
+			LoopVar:   vars[i],
+			LoopItems: items[i],
+			LoopBody:  []BodyStatement{stmt},
+		}
+	}
+	return stmt, endIdx, nil
+}
+
+func collectBodyLines(raw []string, start int) ([]string, int, error) {
+	var lines []string
+	depth := 0
+	for start < len(raw) {
+		l := raw[start]
+		trimmed := strings.TrimSpace(l)
+
+		if isNestedBlockHeader(trimmed) {
+			depth++
+		}
+
+		if strings.HasPrefix(trimmed, "}") {
+			if depth > 0 {
+				if !strings.Contains(trimmed, "else") {
+					depth--
+				}
+				lines = append(lines, l)
+				start++
+				continue
+			}
+			return lines, start + 1, nil
+		}
+
+		lines = append(lines, l)
+		start++
+	}
+	return nil, start, fmt.Errorf("unclosed block (missing '}')")
+}
+
+func isNestedBlockHeader(t string) bool {
+	return (strings.HasPrefix(t, "if ") || strings.HasPrefix(t, "for ") || strings.HasPrefix(t, "matrix ")) && strings.Contains(t, "{")
 }
 
 func extractIfCondition(line string) string {

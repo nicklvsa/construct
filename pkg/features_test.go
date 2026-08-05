@@ -1,6 +1,7 @@
 package pkg
 
 import (
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -302,6 +303,256 @@ func TestBodyComments(t *testing.T) {
 			t.Errorf("body[%d] = %q, want %q", i, shells[i], want[i])
 		}
 	}
+}
+
+func TestMatrixParsing(t *testing.T) {
+	in := `build {
+    matrix os in windows, linux; arch in amd64, arm64 {
+        $ echo &os/&arch
+    }
+}`
+	p := NewParserFromContent("t.constfile", in)
+	data, err := p.Parse()
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	cmd, _ := data.GetCommand("build")
+	if len(cmd.Body) != 1 || cmd.Body[0].Type != "for" {
+		t.Fatalf("expected outer for, got %#v", cmd.Body)
+	}
+	outer := cmd.Body[0]
+	if outer.LoopVar != "os" || outer.LoopItems != "windows, linux" {
+		t.Errorf("outer loop = %s in %s", outer.LoopVar, outer.LoopItems)
+	}
+	if len(outer.LoopBody) != 1 || outer.LoopBody[0].Type != "for" {
+		t.Fatalf("expected inner for, got %#v", outer.LoopBody)
+	}
+	inner := outer.LoopBody[0]
+	if inner.LoopVar != "arch" || inner.LoopItems != "amd64, arm64" {
+		t.Errorf("inner loop = %s in %s", inner.LoopVar, inner.LoopItems)
+	}
+	if len(inner.LoopBody) != 1 || inner.LoopBody[0].Type != "shell" {
+		t.Errorf("inner body = %#v", inner.LoopBody)
+	}
+}
+
+// TestMatrixExecution verifies the cross product iterates all combinations
+// with both variables in scope, the last variable varying fastest.
+func TestMatrixExecution(t *testing.T) {
+	data := &ParsedData{
+		Commands: []*Command{{
+			Name: "build",
+			Body: []BodyStatement{
+				{
+					Type:      "for",
+					LoopVar:   "os",
+					LoopItems: "windows, linux",
+					LoopBody: []BodyStatement{
+						{
+							Type:      "for",
+							LoopVar:   "arch",
+							LoopItems: "amd64, arm64",
+							LoopBody: []BodyStatement{
+								{Type: "shell", Shell: "echo &os/&arch"},
+							},
+						},
+					},
+				},
+			},
+		}},
+	}
+	data.buildIndexMaps()
+	executor := NewExecutor(data, false, false)
+
+	so, sw, _ := os.Pipe()
+	oldOut := os.Stdout
+	os.Stdout = sw
+	err := executor.Execute([]string{"build"})
+	os.Stdout = oldOut
+	sw.Close()
+	out, _ := io.ReadAll(so)
+	if err != nil {
+		t.Fatalf("exec: %v", err)
+	}
+
+	var saw []string
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		saw = append(saw, line)
+	}
+	want := []string{"windows/amd64", "windows/arm64", "linux/amd64", "linux/arm64"}
+	if len(saw) != len(want) {
+		t.Fatalf("combinations = %v, want %v", saw, want)
+	}
+	for i := range want {
+		if saw[i] != want[i] {
+			t.Errorf("combination[%d] = %q, want %q", i, saw[i], want[i])
+		}
+	}
+}
+
+func TestMatrixMalformed(t *testing.T) {
+	for _, in := range []string{
+		"build {\n    matrix os windows, linux {\n        echo hi\n    }\n}",
+		"build {\n    matrix os in {\n        echo hi\n    }\n}",
+	} {
+		p := NewParserFromContent("t.constfile", in)
+		if _, err := p.Parse(); err == nil {
+			t.Errorf("expected parse error for %q", in)
+		}
+	}
+}
+
+func TestLoopContinueBreak(t *testing.T) {
+	data := &ParsedData{
+		Commands: []*Command{{
+			Name: "loop",
+			Body: []BodyStatement{
+				{
+					Type:      "for",
+					LoopVar:   "n",
+					LoopItems: "1, 2, 3, 4, 5",
+					LoopBody: []BodyStatement{
+						{
+							Type: "if",
+							Cond: `"&n" == "2"`,
+							ThenBody: []BodyStatement{
+								{Type: "continue"},
+							},
+						},
+						{
+							Type: "if",
+							Cond: `"&n" == "4"`,
+							ThenBody: []BodyStatement{
+								{Type: "break"},
+							},
+						},
+						{Type: "shell", Shell: "echo n=&n"},
+					},
+				},
+			},
+		}},
+	}
+	data.buildIndexMaps()
+
+	out := captureStdoutFor(t, func() error {
+		return NewExecutor(data, false, false).Execute([]string{"loop"})
+	})
+	want := "n=1\nn=3\n"
+	if out != want {
+		t.Errorf("output = %q, want %q", out, want)
+	}
+}
+
+func TestContinueIfSugar(t *testing.T) {
+	in := `build {
+    continue if "&os" == "windows"
+    break if "&n" == "5"
+}`
+	p := NewParserFromContent("t.constfile", in)
+	data, err := p.Parse()
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	cmd, _ := data.GetCommand("build")
+	if len(cmd.Body) != 2 {
+		t.Fatalf("expected 2 statements, got %#v", cmd.Body)
+	}
+	if cmd.Body[0].Type != "if" || cmd.Body[0].Cond != `"&os" == "windows"` ||
+		len(cmd.Body[0].ThenBody) != 1 || cmd.Body[0].ThenBody[0].Type != "continue" {
+		t.Errorf("continue-if = %#v", cmd.Body[0])
+	}
+	if cmd.Body[1].Type != "if" || cmd.Body[1].Cond != `"&n" == "5"` ||
+		len(cmd.Body[1].ThenBody) != 1 || cmd.Body[1].ThenBody[0].Type != "break" {
+		t.Errorf("break-if = %#v", cmd.Body[1])
+	}
+}
+
+func TestContinueOutsideLoop(t *testing.T) {
+	for _, body := range []string{"continue", "break"} {
+		data := &ParsedData{
+			Commands: []*Command{
+				{Name: "cmd", Body: []BodyStatement{{Type: body}}},
+			},
+		}
+		data.buildIndexMaps()
+		executor := NewExecutor(data, false, false)
+		err := executor.Execute([]string{"cmd"})
+		if err == nil {
+			t.Errorf("expected error for top-level %q", body)
+		}
+	}
+}
+
+func TestMatrixContinueIf(t *testing.T) {
+	data := &ParsedData{
+		Commands: []*Command{{
+			Name: "build",
+			Body: []BodyStatement{
+				{
+					Type:      "for",
+					LoopVar:   "os",
+					LoopItems: "windows, linux",
+					LoopBody: []BodyStatement{
+						{
+							Type:      "for",
+							LoopVar:   "arch",
+							LoopItems: "amd64, arm64",
+							LoopBody: []BodyStatement{
+								{
+									Type:     "if",
+									Cond:     `"&os" == "windows" && "&arch" == "arm64"`,
+									ThenBody: []BodyStatement{{Type: "continue"}},
+								},
+								{Type: "shell", Shell: "echo &os/&arch"},
+							},
+						},
+					},
+				},
+			},
+		}},
+	}
+	data.buildIndexMaps()
+
+	out := captureStdoutFor(t, func() error {
+		return NewExecutor(data, false, false).Execute([]string{"build"})
+	})
+	want := "windows/amd64\nlinux/amd64\nlinux/arm64\n"
+	if out != want {
+		t.Errorf("output = %q, want %q", out, want)
+	}
+}
+
+func TestShellContinueEscapes(t *testing.T) {
+	in := `build {
+    $ continue
+}`
+	p := NewParserFromContent("t.constfile", in)
+	data, err := p.Parse()
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	cmd, _ := data.GetCommand("build")
+	if cmd.Body[0].Type != "shell" || cmd.Body[0].Shell != "$ continue" {
+		t.Errorf("expected shell statement '$ continue', got %#v", cmd.Body[0])
+	}
+}
+
+func captureStdoutFor(t *testing.T, run func() error) string {
+	t.Helper()
+	so, sw, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	oldOut := os.Stdout
+	os.Stdout = sw
+	runErr := run()
+	os.Stdout = oldOut
+	sw.Close()
+	out, _ := io.ReadAll(so)
+	if runErr != nil {
+		t.Fatalf("exec: %v", runErr)
+	}
+	return strings.ReplaceAll(string(out), "\r\n", "\n")
 }
 
 func TestImportDefaultCommandConflict(t *testing.T) {

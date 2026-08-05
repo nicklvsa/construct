@@ -31,6 +31,7 @@ construct Constfile-<name> <command>    # run a command
 - **Named outputs (`as`)** — `Constfile-go-webapp`, `Constfile-python-project`, `Constfile-rust`, `Constfile-imports`, `Constfile-parallel-build`
 - **Conditionals (`if/else`)** — `Constfile-go-webapp`, `Constfile-python-project`, `Constfile-c-cpp`, `Constfile-monorepo`, `Constfile-nodejs`
 - **Logical operators + `else if`** — `Constfile-advanced-control`
+- **Build matrices (`matrix`)** — `Constfile-advanced-control`
 - **Working directory (`in`)** — `Constfile-go-webapp`, `Constfile-monorepo`, `Constfile-static-site`, `Constfile-parallel-build` (call-site overrides)
 - **Lazy variables (`$`)** — `Constfile-go-webapp`, `Constfile-python-project`, `Constfile-rust`
 - **Environment refs (`@`)** — `Constfile-python-project`, `Constfile-c-cpp`
