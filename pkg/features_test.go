@@ -727,6 +727,191 @@ build {
 	}
 }
 
+// TestEnvRefsInShellLines verifies @ENV refs resolve inside shell lines.
+func TestEnvRefsInShellLines(t *testing.T) {
+	t.Setenv("CONSTRUCT_TEST_SHELL_ENV", "shell-env-value")
+	data := &ParsedData{
+		Commands: []*Command{
+			{Name: "envtest", Body: shellBody(`$ echo "@CONSTRUCT_TEST_SHELL_ENV"`)},
+		},
+	}
+	data.buildIndexMaps()
+	out := captureStdoutFor(t, func() error {
+		return NewExecutor(data, false, false).Execute([]string{"envtest"})
+	})
+	if out != "shell-env-value\n" {
+		t.Errorf("output = %q, want env value", out)
+	}
+}
+
+// TestEnvRefsInShellLinesUnsetLiteral verifies unset @ENV refs stay literal in
+// shell lines, so scoped package names (@vscode/vsce) and typos survive.
+func TestEnvRefsInShellLinesUnsetLiteral(t *testing.T) {
+	if got := resolveEnvRefsSet(`npx @vscode/vsce@latest`); got != `npx @vscode/vsce@latest` {
+		t.Errorf("npm scoped package mangled: %q", got)
+	}
+	if got := resolveEnvRefsSet(`echo @CONSTRUCT_DEFINITELY_UNSET`); got != `echo @CONSTRUCT_DEFINITELY_UNSET` {
+		t.Errorf("unset ref should stay literal, got %q", got)
+	}
+	t.Setenv("CONSTRUCT_TEST_SHELL_ENV2", "v")
+	if got := resolveEnvRefsSet(`echo @CONSTRUCT_TEST_SHELL_ENV2 and @NOPE`); got != `echo v and @NOPE` {
+		t.Errorf("set/unset mix = %q", got)
+	}
+	if got := resolveEnvRefsSet(`echo \@CONSTRUCT_TEST_SHELL_ENV2`); got != `echo @CONSTRUCT_TEST_SHELL_ENV2` {
+		t.Errorf("escaped ref should stay literal, got %q", got)
+	}
+}
+
+// TestBuiltinConditionFunctions verifies exists/missing/glob in conditions.
+func TestBuiltinConditionFunctions(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "present.txt"), []byte("x"), 0644)
+	os.WriteFile(filepath.Join(dir, "a.go"), []byte("x"), 0644)
+	os.WriteFile(filepath.Join(dir, "b.go"), []byte("x"), 0644)
+
+	existsPath := filepath.Join(dir, "present.txt")
+	missingPath := filepath.Join(dir, "nope.txt")
+	globPat := filepath.Join(dir, "*.go")
+
+	tests := []struct {
+		cond string
+		want bool
+	}{
+		{`exists("` + existsPath + `")`, true},
+		{`exists("` + missingPath + `")`, false},
+		{`missing("` + missingPath + `")`, true},
+		{`missing("` + existsPath + `")`, false},
+		{`glob("` + globPat + `")`, true},
+		{`glob("` + filepath.Join(dir, "*.rs") + `")`, false},
+		{`exists("` + existsPath + `") && "1" == "1"`, true},
+		{`exists("` + missingPath + `") || "1" == "1"`, true},
+		{`!exists("` + missingPath + `")`, true},
+		{`missing("` + missingPath + `") && exists("` + existsPath + `")`, true},
+	}
+	for _, tt := range tests {
+		if got := evaluateCondition(tt.cond); got != tt.want {
+			t.Errorf("evaluateCondition(%q) = %v, want %v", tt.cond, got, tt.want)
+		}
+	}
+}
+
+// TestBuiltinConditionFunctionsNotShell verifies the function form never leaks
+// into shell execution — a "$ exists(...)" line stays a shell command.
+func TestBuiltinConditionFunctionsNotShell(t *testing.T) {
+	in := `build {
+    if exists("nonexistent-file-xyz") {
+        $ echo "exists"
+    } else {
+        $ echo "missing"
+    }
+}`
+	p := NewParserFromContent("t.constfile", in)
+	data, err := p.Parse()
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	cmd, _ := data.GetCommand("build")
+	if cmd.Body[0].Type != "if" {
+		t.Fatalf("expected if statement, got %#v", cmd.Body[0])
+	}
+	// The condition itself is evaluated by construct; the shell lines inside
+	// are untouched plain commands.
+	if cmd.Body[0].Cond != `exists("nonexistent-file-xyz")` {
+		t.Errorf("cond = %q", cmd.Body[0].Cond)
+	}
+}
+
+// TestLoopIndex verifies "for i, f in ..." binds a 0-based index variable.
+func TestLoopIndex(t *testing.T) {
+	in := `build {
+    for i, f in a, b, c {
+        $ echo "&i:&f"
+    }
+}`
+	p := NewParserFromContent("t.constfile", in)
+	data, err := p.Parse()
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	cmd, _ := data.GetCommand("build")
+	if cmd.Body[0].LoopVar != "f" || cmd.Body[0].LoopIndex != "i" {
+		t.Fatalf("loop = %#v", cmd.Body[0])
+	}
+
+	out := captureStdoutFor(t, func() error {
+		return NewExecutor(data, false, false).Execute([]string{"build"})
+	})
+	if out != "0:a\n1:b\n2:c\n" {
+		t.Errorf("output = %q, want 0:a/1:b/2:c", out)
+	}
+}
+
+// TestWorkDirBaseDir verifies relative workdirs anchor to the Constfile's
+// directory rather than the process cwd.
+func TestWorkDirBaseDir(t *testing.T) {
+	base := t.TempDir()
+	sub := filepath.Join(base, "src")
+	os.Mkdir(sub, 0755)
+	os.WriteFile(filepath.Join(sub, "data.txt"), []byte("from-base"), 0644)
+
+	// Run from a DIFFERENT directory to prove the base dir is used.
+	other := t.TempDir()
+	if err := os.Chdir(other); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+
+	data := &ParsedData{
+		Commands: []*Command{
+			{Name: "gen", WorkDir: "src", Body: []BodyStatement{{Type: "shell", Shell: "cat data.txt"}}},
+			{Name: "main", Prereqs: []string{"gen"}, Body: shellBody("echo done")},
+		},
+	}
+	data.buildIndexMaps()
+
+	executor := NewExecutor(data, false, false)
+	executor.SetBaseDir(base)
+	if err := executor.Execute([]string{"main"}); err != nil {
+		t.Fatalf("exec: %v", err)
+	}
+	gen, _ := data.GetCommand("gen")
+	if len(gen.PrereqOutput) != 1 || gen.PrereqOutput[0] != "from-base" {
+		t.Errorf("prereq output = %#v, want [from-base] (workdir must anchor to base dir)", gen.PrereqOutput)
+	}
+}
+
+// TestBuiltinConditionFunctionsBase verifies exists() anchors relative paths
+// to the command's working directory (itself anchored to the base dir).
+func TestBuiltinConditionFunctionsBase(t *testing.T) {
+	base := t.TempDir()
+	os.Mkdir(filepath.Join(base, "src"), 0755)
+	os.WriteFile(filepath.Join(base, "src", "artifact.bin"), []byte("x"), 0644)
+
+	other := t.TempDir()
+	if err := os.Chdir(other); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+
+	data := &ParsedData{
+		Commands: []*Command{
+			{Name: "check", WorkDir: "src", Body: []BodyStatement{
+				{Type: "if", Cond: `exists("artifact.bin")`,
+					ThenBody: []BodyStatement{{Type: "shell", Shell: "echo present"}},
+					ElseBody: []BodyStatement{{Type: "shell", Shell: "echo absent"}}},
+			}},
+		},
+	}
+	data.buildIndexMaps()
+
+	executor := NewExecutor(data, false, false)
+	executor.SetBaseDir(base)
+	out := captureStdoutFor(t, func() error {
+		return executor.Execute([]string{"check"})
+	})
+	if out != "present\n" {
+		t.Errorf("output = %q, want present (exists must anchor to workdir/base)", out)
+	}
+}
+
 func captureStdoutFor(t *testing.T, run func() error) string {
 	t.Helper()
 	so, sw, err := os.Pipe()

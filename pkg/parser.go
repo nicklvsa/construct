@@ -202,6 +202,7 @@ type BodyStatement struct {
 	ThenBody   []BodyStatement `json:"then,omitempty"`
 	ElseBody   []BodyStatement `json:"else,omitempty"`
 	LoopVar    string          `json:"loop_var,omitempty"`
+	LoopIndex  string          `json:"loop_index,omitempty"`
 	LoopItems  string          `json:"loop_items,omitempty"`
 	LoopBody   []BodyStatement `json:"loop_body,omitempty"`
 }
@@ -952,6 +953,16 @@ func (p *Parser) parseForBlock(raw []string, scope string) (BodyStatement, int, 
 	loopVar := strings.TrimSpace(headerPart[:inIdx])
 	loopItems := strings.TrimSpace(headerPart[inIdx+4:])
 
+	// "for i, f in ..." binds an index variable in addition to the value.
+	loopIndex := ""
+	if comma := strings.IndexByte(loopVar, ','); comma >= 0 {
+		loopIndex = strings.TrimSpace(loopVar[:comma])
+		loopVar = strings.TrimSpace(loopVar[comma+1:])
+		if loopVar == "" || loopIndex == "" {
+			return BodyStatement{}, 0, fmt.Errorf("malformed for loop: bad index syntax in %q", headerPart)
+		}
+	}
+
 	// Single-line block: "for x in a, b { stmt }".
 	if body, ok := singleLineBody(raw[0]); ok {
 		bodyStmts, err := p.parseBodyStatements(splitStatements(body), scope)
@@ -961,6 +972,7 @@ func (p *Parser) parseForBlock(raw []string, scope string) (BodyStatement, int, 
 		return BodyStatement{
 			Type:      "for",
 			LoopVar:   loopVar,
+			LoopIndex: loopIndex,
 			LoopItems: loopItems,
 			LoopBody:  bodyStmts,
 		}, 1, nil
@@ -979,6 +991,7 @@ func (p *Parser) parseForBlock(raw []string, scope string) (BodyStatement, int, 
 	stmt := BodyStatement{
 		Type:      "for",
 		LoopVar:   loopVar,
+		LoopIndex: loopIndex,
 		LoopItems: loopItems,
 		LoopBody:  bodyStmts,
 	}

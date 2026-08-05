@@ -193,8 +193,10 @@ build {
 
 Conditions support the comparison operators `==`, `!=`, `>`, `>=`, `<`, `<=`
 (numeric when both sides are integers, otherwise lexicographic), plus the
-`contains` operator for substring tests, and the logical operators `&&`, `||`,
-`!`, and parentheses:
+`contains` operator for substring tests, the logical operators `&&`, `||`,
+`!`, and parentheses. `@ENV` references resolve in shell lines and conditions;
+in shell lines an unset variable stays literal (so scoped package names like
+`@vscode/vsce` survive), while in variable values it resolves to empty.
 
 ```
 deploy {
@@ -220,6 +222,23 @@ for spec in darwin/arm64, windows/amd64 {
 }
 ```
 
+Built-in file-test functions evaluate inside conditions (they are construct
+functions, never passed to the shell):
+
+```
+deploy {
+    if exists("dist/app.exe") {
+        $ echo "artifact already built"
+    }
+    if missing("dist/app.exe") {
+        $ go build -o dist/app.exe .
+    }
+    if glob("dist/*.exe") {
+        $ echo "found a built binary"
+    }
+}
+```
+
 Blocks may be written on a single line, which pairs naturally with loop
 control:
 
@@ -229,10 +248,17 @@ for f in *.go {
     $ go vet &f
 }
 
+for i, f in *.go {      # "for index, value in ..." — 0-based index variable
+    $ echo "[&i] vetting &f"
+}
+
 for i in 1..10 {          # numeric ranges: N..M (ascending or descending)
     $ echo "attempt $i"
 }
 ```
+
+Working directories and file dependencies resolve relative to the Constfile's
+directory, so `construct /path/to/Constfile` behaves the same from anywhere.
 
 ### Build Matrices
 

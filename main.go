@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"runtime"
 	"slices"
 	"strings"
@@ -187,6 +188,7 @@ func main() {
 	}
 
 	executor := pkg.NewExecutor(data, concurrent, debug)
+	executor.SetBaseDir(filepath.Dir(inputs.FileName))
 	executor.RegisterArgumentFlags(flagSet)
 
 	flagSet.ParseErrorsWhitelist.UnknownFlags = false

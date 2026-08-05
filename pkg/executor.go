@@ -48,6 +48,7 @@ type Executor struct {
 	cache           fileCache
 	cacheLoaded     bool
 	runs            map[string]*commandRun
+	baseDir         string
 	mu              sync.Mutex
 }
 
@@ -188,6 +189,17 @@ func (e *Executor) SetDebug(debug bool) {
 	e.debug = debug
 }
 
+func (e *Executor) SetBaseDir(dir string) {
+	e.baseDir = dir
+}
+
+func (e *Executor) resolveWorkDir(dir string) string {
+	if dir == "" || e.baseDir == "" || filepath.IsAbs(dir) {
+		return dir
+	}
+	return filepath.Join(e.baseDir, dir)
+}
+
 func (e *Executor) EvaluateCommand(command *Command) error {
 	if e.runs == nil {
 		return e.executeCommand(command)
@@ -236,13 +248,17 @@ func (e *Executor) executeCommand(command *Command) error {
 
 	var execCommandBody func(target *Command, body []BodyStatement, isPrereq bool, workDir string) error
 	execCommandBody = func(target *Command, body []BodyStatement, isPrereq bool, workDir string) error {
+		condBase := e.baseDir
+		if workDir != "" {
+			condBase = e.resolveWorkDir(resolveValue(workDir, target.Name))
+		}
 		for _, stmt := range body {
 			if stmt.Type == "if" {
 				cond := resolveValue(stmt.Cond, target.Name)
 				if e.debug {
 					fmt.Printf("[DEBUG] Evaluating condition: %s\n", cond)
 				}
-				if evaluateCondition(cond) {
+				if evaluateConditionWithBase(cond, condBase) {
 					if err := execCommandBody(target, stmt.ThenBody, isPrereq, workDir); err != nil {
 						return err
 					}
@@ -260,7 +276,7 @@ func (e *Executor) executeCommand(command *Command) error {
 				if strings.ContainsAny(items, "*?") {
 					wd := "."
 					if workDir != "" {
-						wd = resolveValue(workDir, target.Name)
+						wd = e.resolveWorkDir(resolveValue(workDir, target.Name))
 					}
 					for _, pattern := range strings.Split(items, ",") {
 						pattern = strings.TrimSpace(pattern)
@@ -286,8 +302,11 @@ func (e *Executor) executeCommand(command *Command) error {
 				}
 
 			iterLoop:
-				for _, item := range expanded {
+				for idx, item := range expanded {
 					e.StructuredParse.SetVariable(stmt.LoopVar, target.Name, item)
+					if stmt.LoopIndex != "" {
+						e.StructuredParse.SetVariable(stmt.LoopIndex, target.Name, strconv.Itoa(idx))
+					}
 					if e.debug {
 						fmt.Printf("[DEBUG] For loop %s = %s\n", stmt.LoopVar, item)
 					}
@@ -326,7 +345,7 @@ func (e *Executor) executeCommand(command *Command) error {
 			args := append(e.shellArgs, cmdLine)
 			cmd := exec.Command(e.shellName, args...)
 			if workDir != "" {
-				cmd.Dir = resolveValue(workDir, target.Name)
+				cmd.Dir = e.resolveWorkDir(resolveValue(workDir, target.Name))
 			}
 			cmd.Env = e.childEnv()
 
@@ -485,6 +504,7 @@ func (e *Executor) executeCommand(command *Command) error {
 					out[i] = BodyStatement{
 						Type:      "for",
 						LoopVar:   stmt.LoopVar,
+						LoopIndex: stmt.LoopIndex,
 						LoopItems: e.cleanShellLine(cmd, stmt.LoopItems, argFlags),
 						LoopBody:  stmt.LoopBody,
 					}
@@ -592,6 +612,7 @@ func (e *Executor) cleanStatements(stmts []BodyStatement, cmd *Command, argFlags
 			out[i] = BodyStatement{
 				Type:      "for",
 				LoopVar:   stmt.LoopVar,
+				LoopIndex: stmt.LoopIndex,
 				LoopItems: e.cleanShellLine(cmd, stmt.LoopItems, argFlags),
 				LoopBody:  stmt.LoopBody,
 			}
@@ -643,7 +664,8 @@ func (e *Executor) cleanShellLine(cmd *Command, line string, argFlags map[string
 		line = strings.ReplaceAll(line, "&"+arg.Name, escapeShellValue(v))
 	}
 
-	return line
+	// @ENV references resolve in shell lines too; unset ones stay literal.
+	return resolveEnvRefsSet(line)
 }
 
 func isVarIdentByte(c byte) bool {
@@ -804,6 +826,39 @@ func resolveEnvRefs(s string) string {
 	return result.String()
 }
 
+func resolveEnvRefsSet(s string) string {
+	if strings.IndexByte(s, '@') < 0 {
+		return s
+	}
+
+	var result strings.Builder
+	result.Grow(len(s))
+	for i := 0; i < len(s); {
+		if s[i] == '\\' && i+1 < len(s) && s[i+1] == '@' {
+			result.WriteByte('@')
+			i += 2
+			continue
+		}
+		if s[i] == '@' {
+			j := i + 1
+			start := j
+			for j < len(s) && isPlainIdentByte(s[j]) {
+				j++
+			}
+			if j > start {
+				if val, ok := os.LookupEnv(s[start:j]); ok {
+					result.WriteString(val)
+					i = j
+					continue
+				}
+			}
+		}
+		result.WriteByte(s[i])
+		i++
+	}
+	return result.String()
+}
+
 func resolveEnvRefsRunes(s string) string {
 	var result strings.Builder
 	runes := []rune(s)
@@ -853,25 +908,32 @@ func findTopLevelOp(s, op string) int {
 }
 
 func evaluateCondition(cond string) bool {
+	return evaluateConditionWithBase(cond, "")
+}
+
+func evaluateConditionWithBase(cond, base string) bool {
 	cond = strings.TrimSpace(cond)
 
 	// Parenthesized sub-expression: ( expr )
 	if strings.HasPrefix(cond, "(") && strings.HasSuffix(cond, ")") {
-		return evaluateCondition(strings.TrimSpace(cond[1 : len(cond)-1]))
+		return evaluateConditionWithBase(strings.TrimSpace(cond[1:len(cond)-1]), base)
 	}
 
-	// Logical OR / AND, lowest precedence first.
 	if idx := findTopLevelOp(cond, "||"); idx >= 0 {
-		return evaluateCondition(cond[:idx]) || evaluateCondition(cond[idx+2:])
+		return evaluateConditionWithBase(cond[:idx], base) || evaluateConditionWithBase(cond[idx+2:], base)
 	}
 	if idx := findTopLevelOp(cond, "&&"); idx >= 0 {
-		return evaluateCondition(cond[:idx]) && evaluateCondition(cond[idx+2:])
+		return evaluateConditionWithBase(cond[:idx], base) && evaluateConditionWithBase(cond[idx+2:], base)
 	}
 
 	// Negation: ! expr
 	if strings.HasPrefix(cond, "!") {
 		rest := strings.TrimSpace(cond[1:])
-		return rest != "" && !evaluateCondition(rest)
+		return rest != "" && !evaluateConditionWithBase(rest, base)
+	}
+
+	if result, ok := evalBuiltinCondition(cond, base); ok {
+		return result
 	}
 
 	if idx := strings.Index(cond, " contains "); idx > 0 {
@@ -893,6 +955,33 @@ func evaluateCondition(cond string) bool {
 		}
 	}
 	return false
+}
+
+func evalBuiltinCondition(cond, base string) (bool, bool) {
+	open := strings.IndexByte(cond, '(')
+	if open <= 0 || !strings.HasSuffix(cond, ")") {
+		return false, false
+	}
+	name := strings.TrimSpace(cond[:open])
+	arg := strings.Trim(strings.TrimSpace(cond[open+1:len(cond)-1]), `"`)
+	if arg == "" {
+		return false, false
+	}
+	if base != "" && !filepath.IsAbs(arg) {
+		arg = filepath.Join(base, arg)
+	}
+	switch name {
+	case "exists":
+		_, err := os.Stat(arg)
+		return err == nil, true
+	case "missing":
+		_, err := os.Stat(arg)
+		return err != nil, true
+	case "glob":
+		matches, _ := filepath.Glob(arg)
+		return len(matches) > 0, true
+	}
+	return false, false
 }
 
 func compareValues(left, right, op string) bool {
@@ -1195,7 +1284,7 @@ func (e *Executor) cacheManifest() fileCache {
 }
 
 func (e *Executor) shouldSkip(cmd *Command, resolve func(string, string) string, workDir string) bool {
-	wd := resolve(workDir, cmd.Name)
+	wd := e.resolveWorkDir(resolve(workDir, cmd.Name))
 	files := expandFileDeps(cmd.FileDeps, wd)
 	if len(files) == 0 {
 		return false
@@ -1220,7 +1309,7 @@ func (e *Executor) shouldSkip(cmd *Command, resolve func(string, string) string,
 }
 
 func (e *Executor) updateCache(cmd *Command, resolve func(string, string) string, workDir string) {
-	wd := resolve(workDir, cmd.Name)
+	wd := e.resolveWorkDir(resolve(workDir, cmd.Name))
 	files := expandFileDeps(cmd.FileDeps, wd)
 
 	e.mu.Lock()

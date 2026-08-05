@@ -1,9 +1,14 @@
 // Advanced conditionals and error tolerance
 // Demonstrates: else if chains, logical operators (&&, ||, !, parentheses),
-//               and the "!" error-tolerance marker
+//               the "!" error-tolerance marker, build matrices, loop control,
+//               single-line blocks, built-in file-test functions, loop
+//               index, numeric ranges, and the literal-ref escape hatch
 // Run with:
 //   construct Constfile-advanced-control deploy -e os=windows -e version=3
 //   construct Constfile-advanced-control matrix
+//   construct Constfile-advanced-control build_matrix
+//   construct Constfile-advanced-control artifacts
+//   construct Constfile-advanced-control literals
 
 var os = linux
 var version = 2
@@ -47,4 +52,28 @@ build_matrix {
         continue if "&os" == "windows" && "&arch" == "arm64"
         $ echo "building &os/&arch"
     }
+}
+
+// Built-in file-test functions (evaluated by construct, never the shell),
+// single-line blocks, loop index, and numeric ranges.
+artifacts {
+    for i, f in app.exe, lib.dylib, lib.so {
+        $ echo "[&i] artifact: &f"
+    }
+    for i in 1..3 {
+        $ echo "attempt &i"
+    }
+    if exists("README.md") { $ echo "docs exist" } else { $ echo "no docs" }
+    if missing("dist/app.exe") {
+        $ echo "release not built yet"
+    }
+    if glob("*.md") {
+        $ echo "found markdown docs"
+    }
+}
+
+// @ENV refs resolve in shell lines when set; "\&" and "\@" escape literals.
+literals {
+    $ echo "home: @HOME"
+    $ echo "literal @HOME and \&name"
 }

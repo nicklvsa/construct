@@ -19,8 +19,8 @@ construct Constfile-<name> <command>    # run a command
 | `Constfile-rust` | Rust | Lazy vars, conditionals, named outputs, prereq chaining, cross-compile loops |
 | `Constfile-nodejs` | Node.js | Workdir, for loops, env refs, CLI overrides, conditional deploy |
 | `Constfile-static-site` | Static site | File deps, workdir, named outputs, for loops over assets |
-| `Constfile-imports` (+ `lib.constfile`) | Multi-file | `import` keyword, cross-file prereqs/variables, named outputs |
-| `Constfile-advanced-control` | Any | `else if` chains, logical operators (`&&`, `\|\|`, `!`, parens), error-tolerance marker (`!`) |
+| `Constfile-imports` (+ `lib.constfile`) | Multi-file | `import` keyword, cross-file prereqs/variables, named outputs, argument defaults |
+| `Constfile-advanced-control` | Any | `else if` chains, logical operators (`&&`, `\|\|`, `!`, parens), error-tolerance marker (`!`), matrices, loop control, single-line blocks, `exists()`/`missing()`/`glob()`, loop index, numeric ranges, escape hatch |
 | `Constfile-parallel-build` | Any | DAG-parallel prerequisites (`--concurrent`), call-site `in <dir>` workdir overrides |
 
 ## Feature Coverage
@@ -32,6 +32,12 @@ construct Constfile-<name> <command>    # run a command
 - **Conditionals (`if/else`)** — `Constfile-go-webapp`, `Constfile-python-project`, `Constfile-c-cpp`, `Constfile-monorepo`, `Constfile-nodejs`
 - **Logical operators + `else if`** — `Constfile-advanced-control`
 - **Build matrices (`matrix`)** — `Constfile-advanced-control`
+- **Loop control (`continue`/`break`)** — `Constfile-advanced-control`
+- **Single-line blocks** — `Constfile-advanced-control`
+- **Built-in file-test functions** — `Constfile-advanced-control`
+- **Loop index + numeric ranges** — `Constfile-advanced-control`
+- **Escape hatch (`\&`, `\@`)** — `Constfile-advanced-control`
+- **Argument defaults (`opt env=prod`)** — `Constfile-imports`
 - **Working directory (`in`)** — `Constfile-go-webapp`, `Constfile-monorepo`, `Constfile-static-site`, `Constfile-parallel-build` (call-site overrides)
 - **Lazy variables (`$`)** — `Constfile-go-webapp`, `Constfile-python-project`, `Constfile-rust`
 - **Environment refs (`@`)** — `Constfile-python-project`, `Constfile-c-cpp`
