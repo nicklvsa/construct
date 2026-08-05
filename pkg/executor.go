@@ -942,6 +942,8 @@ func findTopLevelOp(s, op string) int {
 	return -1
 }
 
+var conditionOps = []string{"==", "!=", ">=", "<=", ">", "<"}
+
 func evaluateCondition(cond string) bool {
 	return evaluateConditionWithBase(cond, "")
 }
@@ -979,9 +981,6 @@ func evaluateConditionWithBase(cond, base string) bool {
 		return strings.Contains(left, right)
 	}
 
-	// List membership: "&os" in "windows, linux" — exact match against a
-	// comma-separated list. Quote-aware, so an " in " inside quoted text is
-	// never treated as the operator.
 	if idx := findTopLevelOp(cond, " in "); idx > 0 {
 		left := strings.Trim(strings.TrimSpace(cond[:idx]), "\"")
 		list := strings.Trim(strings.TrimSpace(cond[idx+len(" in "):]), "\"")
@@ -993,7 +992,7 @@ func evaluateConditionWithBase(cond, base string) bool {
 		return false
 	}
 
-	ops := []string{"==", "!=", ">=", "<=", ">", "<"}
+	ops := conditionOps
 	for _, op := range ops {
 		if idx := strings.Index(cond, op); idx > 0 {
 			left := strings.TrimSpace(cond[:idx])
@@ -1341,9 +1340,9 @@ func (e *Executor) shouldSkip(cmd *Command, resolve func(string, string) string,
 		return false
 	}
 
-	for _, f := range files {
-		current := hashFile(f)
-		if cached[f] != current {
+	hashes := parallelHash(files)
+	for i, f := range files {
+		if cached[f] != hashes[i] {
 			if e.debug {
 				fmt.Printf("[DEBUG] %s: file changed: %s\n", cmd.Name, f)
 			}
@@ -1351,6 +1350,28 @@ func (e *Executor) shouldSkip(cmd *Command, resolve func(string, string) string,
 		}
 	}
 	return true
+}
+
+// parallelHash computes sha256 hashes of the given files concurrently.
+func parallelHash(files []string) []string {
+	if len(files) < 2 {
+		out := make([]string, len(files))
+		for i, f := range files {
+			out[i] = hashFile(f)
+		}
+		return out
+	}
+	out := make([]string, len(files))
+	var wg sync.WaitGroup
+	for i, f := range files {
+		wg.Add(1)
+		go func(i int, f string) {
+			defer wg.Done()
+			out[i] = hashFile(f)
+		}(i, f)
+	}
+	wg.Wait()
+	return out
 }
 
 func (e *Executor) updateCache(cmd *Command, resolve func(string, string) string, workDir string) {
@@ -1368,8 +1389,9 @@ func (e *Executor) updateCache(cmd *Command, resolve func(string, string) string
 	if fc[cmd.Name] == nil {
 		fc[cmd.Name] = make(map[string]string)
 	}
-	for _, f := range files {
-		fc[cmd.Name][f] = hashFile(f)
+	hashes := parallelHash(files)
+	for i, f := range files {
+		fc[cmd.Name][f] = hashes[i]
 	}
 	fc.save()
 }
