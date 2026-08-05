@@ -1,8 +1,3 @@
-hello {
-    $ echo "hello, world" as out
-    $ echo "Something else" as test
-}
-
 build-lsp in editor/vscode/server {
     $ go build -o construct-lsp . as out
 }
@@ -13,7 +8,7 @@ install in editor/vscode {
 
 build-ext in editor/vscode < build-lsp, install {
     $ npx @vscode/vsce@latest package --no-yarn
-    $ code --install-extension constfile-0.2.0.vsix --force
+    $ code --install-extension constfile-0.2.0.vsix --force as final_out
 }
 
 build-all < install {
@@ -30,5 +25,6 @@ build-all < install {
 }
 
 _ < build-ext {
-    echo "&build-ext.0"
+    # echo "&build-ext.0"
+    echo "&build-ext.final_out"
 }
