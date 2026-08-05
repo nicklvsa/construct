@@ -11,9 +11,9 @@ install in editor/vscode {
     $ npm install --silent
 }
 
-build-ext < build-lsp, install {
-    $ cd editor/vscode && npx @vscode/vsce@latest package --no-yarn
-    $ code --install-extension editor/vscode/constfile-0.2.0.vsix --force
+build-ext in editor/vscode < build-lsp, install {
+    $ npx @vscode/vsce@latest package --no-yarn
+    $ code --install-extension constfile-0.2.0.vsix --force
 }
 
 build-all < install {
