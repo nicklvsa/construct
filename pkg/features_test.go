@@ -1,6 +1,7 @@
 package pkg
 
 import (
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -909,6 +910,97 @@ func TestBuiltinConditionFunctionsBase(t *testing.T) {
 	})
 	if out != "present\n" {
 		t.Errorf("output = %q, want present (exists must anchor to workdir/base)", out)
+	}
+}
+
+// TestConditionInOperator verifies list-membership conditions.
+func TestConditionInOperator(t *testing.T) {
+	tests := []struct {
+		cond string
+		want bool
+	}{
+		{`"windows" in "windows, linux"`, true},
+		{`"linux" in "windows, linux"`, true},
+		{`"darwin" in "windows, linux"`, false},
+		{`"windows" in "windows"`, true},
+		{`"x" in ""`, false},
+		{`" a " in "a, b"`, false},          // exact match, no trimming of the operand
+		{`"a" in "a , b"`, true},            // list items are trimmed
+		{`windows in windows, linux`, true}, // unquoted operands
+		{`"a in b" == "c"`, false},          // " in " inside quotes is not the operator
+		{`"windows" in "windows, linux" && "1" == "1"`, true},
+		{`"windows" in "linux" || "1" == "1"`, true},
+		{`!"windows" in "linux"`, true},
+	}
+	for _, tt := range tests {
+		if got := evaluateCondition(tt.cond); got != tt.want {
+			t.Errorf("evaluateCondition(%q) = %v, want %v", tt.cond, got, tt.want)
+		}
+	}
+}
+
+// TestOutputIteration verifies &prereq.* iterates captured outputs in order.
+func TestOutputIteration(t *testing.T) {
+	data := &ParsedData{
+		Commands: []*Command{
+			{Name: "gen", Body: shellBody("echo one", "echo two", "echo three")},
+			{
+				Name:       "use",
+				Prereqs:    []string{"gen"},
+				PrereqCmds: []*Command{{Name: "gen", PrereqOutput: []string{"one", "two", "three"}}},
+				Body: []BodyStatement{
+					{
+						Type:      "for",
+						LoopVar:   "line",
+						LoopItems: "&gen.*",
+						LoopBody:  []BodyStatement{{Type: "shell", Shell: "echo got:&line"}},
+					},
+				},
+			},
+		},
+	}
+	data.buildIndexMaps()
+
+	for i, out := range []string{"one", "two", "three"} {
+		data.SetVariable(fmt.Sprintf("gen.%d", i), "use", out)
+	}
+
+	out := captureStdoutFor(t, func() error {
+		return NewExecutor(data, false, false).Execute([]string{"use"})
+	})
+	want := "got:one\ngot:two\ngot:three\n"
+	if out != want {
+		t.Errorf("output = %q, want %q", out, want)
+	}
+}
+
+func TestOutputIterationEmpty(t *testing.T) {
+	data := &ParsedData{
+		Commands: []*Command{
+			{Name: "quiet", Body: shellBody("true")},
+			{
+				Name:       "use",
+				Prereqs:    []string{"quiet"},
+				PrereqCmds: []*Command{{Name: "quiet", PrereqOutput: nil}},
+				Body: []BodyStatement{
+					{
+						Type:      "for",
+						LoopVar:   "line",
+						LoopItems: "&quiet.*",
+						LoopBody:  []BodyStatement{{Type: "shell", Shell: "echo ran:&line"}},
+					},
+					{Type: "shell", Shell: "echo done"},
+				},
+			},
+		},
+	}
+	data.buildIndexMaps()
+
+	out := captureStdoutFor(t, func() error {
+		return NewExecutor(data, false, false).Execute([]string{"use"})
+	})
+	if out != "done\n" {
+		t.Errorf("output = %q, want just done (zero iterations)", out)
 	}
 }
 

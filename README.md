@@ -239,6 +239,15 @@ deploy {
 }
 ```
 
+List membership uses the `in` operator — exact match against a comma-separated
+list:
+
+```
+if "&os" in "windows, linux" {
+    $ echo "supported platform"
+}
+```
+
 Blocks may be written on a single line, which pairs naturally with loop
 control:
 
@@ -254,6 +263,22 @@ for i, f in *.go {      # "for index, value in ..." — 0-based index variable
 
 for i in 1..10 {          # numeric ranges: N..M (ascending or descending)
     $ echo "attempt $i"
+}
+```
+
+A prereq's captured outputs can be iterated with the `&prereq.*` reference
+(a command with no outputs yields zero iterations):
+
+```
+gen {
+    $ echo line-one
+    $ echo line-two
+}
+
+use < gen {
+    for line in &gen.* {
+        $ echo "captured: &line"
+    }
 }
 ```
 

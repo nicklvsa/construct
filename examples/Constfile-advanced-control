@@ -77,3 +77,21 @@ literals {
     $ echo "home: @HOME"
     $ echo "literal @HOME and \&name"
 }
+
+// List membership in conditions ("in") and iterating a prereq's captured
+// outputs with &gen_outputs.*.
+outputs < gen_outputs {
+    for line in &gen_outputs.* {
+        $ echo "captured: &line"
+    }
+    if "&os" in "windows, linux" {
+        $ echo "&os is a supported platform"
+    } else {
+        $ echo "&os is not in the supported list"
+    }
+}
+
+gen_outputs {
+    $ echo "first line"
+    $ echo "second line"
+}

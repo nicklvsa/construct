@@ -272,6 +272,10 @@ func (e *Executor) executeCommand(command *Command) error {
 
 			if stmt.Type == "for" {
 				items := resolveValue(stmt.LoopItems, target.Name)
+				items = e.expandOutputRefs(items, target.Name)
+				if items == "" {
+					continue
+				}
 				var expanded []string
 				if strings.ContainsAny(items, "*?") {
 					wd := "."
@@ -668,6 +672,46 @@ func (e *Executor) cleanShellLine(cmd *Command, line string, argFlags map[string
 	return resolveEnvRefsSet(line)
 }
 
+// expandOutputRefs replaces &prereq.* references in loop items with the
+// comma-joined positional outputs of that prereq (registered as variables in
+// the current command's scope). A known command with no outputs expands to
+// nothing; anything that isn't a prereq output ref is left untouched, so file
+// globs like &dir/*.go are unaffected.
+func (e *Executor) expandOutputRefs(items, scope string) string {
+	if !strings.Contains(items, ".*") {
+		return items
+	}
+	var result strings.Builder
+	i := 0
+	for i < len(items) {
+		if items[i] == '&' && i+1 < len(items) && isVarIdentByte(items[i+1]) {
+			j := i + 1
+			for j < len(items) && isVarIdentByte(items[j]) {
+				j++
+			}
+			if j+1 < len(items) && items[j] == '.' && items[j+1] == '*' {
+				name := items[i+1 : j]
+				if _, err := e.StructuredParse.GetCommand(name); err == nil {
+					var outs []string
+					for idx := 0; ; idx++ {
+						val, ok := e.StructuredParse.LookupVariable(fmt.Sprintf("%s.%d", name, idx), scope)
+						if !ok {
+							break
+						}
+						outs = append(outs, val)
+					}
+					result.WriteString(strings.Join(outs, ", "))
+					i = j + 2
+					continue
+				}
+			}
+		}
+		result.WriteByte(items[i])
+		i++
+	}
+	return result.String()
+}
+
 func isVarIdentByte(c byte) bool {
 	return c == '_' || c == '-' ||
 		(c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
@@ -942,6 +986,20 @@ func evaluateConditionWithBase(cond, base string) bool {
 		left = strings.Trim(left, "\"")
 		right = strings.Trim(right, "\"")
 		return strings.Contains(left, right)
+	}
+
+	// List membership: "&os" in "windows, linux" — exact match against a
+	// comma-separated list. Quote-aware, so an " in " inside quoted text is
+	// never treated as the operator.
+	if idx := findTopLevelOp(cond, " in "); idx > 0 {
+		left := strings.Trim(strings.TrimSpace(cond[:idx]), "\"")
+		list := strings.Trim(strings.TrimSpace(cond[idx+len(" in "):]), "\"")
+		for _, item := range strings.Split(list, ",") {
+			if left == strings.TrimSpace(item) {
+				return true
+			}
+		}
+		return false
 	}
 
 	ops := []string{"==", "!=", ">=", "<=", ">", "<"}
