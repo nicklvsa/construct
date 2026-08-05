@@ -577,6 +577,9 @@ func commandHover(c *pkg.Command) string {
 			} else {
 				fmt.Fprintf(&b, " `%s`", a.Name)
 			}
+			if a.Default != "" {
+				fmt.Fprintf(&b, " (default: %s)", a.Default)
+			}
 		}
 		b.WriteString("\n")
 	}

@@ -179,7 +179,7 @@ func (e *Executor) RegisterArgumentFlags(flagSet *pflag.FlagSet) {
 	for _, cmd := range e.StructuredParse.Commands {
 		for _, arg := range cmd.Arguments {
 			flagName := fmt.Sprintf("%s:%s", cmd.Name, arg.Name)
-			flagSet.String(flagName, "", fmt.Sprintf("Argument %s for command %s", arg.Name, cmd.Name))
+			flagSet.String(flagName, arg.Default, fmt.Sprintf("Argument %s for command %s", arg.Name, cmd.Name))
 		}
 	}
 }
@@ -272,6 +272,8 @@ func (e *Executor) executeCommand(command *Command) error {
 							expanded = append(expanded, filepath.Base(m))
 						}
 					}
+				} else if rng, ok := expandRange(items); ok {
+					expanded = rng
 				} else {
 					for item := range strings.SplitSeq(items, ",") {
 						expanded = append(expanded, strings.TrimSpace(item))
@@ -691,6 +693,11 @@ func resolveVarRefs(line string, lookup func(string) (string, bool)) string {
 	result.Grow(len(line))
 	i := 0
 	for i < len(line) {
+		if line[i] == '\\' && i+1 < len(line) && line[i+1] == '&' {
+			result.WriteByte('&')
+			i += 2
+			continue
+		}
 		if line[i] == '&' {
 			j := i + 1
 			start := j
@@ -773,6 +780,12 @@ func resolveEnvRefs(s string) string {
 	var result strings.Builder
 	result.Grow(len(s))
 	for i := 0; i < len(s); {
+		// "\@" escapes the marker: "@" is written literally.
+		if s[i] == '\\' && i+1 < len(s) && s[i+1] == '@' {
+			result.WriteByte('@')
+			i += 2
+			continue
+		}
 		if s[i] == '@' {
 			j := i + 1
 			start := j
@@ -1045,7 +1058,29 @@ func (e *Executor) getCloudDefinition(name string) (*Command, error) {
 	return nil, fmt.Errorf("%s command not found in cloud", name)
 }
 
-// capture reads stdout and stderr concurrently to avoid pipe-buffer deadlock.
+func expandRange(s string) ([]string, bool) {
+	a, b, ok := strings.Cut(strings.TrimSpace(s), "..")
+	if !ok {
+		return nil, false
+	}
+	start, err1 := strconv.Atoi(strings.TrimSpace(a))
+	end, err2 := strconv.Atoi(strings.TrimSpace(b))
+	if err1 != nil || err2 != nil {
+		return nil, false
+	}
+	var out []string
+	if start <= end {
+		for i := start; i <= end; i++ {
+			out = append(out, strconv.Itoa(i))
+		}
+	} else {
+		for i := start; i >= end; i-- {
+			out = append(out, strconv.Itoa(i))
+		}
+	}
+	return out, true
+}
+
 func capture(cmd *exec.Cmd) (stdout, stderr []byte, err error) {
 	stdoutPipe, err := cmd.StdoutPipe()
 	if err != nil {

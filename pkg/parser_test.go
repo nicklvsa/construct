@@ -220,7 +220,7 @@ func TestParseArgumentName(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			name, isOptional := parseArgumentName(tt.input)
+			name, isOptional, _ := parseArgumentName(tt.input)
 			if name != tt.expectedName {
 				t.Errorf("parseArgumentName(%q) name = %q, want %q", tt.input, name, tt.expectedName)
 			}

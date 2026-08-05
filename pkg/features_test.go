@@ -6,7 +6,10 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
 	"time"
+
+	"github.com/spf13/pflag"
 )
 
 func TestElseIfParsing(t *testing.T) {
@@ -534,6 +537,193 @@ func TestShellContinueEscapes(t *testing.T) {
 	cmd, _ := data.GetCommand("build")
 	if cmd.Body[0].Type != "shell" || cmd.Body[0].Shell != "$ continue" {
 		t.Errorf("expected shell statement '$ continue', got %#v", cmd.Body[0])
+	}
+}
+
+func TestSingleLineBlocks(t *testing.T) {
+	in := `build {
+    if "&n" == "1" { continue }
+    if "&x" == "1" { echo then } else { echo else }
+    if "&x" == "1" { echo a } else if "&x" == "2" { echo b }
+    for f in a, b { echo &f }
+    matrix os in windows, linux; arch in amd64 { echo &os/&arch }
+    if "&y" == "1" { echo one; echo two }
+}`
+	p := NewParserFromContent("t.constfile", in)
+	data, err := p.Parse()
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	cmd, _ := data.GetCommand("build")
+	if len(cmd.Body) != 6 {
+		t.Fatalf("expected 6 statements, got %d: %#v", len(cmd.Body), cmd.Body)
+	}
+
+	if s := cmd.Body[0]; s.Type != "if" || len(s.ThenBody) != 1 || s.ThenBody[0].Type != "continue" {
+		t.Errorf("single-line continue-if = %#v", s)
+	}
+	if s := cmd.Body[1]; s.Type != "if" || len(s.ThenBody) != 1 || len(s.ElseBody) != 1 {
+		t.Errorf("single-line if-else = %#v", s)
+	}
+	if s := cmd.Body[2]; s.Type != "if" || len(s.ElseBody) != 1 || s.ElseBody[0].Type != "if" {
+		t.Errorf("single-line else-if = %#v", s)
+	}
+	if s := cmd.Body[3]; s.Type != "for" || s.LoopVar != "f" || len(s.LoopBody) != 1 {
+		t.Errorf("single-line for = %#v", s)
+	}
+	if s := cmd.Body[4]; s.Type != "for" || s.LoopVar != "os" {
+		t.Errorf("single-line matrix = %#v", s)
+	}
+	if s := cmd.Body[5]; s.Type != "if" || len(s.ThenBody) != 2 {
+		t.Errorf("single-line semicolon body = %#v", s)
+	}
+}
+
+func TestSingleLineBlocksExecution(t *testing.T) {
+	data := &ParsedData{
+		Commands: []*Command{{
+			Name: "build",
+			Body: []BodyStatement{
+				{
+					Type:      "for",
+					LoopVar:   "n",
+					LoopItems: "1, 2, 3",
+					LoopBody: []BodyStatement{
+						{Type: "if", Cond: `"&n" == "2"`, ThenBody: []BodyStatement{{Type: "continue"}}},
+						{Type: "shell", Shell: "echo n=&n"},
+					},
+				},
+			},
+		}},
+	}
+	data.buildIndexMaps()
+	out := captureStdoutFor(t, func() error {
+		return NewExecutor(data, false, false).Execute([]string{"build"})
+	})
+	if out != "n=1\nn=3\n" {
+		t.Errorf("output = %q, want n=1/n=3", out)
+	}
+}
+
+func TestElseWithoutIf(t *testing.T) {
+	in := `build {
+    else { echo nope }
+}`
+	p := NewParserFromContent("t.constfile", in)
+	if _, err := p.Parse(); err == nil || !strings.Contains(err.Error(), "else") {
+		t.Fatalf("expected else error, got %v", err)
+	}
+}
+
+func TestArgumentDefaults(t *testing.T) {
+	in := `deploy (opt env=prod) {
+    $ echo "env is &env"
+}`
+	p := NewParserFromContent("t.constfile", in)
+	data, err := p.Parse()
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	cmd, _ := data.GetCommand("deploy")
+	if len(cmd.Arguments) != 1 || cmd.Arguments[0].Name != "env" || cmd.Arguments[0].Default != "prod" || !cmd.Arguments[0].IsOptional {
+		t.Fatalf("args = %#v", cmd.Arguments)
+	}
+
+	flagSet := pflag.NewFlagSet("t", pflag.ContinueOnError)
+	executor := NewExecutor(data, false, false)
+	executor.RegisterArgumentFlags(flagSet)
+
+	// Unset: default applies.
+	if out := captureStdoutFor(t, func() error {
+		return executor.Execute([]string{"deploy"})
+	}); out != "env is prod\n" {
+		t.Errorf("default output = %q", out)
+	}
+
+	// Explicit flag overrides.
+	if err := flagSet.Parse([]string{"--deploy:env=staging"}); err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if out := captureStdoutFor(t, func() error {
+		return executor.Execute([]string{"deploy"})
+	}); out != "env is staging\n" {
+		t.Errorf("override output = %q", out)
+	}
+}
+
+func TestEscapeHatch(t *testing.T) {
+	// Shell lines: \& and \@ pass through literally.
+	if got := resolveVarRefs(`echo "\&foo \@BAR"`, func(string) (string, bool) { return "X", true }); got != `echo "&foo \@BAR"` {
+		t.Errorf("resolveVarRefs escape = %q", got)
+	}
+	if got := resolveEnvRefs(`echo "\&foo \@BAR"`); got != `echo "\&foo @BAR"` {
+		t.Errorf("resolveEnvRefs escape = %q", got)
+	}
+
+	// Variable values: \&, \@, \$ are literal.
+	p := &Parser{Data: &ParsedData{}}
+	p.Data.Variables = append(p.Data.Variables, &Variable{Name: "foo", Value: "F", Scope: "global"})
+	name, scope := "x", "global"
+	if got := p.tryEvalExpression(`a \&foo b \@HOME c \$5`, &name, &scope); got != `a &foo b @HOME c $5` {
+		t.Errorf("tryEvalExpression escape = %q", got)
+	}
+}
+
+func TestNumericRanges(t *testing.T) {
+	rng, ok := expandRange("1..5")
+	if !ok || strings.Join(rng, ",") != "1,2,3,4,5" {
+		t.Errorf("1..5 = %v ok=%v", rng, ok)
+	}
+	rng, ok = expandRange("5..3")
+	if !ok || strings.Join(rng, ",") != "5,4,3" {
+		t.Errorf("5..3 = %v ok=%v", rng, ok)
+	}
+	if _, ok := expandRange("a..b"); ok {
+		t.Error("a..b should not expand")
+	}
+	if _, ok := expandRange("1.."); ok {
+		t.Error("1.. should not expand")
+	}
+
+	data := &ParsedData{
+		Commands: []*Command{{
+			Name: "count",
+			Body: []BodyStatement{
+				{
+					Type:      "for",
+					LoopVar:   "i",
+					LoopItems: "1..3",
+					LoopBody:  []BodyStatement{{Type: "shell", Shell: "echo i=&i"}},
+				},
+			},
+		}},
+	}
+	data.buildIndexMaps()
+	out := captureStdoutFor(t, func() error {
+		return NewExecutor(data, false, false).Execute([]string{"count"})
+	})
+	if out != "i=1\ni=2\ni=3\n" {
+		t.Errorf("range output = %q", out)
+	}
+}
+
+func TestDuplicateValidation(t *testing.T) {
+	in := `var x = 1
+var x = 2
+build {
+    echo hi
+}`
+	p := NewParserFromContent("t.constfile", in)
+	if _, err := p.Parse(); err == nil || !strings.Contains(err.Error(), "duplicate variable") {
+		t.Fatalf("expected duplicate variable error, got %v", err)
+	}
+
+	in2 := `build (a, a) {
+    echo hi
+}`
+	p2 := NewParserFromContent("t2.constfile", in2)
+	if _, err := p2.Parse(); err == nil || !strings.Contains(err.Error(), "duplicate argument") {
+		t.Fatalf("expected duplicate argument error, got %v", err)
 	}
 }
 

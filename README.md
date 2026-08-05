@@ -64,7 +64,7 @@ commandName (args) < prerequisites {
 
 - `|cloudcmd|` - Cloud-accessible command (can fetch remote definitions)
 - `_` - Default command (runs first when no commands specified)
-- Arguments: `arg1` (required), `opt arg2` (optional)
+- Arguments: `arg1` (required), `opt arg2` (optional), `opt env=prod` (optional with default)
 
 Arguments are passed as flags and referenced with the same `&` marker as variables:
 
@@ -78,7 +78,11 @@ deploy (env, opt region) {
 }
 ```
 
-An argument that isn't provided substitutes the empty string, so references never leak into the shell.
+An argument that isn't provided substitutes its default (if declared) or the
+empty string, so references never leak into the shell.
+
+Literal `&`/`@`/`$` text can be emitted with a backslash escape: `\&foo`,
+`\@VAR`, `\$` are not substituted.
 
 - Prerequisites: `cmd1, cmd2`
 - A prerequisite can run in its own directory at the call site: `main < gen in src/`
@@ -213,6 +217,20 @@ for spec in darwin/arm64, windows/amd64 {
     if "&spec" contains "windows" {
         $ echo "windows target: &spec"
     }
+}
+```
+
+Blocks may be written on a single line, which pairs naturally with loop
+control:
+
+```
+for f in *.go {
+    if "&f" == "main.go" { continue }
+    $ go vet &f
+}
+
+for i in 1..10 {          # numeric ranges: N..M (ascending or descending)
+    $ echo "attempt $i"
 }
 ```
 

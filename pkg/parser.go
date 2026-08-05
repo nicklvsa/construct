@@ -180,6 +180,7 @@ type Parser struct {
 type Argument struct {
 	Name       string `json:"name"`
 	IsOptional bool   `json:"is_optional"`
+	Default    string `json:"default,omitempty"`
 }
 
 type Variable struct {
@@ -266,6 +267,12 @@ func (p *Parser) tryEvalExpression(expression string, varName *string, varScope 
 	i := 0
 	for i < len(runes) {
 		char := runes[i]
+
+		if char == '\\' && i+1 < len(runes) && (runes[i+1] == '&' || runes[i+1] == '@' || runes[i+1] == '$') {
+			result.WriteRune(runes[i+1])
+			i += 2
+			continue
+		}
 
 		if char == '@' {
 			var envName strings.Builder
@@ -463,20 +470,28 @@ func extractWorkDir(line string) string {
 	return dir
 }
 
-func parseArgumentName(argStr string) (string, bool) {
+func parseArgumentName(argStr string) (string, bool, string) {
 	argStr = strings.TrimSpace(argStr)
 	if argStr == "" {
-		return "", false
+		return "", false, ""
 	}
 
 	parts := strings.Fields(argStr)
 	if len(parts) == 0 {
-		return "", false
+		return "", false, ""
 	}
 
 	argName := parts[len(parts)-1]
 	isOptional := slices.Contains(parts[:len(parts)-1], "opt")
-	return argName, isOptional
+
+	defaultVal := ""
+	if eq := strings.IndexByte(argName, '='); eq >= 0 {
+		defaultVal = argName[eq+1:]
+		argName = argName[:eq]
+		isOptional = true
+	}
+
+	return argName, isOptional, defaultVal
 }
 
 func parseArgumentList(argStr string) ([]*Argument, error) {
@@ -486,6 +501,7 @@ func parseArgumentList(argStr string) ([]*Argument, error) {
 	}
 
 	args := []*Argument{}
+	seen := make(map[string]bool)
 	parts := strings.SplitSeq(argStr, ",")
 
 	for part := range parts {
@@ -494,14 +510,19 @@ func parseArgumentList(argStr string) ([]*Argument, error) {
 			continue
 		}
 
-		argName, isOptional := parseArgumentName(part)
+		argName, isOptional, defaultVal := parseArgumentName(part)
 		if argName == "" {
 			return nil, fmt.Errorf("invalid argument syntax: '%s'", part)
 		}
+		if seen[argName] {
+			return nil, fmt.Errorf("duplicate argument '%s'", argName)
+		}
+		seen[argName] = true
 
 		args = append(args, &Argument{
 			Name:       argName,
 			IsOptional: isOptional,
+			Default:    defaultVal,
 		})
 	}
 
@@ -546,6 +567,7 @@ func (p *Parser) parseCommandBody(startIdx int, commandName string) ([]string, i
 		trimmedLine := strings.TrimSpace(line)
 
 		opens := strings.Count(trimmedLine, "{")
+		closes := strings.Count(trimmedLine, "}")
 
 		isIfHeader := strings.HasPrefix(trimmedLine, "if ") && opens > 0
 		isForHeader := strings.HasPrefix(trimmedLine, "for ") && opens > 0
@@ -572,7 +594,7 @@ func (p *Parser) parseCommandBody(startIdx int, commandName string) ([]string, i
 		}
 
 		if isIfHeader || isForHeader || isMatrixHeader {
-			depth++
+			depth += opens - closes
 		}
 
 		if trimmedLine == "" {
@@ -662,6 +684,11 @@ func (p *Parser) parseBodyStatements(raw []string, scope string) ([]BodyStatemen
 			continue
 		}
 
+		// A dangling "else" can't be a shell statement; report it clearly.
+		if line == "else" || strings.HasPrefix(line, "else ") || strings.HasPrefix(line, "else{") {
+			return nil, fmt.Errorf("'else' without a matching 'if'")
+		}
+
 		shell, outputName := extractOutputName(line)
 		stmts = append(stmts, BodyStatement{Type: "shell", Shell: shell, OutputName: outputName})
 		i++
@@ -699,9 +726,101 @@ func isValidIdent(s string) bool {
 	return true
 }
 
+// findBlockBounds finds the quote-aware first '{' and the first '}' after it.
+func findBlockBounds(line string) (open, close int, ok bool) {
+	inQuote := false
+	open = -1
+	for i := 0; i < len(line); i++ {
+		switch line[i] {
+		case '"':
+			inQuote = !inQuote
+		case '{':
+			if !inQuote && open < 0 {
+				open = i
+			}
+		case '}':
+			if !inQuote && open >= 0 {
+				return open, i, true
+			}
+		}
+	}
+	return -1, -1, false
+}
+
+func singleLineBody(line string) (string, bool) {
+	open, close, ok := findBlockBounds(line)
+	if !ok || strings.TrimSpace(line[close+1:]) != "" {
+		return "", false
+	}
+	return strings.TrimSpace(line[open+1 : close]), true
+}
+
+func splitStatements(s string) []string {
+	var out []string
+	inQuote := false
+	start := 0
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case '"':
+			inQuote = !inQuote
+		case ';':
+			if !inQuote {
+				out = append(out, strings.TrimSpace(s[start:i]))
+				start = i + 1
+			}
+		}
+	}
+	out = append(out, strings.TrimSpace(s[start:]))
+	return out
+}
+
+func splitSingleLineIf(line string) (string, string, bool) {
+	open, close, ok := findBlockBounds(line)
+	if !ok {
+		return "", "", false
+	}
+	then := strings.TrimSpace(line[open+1 : close])
+	remainder := strings.TrimSpace(line[close+1:])
+	if remainder == "" {
+		return then, "", true
+	}
+	if strings.HasPrefix(remainder, "else") {
+		return then, remainder, true
+	}
+	return "", "", false
+}
+
 func (p *Parser) parseIfBlock(raw []string, scope string) (BodyStatement, int, error) {
 	header := raw[0]
 	cond := extractIfCondition(header)
+
+	if then, elsePart, ok := splitSingleLineIf(header); ok {
+		thenStmts, err := p.parseBodyStatements(splitStatements(then), scope)
+		if err != nil {
+			return BodyStatement{}, 0, err
+		}
+		stmt := BodyStatement{Type: "if", Cond: cond, ThenBody: thenStmts}
+		switch {
+		case elsePart == "":
+		case strings.HasPrefix(elsePart, "else if "):
+			inner, _, err := p.parseIfBlock([]string{elsePart}, scope)
+			if err != nil {
+				return BodyStatement{}, 0, err
+			}
+			stmt.ElseBody = []BodyStatement{inner}
+		default:
+			body, ok := singleLineBody(elsePart)
+			if !ok {
+				return BodyStatement{}, 0, fmt.Errorf("malformed single-line else: %q", elsePart)
+			}
+			elseStmts, err := p.parseBodyStatements(splitStatements(body), scope)
+			if err != nil {
+				return BodyStatement{}, 0, err
+			}
+			stmt.ElseBody = elseStmts
+		}
+		return stmt, 1, nil
+	}
 
 	var thenLines []string
 	consumed := 1
@@ -715,7 +834,7 @@ func (p *Parser) parseIfBlock(raw []string, scope string) (BodyStatement, int, e
 		isElseCompound := strings.HasPrefix(trimmed, "}") && strings.Contains(trimmed, "else")
 
 		if isInnerIf || isInnerFor {
-			depth++
+			depth += strings.Count(trimmed, "{") - strings.Count(trimmed, "}")
 		}
 
 		if isElseCompound && depth == 0 {
@@ -783,7 +902,7 @@ func (p *Parser) parseIfBlock(raw []string, scope string) (BodyStatement, int, e
 			isInnerFor := strings.HasPrefix(trimmed, "for ") && strings.Contains(trimmed, "{")
 
 			if isInnerIf || isInnerFor {
-				depth++
+				depth += strings.Count(trimmed, "{") - strings.Count(trimmed, "}")
 			}
 
 			if strings.HasPrefix(trimmed, "}") {
@@ -833,6 +952,20 @@ func (p *Parser) parseForBlock(raw []string, scope string) (BodyStatement, int, 
 	loopVar := strings.TrimSpace(headerPart[:inIdx])
 	loopItems := strings.TrimSpace(headerPart[inIdx+4:])
 
+	// Single-line block: "for x in a, b { stmt }".
+	if body, ok := singleLineBody(raw[0]); ok {
+		bodyStmts, err := p.parseBodyStatements(splitStatements(body), scope)
+		if err != nil {
+			return BodyStatement{}, 0, err
+		}
+		return BodyStatement{
+			Type:      "for",
+			LoopVar:   loopVar,
+			LoopItems: loopItems,
+			LoopBody:  bodyStmts,
+		}, 1, nil
+	}
+
 	bodyLines, endIdx, err := collectBodyLines(raw, 1)
 	if err != nil {
 		return BodyStatement{}, 0, fmt.Errorf("unclosed for block (missing '}')")
@@ -878,6 +1011,29 @@ func (p *Parser) parseMatrixBlock(raw []string, scope string) (BodyStatement, in
 		items = append(items, it)
 	}
 
+	// Single-line block: "matrix ... { stmt }".
+	if body, ok := singleLineBody(raw[0]); ok {
+		bodyStmts, err := p.parseBodyStatements(splitStatements(body), scope)
+		if err != nil {
+			return BodyStatement{}, 0, err
+		}
+		stmt := BodyStatement{
+			Type:      "for",
+			LoopVar:   vars[len(vars)-1],
+			LoopItems: items[len(items)-1],
+			LoopBody:  bodyStmts,
+		}
+		for i := len(vars) - 2; i >= 0; i-- {
+			stmt = BodyStatement{
+				Type:      "for",
+				LoopVar:   vars[i],
+				LoopItems: items[i],
+				LoopBody:  []BodyStatement{stmt},
+			}
+		}
+		return stmt, 1, nil
+	}
+
 	bodyLines, endIdx, err := collectBodyLines(raw, 1)
 	if err != nil {
 		return BodyStatement{}, 0, fmt.Errorf("unclosed matrix block (missing '}')")
@@ -912,8 +1068,9 @@ func collectBodyLines(raw []string, start int) ([]string, int, error) {
 		l := raw[start]
 		trimmed := strings.TrimSpace(l)
 
+		// Net-brace accounting: "if x { stmt }" opens and closes on one line.
 		if isNestedBlockHeader(trimmed) {
-			depth++
+			depth += strings.Count(trimmed, "{") - strings.Count(trimmed, "}")
 		}
 
 		if strings.HasPrefix(trimmed, "}") {
@@ -1239,6 +1396,15 @@ func (p *Parser) Parse() (*ParsedData, error) {
 			return nil, fmt.Errorf("duplicate command %q", cmd.Name)
 		}
 		seen[cmd.Name] = true
+	}
+
+	seenVars := make(map[string]bool)
+	for _, v := range p.Data.Variables {
+		key := v.Scope + "." + v.Name
+		if seenVars[key] {
+			return nil, fmt.Errorf("duplicate variable %q in scope %q", v.Name, v.Scope)
+		}
+		seenVars[key] = true
 	}
 
 	if err := p.classifyPrereqs(); err != nil {
