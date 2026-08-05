@@ -12,9 +12,11 @@ import (
 	"path"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 	"unicode"
 	"unicode/utf8"
 
@@ -49,6 +51,8 @@ type Executor struct {
 	cacheLoaded     bool
 	runs            map[string]*commandRun
 	baseDir         string
+	jobs            int
+	sem             chan struct{}
 	mu              sync.Mutex
 }
 
@@ -193,6 +197,22 @@ func (e *Executor) SetBaseDir(dir string) {
 	e.baseDir = dir
 }
 
+// SetJobs caps the number of commands executed in parallel (0 = unlimited).
+func (e *Executor) SetJobs(n int) {
+	e.jobs = n
+	if n > 0 {
+		e.sem = make(chan struct{}, n)
+	}
+}
+
+func (e *Executor) acquire() (release func()) {
+	if e.sem == nil {
+		return func() {}
+	}
+	e.sem <- struct{}{}
+	return func() { <-e.sem }
+}
+
 func (e *Executor) resolveWorkDir(dir string) string {
 	if dir == "" || e.baseDir == "" || filepath.IsAbs(dir) {
 		return dir
@@ -236,9 +256,18 @@ func (e *Executor) executeCommand(command *Command) error {
 		return resolveEnvRefs(s)
 	}
 
-	if len(command.FileDeps) > 0 && !isPrereq {
+	if len(command.FileDeps) > 0 && !isPrereq && len(command.Produces) == 0 {
 		if e.shouldSkip(command, resolveValue, workDir) {
 			fmt.Printf("(%s cached)\n", command.Name)
+			return nil
+		}
+	}
+
+	// Make-style up-to-date check: skip when every produced artifact exists
+	// and no dependency is newer than the newest artifact.
+	if len(command.Produces) > 0 && !isPrereq {
+		if e.shouldSkipProduced(command, resolveValue, workDir) {
+			fmt.Printf("(%s up to date)\n", command.Name)
 			return nil
 		}
 	}
@@ -278,6 +307,8 @@ func (e *Executor) executeCommand(command *Command) error {
 					wd := "."
 					if workDir != "" {
 						wd = e.resolveWorkDir(resolveValue(workDir, target.Name))
+					} else if e.baseDir != "" {
+						wd = e.baseDir
 					}
 					for _, pattern := range strings.Split(items, ",") {
 						pattern = strings.TrimSpace(pattern)
@@ -366,10 +397,13 @@ func (e *Executor) executeCommand(command *Command) error {
 				}
 			}
 
+			release := e.acquire()
 			if !e.debug && !isPrereq && target.LazyEval == nil {
 				cmd.Stdout = os.Stdout
 				cmd.Stderr = os.Stderr
-				if err := cmd.Run(); err != nil {
+				err := cmd.Run()
+				release()
+				if err != nil {
 					exitCode := 1
 					if ee, ok := err.(*exec.ExitError); ok {
 						exitCode = ee.ExitCode()
@@ -391,6 +425,7 @@ func (e *Executor) executeCommand(command *Command) error {
 			} else {
 				stdout, err = cmd.Output()
 			}
+			release()
 
 			output := stdout
 			if len(stderr) > 0 {
@@ -585,7 +620,7 @@ func (e *Executor) executeCommand(command *Command) error {
 		return err
 	}
 
-	if len(command.FileDeps) > 0 && !isPrereq {
+	if len(command.FileDeps) > 0 && !isPrereq && len(command.Produces) == 0 {
 		e.updateCache(command, resolveValue, workDir)
 	}
 
@@ -1028,8 +1063,40 @@ func evalBuiltinCondition(cond, base string) (bool, bool) {
 	case "glob":
 		matches, _ := filepath.Glob(arg)
 		return len(matches) > 0, true
+	case "require":
+		_, err := exec.LookPath(arg)
+		return err == nil, true
 	}
 	return false, false
+}
+
+func LoadEnvFile(path string) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	for line := range strings.SplitSeq(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		key, val, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		key = strings.TrimSpace(key)
+		val = strings.TrimSpace(val)
+		if len(val) >= 2 && val[0] == '"' && val[len(val)-1] == '"' {
+			val = val[1 : len(val)-1]
+		}
+		if key == "" {
+			continue
+		}
+		if _, exists := os.LookupEnv(key); !exists {
+			os.Setenv(key, val)
+		}
+	}
+	return nil
 }
 
 func compareValues(left, right, op string) bool {
@@ -1327,15 +1394,32 @@ func (e *Executor) cacheManifest() fileCache {
 	return e.cache
 }
 
+func (e *Executor) cacheKey(cmd *Command) string {
+	parts := []string{cmd.Name}
+	for _, arg := range cmd.Arguments {
+		v, _ := e.flagSet.GetString(cmd.Name + ":" + arg.Name)
+		parts = append(parts, arg.Name+"="+v)
+	}
+	for name, val := range e.StructuredParse.GlobalVariableSnapshot() {
+		parts = append(parts, "var:"+name+"="+val)
+	}
+	sort.Strings(parts[1:])
+	return strings.Join(parts, "|")
+}
+
 func (e *Executor) shouldSkip(cmd *Command, resolve func(string, string) string, workDir string) bool {
 	wd := e.resolveWorkDir(resolve(workDir, cmd.Name))
+	if wd == "" {
+		wd = e.baseDir
+	}
 	files := expandFileDeps(cmd.FileDeps, wd)
 	if len(files) == 0 {
 		return false
 	}
 
 	fc := e.cacheManifest()
-	cached, exists := fc[cmd.Name]
+	key := e.cacheKey(cmd)
+	cached, exists := fc[key]
 	if !exists {
 		return false
 	}
@@ -1374,8 +1458,42 @@ func parallelHash(files []string) []string {
 	return out
 }
 
+func (e *Executor) shouldSkipProduced(cmd *Command, resolve func(string, string) string, workDir string) bool {
+	wd := e.resolveWorkDir(resolve(workDir, cmd.Name))
+	if wd == "" {
+		wd = e.baseDir
+	}
+	artifacts := expandFileDeps(cmd.Produces, wd)
+	if len(artifacts) == 0 {
+		return false
+	}
+	var newest time.Time
+	for _, a := range artifacts {
+		info, err := os.Stat(a)
+		if err != nil || info.IsDir() {
+			return false // missing artifact => must build
+		}
+		if info.ModTime().After(newest) {
+			newest = info.ModTime()
+		}
+	}
+	for _, d := range expandFileDeps(cmd.FileDeps, wd) {
+		info, err := os.Stat(d)
+		if err != nil {
+			return false // missing dependency => rebuild
+		}
+		if info.ModTime().After(newest) {
+			return false
+		}
+	}
+	return true
+}
+
 func (e *Executor) updateCache(cmd *Command, resolve func(string, string) string, workDir string) {
 	wd := e.resolveWorkDir(resolve(workDir, cmd.Name))
+	if wd == "" {
+		wd = e.baseDir
+	}
 	files := expandFileDeps(cmd.FileDeps, wd)
 
 	e.mu.Lock()
@@ -1386,12 +1504,13 @@ func (e *Executor) updateCache(cmd *Command, resolve func(string, string) string
 		e.cacheLoaded = true
 	}
 	fc := e.cache
-	if fc[cmd.Name] == nil {
-		fc[cmd.Name] = make(map[string]string)
+	key := e.cacheKey(cmd)
+	if fc[key] == nil {
+		fc[key] = make(map[string]string)
 	}
 	hashes := parallelHash(files)
 	for i, f := range files {
-		fc[cmd.Name][f] = hashes[i]
+		fc[key][f] = hashes[i]
 	}
 	fc.save()
 }

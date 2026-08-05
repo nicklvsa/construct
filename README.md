@@ -30,8 +30,11 @@ construct [options] [Constfile] [commands...]
 | `-v, --version` | Show version information |
 | `--debug` | Enable debug mode for verbose output |
 | `--concurrent` | Execute commands and their prerequisites concurrently (DAG-parallel) |
+| `--jobs N` | Cap parallel commands (implies `--concurrent`) |
+| `--watch` | Rerun when the Constfile or its dependencies change |
 | `--dry-run` | Show commands without executing them |
 | `--list` | List all available commands |
+| `--env-file PATH` | Load environment variables from a dotenv-style file |
 
 ### Examples
 
@@ -171,6 +174,26 @@ build < main.go, pkg/*.go {
 
 File patterns (containing `/`, `*`, or `.`) are tracked separately from command prerequisites. A manifest is stored in `.construct-cache/`. Touch a file and re-run to trigger a rebuild.
 
+### Produced Artifacts (make-style up-to-date checks)
+
+Instead of hashing dependencies, declare what a command produces — the command
+skips when every artifact exists and no dependency is newer:
+
+```
+build produces dist/app < src/*.go {
+    $ go build -o dist/app .
+}
+```
+
+The produced files may be globs, and the check is mtime-based like `make`.
+
+### Environment Files
+
+`construct` loads `KEY=VALUE` entries from a `.env` file next to the Constfile
+(or from a path given with `--env-file PATH`). Existing environment variables
+take precedence, `#` comments and blank lines are ignored, and values may be
+quoted. Loaded variables are visible to `@VAR` refs and child processes.
+
 ### CLI Variable Overrides
 
 Override any variable from the command line:
@@ -236,8 +259,13 @@ deploy {
     if glob("dist/*.exe") {
         $ echo "found a built binary"
     }
+    if require("docker") {
+        $ docker build -t app .
+    }
 }
 ```
+
+`require("tool")` checks that a binary is available on `PATH`.
 
 List membership uses the `in` operator — exact match against a comma-separated
 list:

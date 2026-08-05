@@ -1004,6 +1004,151 @@ func TestOutputIterationEmpty(t *testing.T) {
 	}
 }
 
+func TestProducesUpToDate(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "src.go")
+	art := filepath.Join(dir, "out.bin")
+	os.WriteFile(src, []byte("v1"), 0644)
+	os.WriteFile(art, []byte("built"), 0644)
+	now := time.Now()
+	os.Chtimes(src, now, now)
+	os.Chtimes(art, now, now.Add(time.Hour))
+
+	data := &ParsedData{
+		Commands: []*Command{{
+			Name: "build", Produces: []string{"out.bin"}, FileDeps: []string{"src.go"},
+			Body: shellBody("echo BUILDING"),
+		}},
+	}
+	data.buildIndexMaps()
+
+	executor := NewExecutor(data, false, false)
+	executor.SetBaseDir(dir)
+
+	out := captureStdoutFor(t, func() error {
+		return executor.Execute([]string{"build"})
+	})
+	if out != "(build up to date)\n" {
+		t.Errorf("expected up-to-date skip, got %q", out)
+	}
+
+	// A newer dependency forces a rebuild.
+	os.Chtimes(src, now.Add(2*time.Hour), now.Add(2*time.Hour))
+	out = captureStdoutFor(t, func() error {
+		return executor.Execute([]string{"build"})
+	})
+	if out != "BUILDING\n" {
+		t.Errorf("expected rebuild, got %q", out)
+	}
+}
+
+// TestProducesParsing verifies the produces clause parses from the header.
+func TestProducesParsing(t *testing.T) {
+	in := `build produces dist/app, dist/lib in sub < src/*.go { 
+    echo hi
+}`
+	p := NewParserFromContent("t.constfile", in)
+	data, err := p.Parse()
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	cmd, _ := data.GetCommand("build")
+	if len(cmd.Produces) != 2 || cmd.Produces[0] != "dist/app" || cmd.Produces[1] != "dist/lib" {
+		t.Errorf("Produces = %v", cmd.Produces)
+	}
+	if cmd.WorkDir != "sub" || len(cmd.FileDeps) != 1 || cmd.FileDeps[0] != "src/*.go" {
+		t.Errorf("WorkDir = %q, FileDeps = %v", cmd.WorkDir, cmd.FileDeps)
+	}
+}
+
+func TestCacheKeyIncludesArgs(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Chdir(dir); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+	os.WriteFile("dep.txt", []byte("x"), 0644)
+
+	data := &ParsedData{
+		Commands: []*Command{{
+			Name: "build", Arguments: []*Argument{{Name: "cfg"}}, FileDeps: []string{"dep.txt"},
+			Body: shellBody("echo BUILD"),
+		}},
+	}
+	data.buildIndexMaps()
+
+	run := func(cfg string) {
+		fs := pflag.NewFlagSet("t", pflag.ContinueOnError)
+		executor := NewExecutor(data, false, false)
+		executor.SetBaseDir(dir)
+		executor.RegisterArgumentFlags(fs)
+		if err := fs.Parse([]string{"--build:cfg=" + cfg}); err != nil {
+			t.Fatalf("parse: %v", err)
+		}
+		if err := executor.Execute([]string{"build"}); err != nil {
+			t.Fatalf("exec: %v", err)
+		}
+	}
+	run("debug")
+	run("release")
+
+	fc := loadFileCache()
+	if len(fc) != 2 {
+		t.Errorf("manifest has %d entries, want 2 (one per config)", len(fc))
+	}
+}
+
+func TestLoadEnvFile(t *testing.T) {
+	t.Setenv("PRECEDENCE_TEST", "existing")
+	dir := t.TempDir()
+	path := filepath.Join(dir, ".env")
+	os.WriteFile(path, []byte("# comment\nFOO=bar\nQUOTED=\"hi there\"\nPRECEDENCE_TEST=ignored\nUNQUOTED_SPACES=a b c\n"), 0644)
+
+	if err := LoadEnvFile(path); err != nil {
+		t.Fatalf("LoadEnvFile: %v", err)
+	}
+	if os.Getenv("FOO") != "bar" {
+		t.Errorf("FOO = %q, want bar", os.Getenv("FOO"))
+	}
+	if os.Getenv("QUOTED") != "hi there" {
+		t.Errorf("QUOTED = %q, want 'hi there'", os.Getenv("QUOTED"))
+	}
+	if os.Getenv("PRECEDENCE_TEST") != "existing" {
+		t.Errorf("existing env var was overridden: %q", os.Getenv("PRECEDENCE_TEST"))
+	}
+	if os.Getenv("UNQUOTED_SPACES") != "a b c" {
+		t.Errorf("UNQUOTED_SPACES = %q", os.Getenv("UNQUOTED_SPACES"))
+	}
+}
+
+func TestRequireBuiltin(t *testing.T) {
+	if got := evaluateCondition(`require("sh")`); !got {
+		t.Error("require(sh) should be true on POSIX shells")
+	}
+	if got := evaluateCondition(`require("definitely-not-a-real-tool-xyz")`); got {
+		t.Error("require of a nonexistent tool should be false")
+	}
+	if got := evaluateCondition(`require("sh") && "1" == "1"`); !got {
+		t.Error("require composes with &&")
+	}
+}
+
+func TestJobsLimit(t *testing.T) {
+	data := &ParsedData{
+		Commands: []*Command{
+			{Name: "a", Body: shellBody("echo a")},
+			{Name: "b", Body: shellBody("echo b")},
+			{Name: "all", Prereqs: []string{"a", "b"}, Body: shellBody("echo all")},
+		},
+	}
+	data.buildIndexMaps()
+
+	executor := NewExecutor(data, true, false)
+	executor.SetJobs(1)
+	if err := executor.Execute([]string{"all"}); err != nil {
+		t.Fatalf("exec with jobs=1 failed: %v", err)
+	}
+}
+
 func captureStdoutFor(t *testing.T, run func() error) string {
 	t.Helper()
 	so, sw, err := os.Pipe()

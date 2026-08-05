@@ -159,6 +159,19 @@ func (p *ParsedData) GetDefaultCommand() (*Command, error) {
 	return nil, errors.New("no default command")
 }
 
+func (p *ParsedData) GlobalVariableSnapshot() map[string]string {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	out := make(map[string]string)
+	for _, v := range p.Variables {
+		if v.Scope == "global" {
+			out[v.Name] = v.Value
+		}
+	}
+	return out
+}
+
 type Parser struct {
 	InputFile   string
 	Data        *ParsedData
@@ -210,6 +223,7 @@ type Command struct {
 	Prereqs         []string          `json:"prereqs"`
 	PrereqDirs      map[string]string `json:"prereq_dirs,omitempty"`
 	FileDeps        []string          `json:"file_deps"`
+	Produces        []string          `json:"produces,omitempty"`
 	PrereqCmds      []*Command        `json:"prereq_cmds"`
 	WorkDir         string            `json:"work_dir"`
 	Body            []BodyStatement   `json:"body"`
@@ -362,8 +376,10 @@ func parseCommandName(line string) string {
 		}
 	}
 
-	// Find the earliest terminator: (, <, {, or " in " workdir modifier.
+	// Find the earliest terminator: (, <, {, " in " workdir modifier, or
+	// " produces " output clause.
 	inIdx := strings.Index(line, " in ")
+	prodIdx := findProducesIdx(line)
 	terminators := []rune{'(', '<', '{'}
 	endIdx := len(line)
 	for i, r := range line {
@@ -376,7 +392,58 @@ func parseCommandName(line string) string {
 	if inIdx >= 0 && inIdx < endIdx {
 		endIdx = inIdx
 	}
+	if prodIdx >= 0 && prodIdx < endIdx {
+		endIdx = prodIdx
+	}
 	return strings.TrimSpace(line[:endIdx])
+}
+
+func findProducesIdx(line string) int {
+	depth := 0
+	inQuote := false
+	for i := 0; i < len(line); i++ {
+		switch line[i] {
+		case '"':
+			inQuote = !inQuote
+		case '(':
+			if !inQuote {
+				depth++
+			}
+		case ')':
+			if !inQuote {
+				depth--
+			}
+		}
+		if depth == 0 && !inQuote && strings.HasPrefix(line[i:], " produces ") {
+			return i
+		}
+	}
+	return -1
+}
+
+func extractProduces(line string) []string {
+	idx := findProducesIdx(line)
+	if idx < 0 {
+		return nil
+	}
+	segment := line[idx+len(" produces "):]
+	if lt := strings.IndexByte(segment, '<'); lt >= 0 {
+		segment = segment[:lt]
+	}
+	if brace := strings.IndexByte(segment, '{'); brace >= 0 {
+		segment = segment[:brace]
+	}
+	if inIdx := strings.Index(segment, " in "); inIdx >= 0 {
+		segment = segment[:inIdx]
+	}
+	var out []string
+	for _, p := range strings.Split(segment, ",") {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 func extractArgumentString(line string) string {
@@ -1121,6 +1188,7 @@ func (p *Parser) parseCommand(idx int, line string, isDefault bool) (int, error)
 	}
 
 	workDir := extractWorkDir(line)
+	produces := extractProduces(line)
 
 	rawBody, endIdx, err := p.parseCommandBody(idx+1, commandName)
 	if err != nil {
@@ -1142,6 +1210,7 @@ func (p *Parser) parseCommand(idx int, line string, isDefault bool) (int, error)
 			Prereqs:         prereqs,
 			PrereqDirs:      prereqDirs,
 			WorkDir:         workDir,
+			Produces:        produces,
 			Body:            commandBody,
 		})
 	}
