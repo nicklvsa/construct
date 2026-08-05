@@ -33,16 +33,6 @@ func (p *ParsedData) buildIndexMaps() {
 	}
 }
 
-func (p *ParsedData) AddVariable(v *Variable) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	p.Variables = append(p.Variables, v)
-	if p.variableMap != nil {
-		p.variableMap[v.Scope+"."+v.Name] = v
-	}
-}
-
 func (p *ParsedData) SetVariable(name, scope, value string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -440,12 +430,10 @@ func extractPrerequisites(line string) ([]string, map[string]string, error) {
 		}
 	}
 
+	if len(dirs) == 0 {
+		dirs = nil
+	}
 	return result, dirs, nil
-}
-
-func extractPrerequisiteString(line string) string {
-	names, _, _ := extractPrerequisites(line)
-	return strings.Join(names, ", ")
 }
 
 func extractWorkDir(line string) string {
@@ -528,25 +516,6 @@ func parseArgumentList(argStr string) ([]*Argument, error) {
 	}
 
 	return args, nil
-}
-
-func parsePrerequisiteList(prereqStr string) ([]string, error) {
-	prereqStr = strings.TrimSpace(prereqStr)
-	if prereqStr == "" {
-		return nil, nil
-	}
-
-	parts := strings.Split(prereqStr, ",")
-	prereqs := []string{}
-
-	for _, part := range parts {
-		part = strings.TrimSpace(part)
-		if part != "" {
-			prereqs = append(prereqs, part)
-		}
-	}
-
-	return prereqs, nil
 }
 
 func isFileDep(token string) bool {

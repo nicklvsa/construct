@@ -105,9 +105,15 @@ func printDryRunBody(body []pkg.BodyStatement, indent int) {
 			}
 			fmt.Printf("%s}\n", prefix)
 		case "for":
-			fmt.Printf("%sfor %s in %s {\n", prefix, stmt.LoopVar, stmt.LoopItems)
+			loopVar := stmt.LoopVar
+			if stmt.LoopIndex != "" {
+				loopVar = stmt.LoopIndex + ", " + loopVar
+			}
+			fmt.Printf("%sfor %s in %s {\n", prefix, loopVar, stmt.LoopItems)
 			printDryRunBody(stmt.LoopBody, indent+1)
 			fmt.Printf("%s}\n", prefix)
+		case "continue", "break":
+			fmt.Printf("%s%s\n", prefix, stmt.Type)
 		default:
 			fmt.Printf("%s%s\n", prefix, stmt.Shell)
 		}
@@ -162,6 +168,10 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Error parsing flags: %v\n", err)
 		os.Exit(1)
 	}
+
+	// First parse is lenient because command-argument flags (--cmd:arg=value)
+	// aren't registered until the Constfile is parsed; it only discovers the
+	// Constfile path. The second parse below re-runs with the full flag set.
 
 	if showHelp {
 		printUsage()

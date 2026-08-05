@@ -1,6 +1,7 @@
 package pkg
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -116,11 +117,12 @@ func TestExtractArgumentString(t *testing.T) {
 	}
 }
 
-func TestExtractPrerequisiteString(t *testing.T) {
+func TestExtractPrerequisites(t *testing.T) {
 	tests := []struct {
 		name     string
 		input    string
 		expected string
+		dirs     map[string]string
 	}{
 		{
 			name:     "simple prerequisites",
@@ -156,24 +158,33 @@ func TestExtractPrerequisiteString(t *testing.T) {
 			name:     "prereq with in dir modifier",
 			input:    "run < build in subdir {",
 			expected: "build",
+			dirs:     map[string]string{"build": "subdir"},
 		},
 		{
 			name:     "multiple prereqs with trailing in dir",
 			input:    "deploy < build, test in deep/dir {",
 			expected: "build, test",
+			dirs:     map[string]string{"test": "deep/dir"},
 		},
 		{
 			name:     "each prereq with its own in dir",
 			input:    "deploy < build in a, test in b {",
 			expected: "build, test",
+			dirs:     map[string]string{"build": "a", "test": "b"},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := extractPrerequisiteString(tt.input)
-			if result != tt.expected {
-				t.Errorf("extractPrerequisiteString(%q) = %q, want %q", tt.input, result, tt.expected)
+			names, dirs, err := extractPrerequisites(tt.input)
+			if err != nil {
+				t.Fatalf("extractPrerequisites(%q) unexpected error: %v", tt.input, err)
+			}
+			if got := strings.Join(names, ", "); got != tt.expected {
+				t.Errorf("extractPrerequisites(%q) = %q, want %q", tt.input, got, tt.expected)
+			}
+			if !reflect.DeepEqual(dirs, tt.dirs) {
+				t.Errorf("extractPrerequisites(%q) dirs = %v, want %v", tt.input, dirs, tt.dirs)
 			}
 		})
 	}
@@ -324,65 +335,6 @@ func TestParseArgumentList(t *testing.T) {
 				}
 				if arg.IsOptional != tt.expected[i].IsOptional {
 					t.Errorf("arg[%d].IsOptional = %v, want %v", i, arg.IsOptional, tt.expected[i].IsOptional)
-				}
-			}
-		})
-	}
-}
-
-func TestParsePrerequisiteList(t *testing.T) {
-	tests := []struct {
-		name     string
-		input    string
-		expected []string
-	}{
-		{
-			name:     "single prerequisite",
-			input:    "build",
-			expected: []string{"build"},
-		},
-		{
-			name:     "multiple prerequisites",
-			input:    "build, test, lint",
-			expected: []string{"build", "test", "lint"},
-		},
-		{
-			name:     "prerequisites with extra spaces",
-			input:    "build , test , lint",
-			expected: []string{"build", "test", "lint"},
-		},
-		{
-			name:     "empty string",
-			input:    "",
-			expected: nil,
-		},
-		{
-			name:     "whitespace only",
-			input:    "   ",
-			expected: nil,
-		},
-		{
-			name:     "trailing comma",
-			input:    "build, test,",
-			expected: []string{"build", "test"},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result, err := parsePrerequisiteList(tt.input)
-			if err != nil {
-				t.Fatalf("parsePrerequisiteList(%q) unexpected error: %v", tt.input, err)
-			}
-
-			if len(result) != len(tt.expected) {
-				t.Errorf("parsePrerequisiteList(%q) returned %d prereqs, want %d", tt.input, len(result), len(tt.expected))
-				return
-			}
-
-			for i, prereq := range result {
-				if prereq != tt.expected[i] {
-					t.Errorf("prereq[%d] = %q, want %q", i, prereq, tt.expected[i])
 				}
 			}
 		})

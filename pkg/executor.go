@@ -221,15 +221,12 @@ func (e *Executor) EvaluateCommand(command *Command) error {
 }
 
 func (e *Executor) executeCommand(command *Command) error {
-	isPrereq := false
-	workDir := ""
 	e.mu.Lock()
-	if command.IsPrereq {
-		isPrereq = true
+	workDir := command.WorkDir
+	isPrereq := command.IsPrereq
+	if isPrereq {
 		command.PrereqOutput = []string{}
 	}
-
-	workDir = command.WorkDir
 	e.mu.Unlock()
 
 	resolveValue := func(s, scope string) string {
@@ -377,15 +374,9 @@ func (e *Executor) executeCommand(command *Command) error {
 					if ee, ok := err.(*exec.ExitError); ok {
 						exitCode = ee.ExitCode()
 					}
-					if fullCommand == "" {
-						fullCommand = e.shellName + " " + strings.Join(args, " ")
-					}
-					if e.debug {
-						fmt.Printf("[DEBUG] Command failed: %v\n", err)
-					}
 					if !ignoreErr {
 						return &CommandError{
-							Cmd:      fullCommand,
+							Cmd:      e.shellName + " " + strings.Join(args, " "),
 							ExitCode: exitCode,
 						}
 					}
@@ -1104,7 +1095,7 @@ func (e *Executor) tryApplyCloudBody(cmd *Command) error {
 	return nil
 }
 
-func (e *Executor) Exec(commands []string) error {
+func (e *Executor) Execute(commands []string) error {
 	e.runs = make(map[string]*commandRun)
 
 	targets := make([]string, 0, len(commands))
@@ -1179,10 +1170,6 @@ func (e *Executor) execConcurrent(targets []string) error {
 		}
 	}
 	return firstErr
-}
-
-func (e *Executor) Execute(commands []string) error {
-	return e.Exec(commands)
 }
 
 func (e *Executor) processCommand(name string) error {
