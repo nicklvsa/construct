@@ -22,6 +22,7 @@ construct Constfile-<name> <command>    # run a command
 | `Constfile-imports` (+ `lib.constfile`) | Multi-file | `import` keyword, cross-file prereqs/variables, named outputs, argument defaults |
 | `Constfile-advanced-control` | Any | `else if` chains, logical operators (`&&`, `\|\|`, `!`, parens), error-tolerance marker (`!`), matrices, loop control, single-line blocks, `exists()`/`missing()`/`glob()`, loop index, numeric ranges, escape hatch |
 | `Constfile-parallel-build` | Any | DAG-parallel prerequisites (`--concurrent`), call-site `in <dir>` workdir overrides |
+| `Constfile-artifacts` (+ `example.env`) | Any | `produces` (make-style up-to-date checks), `--env-file` loading, `require()`, `--jobs`, `--watch` |
 
 ## Feature Coverage
 
@@ -38,6 +39,9 @@ construct Constfile-<name> <command>    # run a command
 - **Loop index + numeric ranges** — `Constfile-advanced-control`
 - **Escape hatch (`\&`, `\@`)** — `Constfile-advanced-control`
 - **Argument defaults (`opt env=prod`)** — `Constfile-imports`
+- **Produced artifacts (`produces`)** — `Constfile-artifacts`
+- **Environment files (`--env-file`)** — `Constfile-artifacts`
+- **Toolchain guards (`require()`)** — `Constfile-artifacts`
 - **Working directory (`in`)** — `Constfile-go-webapp`, `Constfile-monorepo`, `Constfile-static-site`, `Constfile-parallel-build` (call-site overrides)
 - **Lazy variables (`$`)** — `Constfile-go-webapp`, `Constfile-python-project`, `Constfile-rust`
 - **Environment refs (`@`)** — `Constfile-python-project`, `Constfile-c-cpp`
