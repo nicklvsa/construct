@@ -29,7 +29,7 @@ construct [options] [Constfile] [commands...]
 | `-h, --help` | Show help message |
 | `-v, --version` | Show version information |
 | `--debug` | Enable debug mode for verbose output |
-| `--concurrent` | Execute commands concurrently |
+| `--concurrent` | Execute commands and their prerequisites concurrently (DAG-parallel) |
 | `--dry-run` | Show commands without executing them |
 | `--list` | List all available commands |
 
@@ -81,6 +81,31 @@ deploy (env, opt region) {
 An argument that isn't provided substitutes the empty string, so references never leak into the shell.
 
 - Prerequisites: `cmd1, cmd2`
+- A prerequisite can run in its own directory at the call site: `main < gen in src/`
+- Error tolerance: prefix a body statement with `!` to let it fail without aborting the build
+
+### Imports
+
+Split a project across multiple Constfiles with `import`:
+
+```
+# lib.constfile
+var version = 2
+
+build {
+    $ make
+}
+
+# Constfile
+import "lib.constfile"
+
+deploy < build {
+    $ deploy --version &version
+}
+```
+
+Import paths resolve relative to the importing file. Imports can import other
+files; circular imports and duplicate command names are errors.
 
 ### Variable Scopes
 
@@ -164,20 +189,24 @@ build {
 
 Conditions support the comparison operators `==`, `!=`, `>`, `>=`, `<`, `<=`
 (numeric when both sides are integers, otherwise lexicographic), plus the
-`contains` operator for substring tests:
+`contains` operator for substring tests, and the logical operators `&&`, `||`,
+`!`, and parentheses:
 
 ```
-package {
-    if "&target" contains "windows" {
+deploy {
+    if "&target" contains "windows" && "&version" >= "3" {
         $ build.exe
+    } else if "&target" contains "linux" {
+        $ build-linux
     } else {
         $ build
     }
 }
 ```
 
-Conditionals can be nested inside `for` loops, where they're re-evaluated on
-each iteration with the current loop variable:
+`else if` chains are fully supported. Conditionals can be nested inside `for`
+loops, where they're re-evaluated on each iteration with the current loop
+variable:
 
 ```
 for spec in darwin/arm64, windows/amd64 {

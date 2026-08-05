@@ -39,7 +39,7 @@
 			"patterns": [
 				{
 					"name": "keyword.control.constfile",
-					"match": "\\b(opt|if|else|for|in|contains)\\b"
+					"match": "\\b(opt|if|else|for|in|contains|import)\\b"
 				}
 			]
 		},
@@ -75,7 +75,7 @@
 			"patterns": [
 				{
 					"name": "keyword.operator.comparison.constfile",
-					"match": "(==|!=|>=|<=|>|<)"
+					"match": "(&&|\\|\\||==|!=|>=|<=|>|<)"
 				},
 				{
 					"name": "keyword.operator.assignment.constfile",

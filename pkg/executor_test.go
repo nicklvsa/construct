@@ -351,7 +351,7 @@ func TestMissingPrerequisiteValidation(t *testing.T) {
 				},
 			}
 
-			err := parser.validatePrerequisites()
+			err := parser.classifyPrereqs()
 			if tt.expectError {
 				if err == nil {
 					t.Error("expected missing prerequisite error but got none")
@@ -578,7 +578,9 @@ func TestStripInlineCommentEscapedQuotes(t *testing.T) {
 		{name: "hash comment", input: `echo hi # a comment`, expected: `echo hi`},
 		{name: "slash comment", input: `echo hi // a comment`, expected: `echo hi`},
 		{name: "hash inside quotes", input: `echo "a # b"`, expected: `echo "a # b"`},
-		{name: "escaped quote then comment", input: `echo "he said \"hi\""# x`, expected: `echo "he said \"hi\""`},
+		{name: "escaped quote then comment", input: `echo "he said \"hi\"" # x`, expected: `echo "he said \"hi\""`},
+		{name: "no whitespace before hash is not a comment", input: `echo "he said \"hi\""# x`, expected: `echo "he said \"hi\""# x`},
+		{name: "url is not a comment", input: `var url = https://example.com`, expected: `var url = https://example.com`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

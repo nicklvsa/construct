@@ -204,11 +204,14 @@ func (e *Executor) EvaluateCommand(command *Command) error {
 
 func (e *Executor) executeCommand(command *Command) error {
 	isPrereq := false
+	workDir := ""
 	e.mu.Lock()
 	if command.IsPrereq {
 		isPrereq = true
 		command.PrereqOutput = []string{}
 	}
+
+	workDir = command.WorkDir
 	e.mu.Unlock()
 
 	resolveValue := func(s, scope string) string {
@@ -219,14 +222,14 @@ func (e *Executor) executeCommand(command *Command) error {
 	}
 
 	if len(command.FileDeps) > 0 && !isPrereq {
-		if e.shouldSkip(command, resolveValue) {
+		if e.shouldSkip(command, resolveValue, workDir) {
 			fmt.Printf("(%s cached)\n", command.Name)
 			return nil
 		}
 	}
 
-	var execCommandBody func(target *Command, body []BodyStatement, isPrereq bool) error
-	execCommandBody = func(target *Command, body []BodyStatement, isPrereq bool) error {
+	var execCommandBody func(target *Command, body []BodyStatement, isPrereq bool, workDir string) error
+	execCommandBody = func(target *Command, body []BodyStatement, isPrereq bool, workDir string) error {
 		for _, stmt := range body {
 			if stmt.Type == "if" {
 				cond := resolveValue(stmt.Cond, target.Name)
@@ -234,11 +237,11 @@ func (e *Executor) executeCommand(command *Command) error {
 					fmt.Printf("[DEBUG] Evaluating condition: %s\n", cond)
 				}
 				if evaluateCondition(cond) {
-					if err := execCommandBody(target, stmt.ThenBody, isPrereq); err != nil {
+					if err := execCommandBody(target, stmt.ThenBody, isPrereq, workDir); err != nil {
 						return err
 					}
 				} else if stmt.ElseBody != nil {
-					if err := execCommandBody(target, stmt.ElseBody, isPrereq); err != nil {
+					if err := execCommandBody(target, stmt.ElseBody, isPrereq, workDir); err != nil {
 						return err
 					}
 				}
@@ -250,8 +253,8 @@ func (e *Executor) executeCommand(command *Command) error {
 				var expanded []string
 				if strings.ContainsAny(items, "*?") {
 					wd := "."
-					if target.WorkDir != "" {
-						wd = resolveValue(target.WorkDir, target.Name)
+					if workDir != "" {
+						wd = resolveValue(workDir, target.Name)
 					}
 					for _, pattern := range strings.Split(items, ",") {
 						pattern = strings.TrimSpace(pattern)
@@ -280,7 +283,7 @@ func (e *Executor) executeCommand(command *Command) error {
 						fmt.Printf("[DEBUG] For loop %s = %s\n", stmt.LoopVar, item)
 					}
 					cleaned := e.cleanStatements(stmt.LoopBody, target, argFlags)
-					if err := execCommandBody(target, cleaned, isPrereq); err != nil {
+					if err := execCommandBody(target, cleaned, isPrereq, workDir); err != nil {
 						return err
 					}
 				}
@@ -292,10 +295,16 @@ func (e *Executor) executeCommand(command *Command) error {
 				continue
 			}
 
+			ignoreErr := false
+			if strings.HasPrefix(cmdLine, "!") {
+				ignoreErr = true
+				cmdLine = strings.TrimSpace(cmdLine[1:])
+			}
+
 			args := append(e.shellArgs, cmdLine)
 			cmd := exec.Command(e.shellName, args...)
-			if target.WorkDir != "" {
-				cmd.Dir = resolveValue(target.WorkDir, target.Name)
+			if workDir != "" {
+				cmd.Dir = resolveValue(workDir, target.Name)
 			}
 			cmd.Env = e.childEnv()
 
@@ -326,9 +335,14 @@ func (e *Executor) executeCommand(command *Command) error {
 					if fullCommand == "" {
 						fullCommand = e.shellName + " " + strings.Join(args, " ")
 					}
-					return &CommandError{
-						Cmd:      fullCommand,
-						ExitCode: exitCode,
+					if e.debug {
+						fmt.Printf("[DEBUG] Command failed: %v\n", err)
+					}
+					if !ignoreErr {
+						return &CommandError{
+							Cmd:      fullCommand,
+							ExitCode: exitCode,
+						}
 					}
 				}
 				continue
@@ -367,10 +381,16 @@ func (e *Executor) executeCommand(command *Command) error {
 					fullCommand = e.shellName + " " + strings.Join(args, " ")
 				}
 
-				return &CommandError{
-					Cmd:      fullCommand,
-					ExitCode: exitCode,
-					Stderr:   string(stderr),
+				if ignoreErr {
+					if e.debug {
+						fmt.Printf("[DEBUG] Ignoring failure (error-tolerant statement)\n")
+					}
+				} else {
+					return &CommandError{
+						Cmd:      fullCommand,
+						ExitCode: exitCode,
+						Stderr:   string(stderr),
+					}
 				}
 			}
 
@@ -407,7 +427,7 @@ func (e *Executor) executeCommand(command *Command) error {
 	}
 
 	cleanCommandBody := func(cmd *Command) ([]BodyStatement, error) {
-		if len(cmd.Prereqs) > 0 {
+		if len(cmd.PrereqCmds) > 0 {
 			for _, prereq := range cmd.PrereqCmds {
 				for idx, arg := range prereq.PrereqOutput {
 					varName := prereq.Name + "." + fmt.Sprintf("%d", idx)
@@ -456,11 +476,8 @@ func (e *Executor) executeCommand(command *Command) error {
 		return cleanStmts(cmd.Body), nil
 	}
 
+	var prereqCmds []*Command
 	for _, prereqName := range command.Prereqs {
-		if command.PrereqCmds == nil {
-			command.PrereqCmds = []*Command{}
-		}
-
 		prereqName = strings.TrimSpace(prereqName)
 		if prereqName == "" {
 			continue
@@ -473,13 +490,45 @@ func (e *Executor) executeCommand(command *Command) error {
 
 		e.mu.Lock()
 		preCmd.IsPrereq = true
+		if dir := command.PrereqDirs[prereqName]; dir != "" {
+			preCmd.WorkDir = dir
+		}
 		e.mu.Unlock()
 
-		if err := e.EvaluateCommand(preCmd); err != nil {
-			return err
-		}
+		prereqCmds = append(prereqCmds, preCmd)
+	}
 
-		command.PrereqCmds = append(command.PrereqCmds, preCmd)
+	if command.PrereqCmds == nil {
+		command.PrereqCmds = []*Command{}
+	}
+
+	if e.concurrent && len(prereqCmds) > 1 {
+		// DAG execution: evaluate independent prerequisites in parallel.
+		results := make([]*Command, len(prereqCmds))
+		errs := make([]error, len(prereqCmds))
+		var wg sync.WaitGroup
+		for i, preCmd := range prereqCmds {
+			wg.Add(1)
+			go func(i int, pc *Command) {
+				defer wg.Done()
+				errs[i] = e.EvaluateCommand(pc)
+				results[i] = pc
+			}(i, preCmd)
+		}
+		wg.Wait()
+		for _, err := range errs {
+			if err != nil {
+				return err
+			}
+		}
+		command.PrereqCmds = append(command.PrereqCmds, results...)
+	} else {
+		for _, preCmd := range prereqCmds {
+			if err := e.EvaluateCommand(preCmd); err != nil {
+				return err
+			}
+			command.PrereqCmds = append(command.PrereqCmds, preCmd)
+		}
 	}
 
 	if err := e.tryApplyCloudBody(command); err != nil {
@@ -491,12 +540,12 @@ func (e *Executor) executeCommand(command *Command) error {
 		return err
 	}
 
-	if err := execCommandBody(command, body, isPrereq); err != nil {
+	if err := execCommandBody(command, body, isPrereq, workDir); err != nil {
 		return err
 	}
 
 	if len(command.FileDeps) > 0 && !isPrereq {
-		e.updateCache(command, resolveValue)
+		e.updateCache(command, resolveValue, workDir)
 	}
 
 	return nil
@@ -739,8 +788,52 @@ func resolveEnvRefsRunes(s string) string {
 	return result.String()
 }
 
+func findTopLevelOp(s, op string) int {
+	depth := 0
+	inQuote := false
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c == '"' {
+			inQuote = !inQuote
+			continue
+		}
+		if inQuote {
+			continue
+		}
+		switch c {
+		case '(':
+			depth++
+		case ')':
+			depth--
+		}
+		if depth == 0 && strings.HasPrefix(s[i:], op) {
+			return i
+		}
+	}
+	return -1
+}
+
 func evaluateCondition(cond string) bool {
 	cond = strings.TrimSpace(cond)
+
+	// Parenthesized sub-expression: ( expr )
+	if strings.HasPrefix(cond, "(") && strings.HasSuffix(cond, ")") {
+		return evaluateCondition(strings.TrimSpace(cond[1 : len(cond)-1]))
+	}
+
+	// Logical OR / AND, lowest precedence first.
+	if idx := findTopLevelOp(cond, "||"); idx >= 0 {
+		return evaluateCondition(cond[:idx]) || evaluateCondition(cond[idx+2:])
+	}
+	if idx := findTopLevelOp(cond, "&&"); idx >= 0 {
+		return evaluateCondition(cond[:idx]) && evaluateCondition(cond[idx+2:])
+	}
+
+	// Negation: ! expr
+	if strings.HasPrefix(cond, "!") {
+		rest := strings.TrimSpace(cond[1:])
+		return rest != "" && !evaluateCondition(rest)
+	}
 
 	if idx := strings.Index(cond, " contains "); idx > 0 {
 		left := strings.TrimSpace(cond[:idx])
@@ -1040,8 +1133,8 @@ func (e *Executor) cacheManifest() fileCache {
 	return e.cache
 }
 
-func (e *Executor) shouldSkip(cmd *Command, resolve func(string, string) string) bool {
-	wd := resolve(cmd.WorkDir, cmd.Name)
+func (e *Executor) shouldSkip(cmd *Command, resolve func(string, string) string, workDir string) bool {
+	wd := resolve(workDir, cmd.Name)
 	files := expandFileDeps(cmd.FileDeps, wd)
 	if len(files) == 0 {
 		return false
@@ -1065,8 +1158,8 @@ func (e *Executor) shouldSkip(cmd *Command, resolve func(string, string) string)
 	return true
 }
 
-func (e *Executor) updateCache(cmd *Command, resolve func(string, string) string) {
-	wd := resolve(cmd.WorkDir, cmd.Name)
+func (e *Executor) updateCache(cmd *Command, resolve func(string, string) string, workDir string) {
+	wd := resolve(workDir, cmd.Name)
 	files := expandFileDeps(cmd.FileDeps, wd)
 
 	e.mu.Lock()

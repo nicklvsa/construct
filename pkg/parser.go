@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -169,9 +170,11 @@ func (p *ParsedData) GetDefaultCommand() (*Command, error) {
 }
 
 type Parser struct {
-	InputFile string
-	Data      *ParsedData
-	Lines     []string
+	InputFile   string
+	Data        *ParsedData
+	Lines       []string
+	importStack map[string]bool // recursion path, for cycle detection
+	imported    map[string]bool // files already merged, for diamond dedup
 }
 
 type Argument struct {
@@ -204,6 +207,7 @@ type BodyStatement struct {
 
 type Command struct {
 	Name            string            `json:"name"`
+	SourceFile      string            `json:"source_file,omitempty"`
 	CloudAccessible bool              `json:"cloud_accessible"`
 	IsDefault       bool              `json:"is_default"`
 	LazyEval        *LazyOutput       `json:"lazy_output"`
@@ -212,6 +216,7 @@ type Command struct {
 	NamedOutput     map[string]string `json:"named_output"`
 	Arguments       []*Argument       `json:"arguments"`
 	Prereqs         []string          `json:"prereqs"`
+	PrereqDirs      map[string]string `json:"prereq_dirs,omitempty"`
 	FileDeps        []string          `json:"file_deps"`
 	PrereqCmds      []*Command        `json:"prereq_cmds"`
 	WorkDir         string            `json:"work_dir"`
@@ -390,22 +395,22 @@ func extractArgumentString(line string) string {
 	return strings.TrimSpace(line[start+1 : start+end])
 }
 
-func extractPrerequisiteString(line string) string {
+func extractPrerequisites(line string) ([]string, map[string]string, error) {
 	start := strings.Index(line, "<")
 	if start == -1 {
-		return ""
+		return nil, nil, nil
 	}
 
 	end := strings.Index(line[start:], "{")
 	if end == -1 {
-		return ""
+		return nil, nil, nil
 	}
 
 	segment := line[start+1 : start+end]
 
-	parts := strings.Split(segment, ",")
+	dirs := make(map[string]string)
 	var result []string
-	for _, part := range parts {
+	for _, part := range strings.Split(segment, ",") {
 		part = strings.TrimSpace(part)
 		if part == "" || part == "in" {
 			continue
@@ -413,23 +418,36 @@ func extractPrerequisiteString(line string) string {
 		if strings.HasPrefix(part, "in ") {
 			continue
 		}
-
+		dir := ""
 		if inIdx := strings.Index(part, " in "); inIdx >= 0 {
+			dir = strings.TrimSpace(part[inIdx+4:])
 			part = strings.TrimSpace(part[:inIdx])
-			if part == "" {
-				continue
-			}
+		}
+		if part == "" {
+			continue
 		}
 		result = append(result, part)
+		if dir != "" {
+			dirs[part] = dir
+		}
 	}
 
-	return strings.Join(result, ", ")
+	return result, dirs, nil
+}
+
+func extractPrerequisiteString(line string) string {
+	names, _, _ := extractPrerequisites(line)
+	return strings.Join(names, ", ")
 }
 
 func extractWorkDir(line string) string {
 	before, _, ok := strings.Cut(line, "{")
 	if !ok {
 		return ""
+	}
+
+	if lt := strings.Index(before, "<"); lt >= 0 {
+		before = before[:lt]
 	}
 
 	segment := before
@@ -572,6 +590,12 @@ func (p *Parser) parseBodyStatements(raw []string, scope string) ([]BodyStatemen
 	for i < len(raw) {
 		line := raw[i]
 
+		line = stripInlineComment(line)
+		if line == "" {
+			i++
+			continue
+		}
+
 		if strings.HasPrefix(line, "var ") || strings.HasPrefix(line, "var\t") {
 			if err := p.parseVar(line, scope); err != nil {
 				return nil, err
@@ -693,12 +717,24 @@ func (p *Parser) parseIfBlock(raw []string, scope string) (BodyStatement, int, e
 		ThenBody: thenStmts,
 	}
 
-	// Check for else. The closing line may be "}", "} else {", or "else".
 	closingLine := strings.TrimSpace(raw[consumed])
 	hasElse := strings.Contains(closingLine, "else")
 
 	if hasElse {
 		consumed++ // consume the "} else {" line
+		rest := strings.TrimSpace(strings.TrimPrefix(closingLine, "}"))
+
+		if strings.HasPrefix(rest, "else if ") || rest == "else if" {
+			nestedRaw := append([]string{rest}, raw[consumed:]...)
+			elseIfStmt, elseConsumed, err := p.parseIfBlock(nestedRaw, scope)
+			if err != nil {
+				return BodyStatement{}, 0, err
+			}
+			stmt.ElseBody = []BodyStatement{elseIfStmt}
+			consumed += elseConsumed - 1
+			return stmt, consumed, nil
+		}
+
 		var elseLines []string
 		depth := 0
 		for consumed < len(raw) {
@@ -810,6 +846,8 @@ func extractIfCondition(line string) string {
 	line = strings.TrimSpace(line)
 	line = strings.TrimPrefix(line, "if")
 	line = strings.TrimSpace(line)
+	line = strings.TrimPrefix(line, "else if")
+	line = strings.TrimSpace(line)
 
 	brace := -1
 	inQuote := false
@@ -842,18 +880,9 @@ func (p *Parser) parseCommand(idx int, line string, isDefault bool) (int, error)
 		return 0, fmt.Errorf("failed to parse arguments for '%s': %w", commandName, err)
 	}
 
-	prereqs, err := parsePrerequisiteList(extractPrerequisiteString(line))
+	prereqs, prereqDirs, err := extractPrerequisites(line)
 	if err != nil {
 		return 0, fmt.Errorf("failed to parse prerequisites for '%s': %w", commandName, err)
-	}
-
-	var cmdDeps, fileDeps []string
-	for _, p := range prereqs {
-		if isFileDep(p) {
-			fileDeps = append(fileDeps, p)
-		} else {
-			cmdDeps = append(cmdDeps, p)
-		}
 	}
 
 	workDir := extractWorkDir(line)
@@ -871,11 +900,12 @@ func (p *Parser) parseCommand(idx int, line string, isDefault bool) (int, error)
 	if commandName != "" {
 		p.Data.Commands = append(p.Data.Commands, &Command{
 			Name:            commandName,
+			SourceFile:      p.InputFile,
 			CloudAccessible: cloudAccessible,
 			IsDefault:       isDefault,
 			Arguments:       commandArgs,
-			Prereqs:         cmdDeps,
-			FileDeps:        fileDeps,
+			Prereqs:         prereqs,
+			PrereqDirs:      prereqDirs,
 			WorkDir:         workDir,
 			Body:            commandBody,
 		})
@@ -933,25 +963,6 @@ func (p *Parser) detectCircularDependencies() error {
 	return nil
 }
 
-func (p *Parser) validatePrerequisites() error {
-	for _, cmd := range p.Data.Commands {
-		for _, prereq := range cmd.Prereqs {
-			prereq = strings.TrimSpace(prereq)
-			if prereq == "" {
-				continue
-			}
-			_, err := p.Data.GetCommand(prereq)
-			if err != nil {
-				return &MissingDependencyError{
-					Command:    cmd.Name,
-					PrereqName: prereq,
-				}
-			}
-		}
-	}
-	return nil
-}
-
 func stripInlineComment(line string) string {
 	inQuote := false
 	for i := 0; i < len(line); i++ {
@@ -966,17 +977,31 @@ func stripInlineComment(line string) string {
 			inQuote = !inQuote
 			continue
 		}
+		// A comment marker only starts a comment when preceded by whitespace
+		// (or line start), matching shell conventions. This keeps URLs and
+		// anchors intact: https://x and a#b are not comments.
 		if !inQuote && i+1 < len(line) && c == '/' && line[i+1] == '/' {
-			return strings.TrimSpace(line[:i])
+			if i == 0 || line[i-1] == ' ' || line[i-1] == '\t' {
+				return strings.TrimSpace(line[:i])
+			}
 		}
 		if !inQuote && c == '#' {
-			return strings.TrimSpace(line[:i])
+			if i == 0 || line[i-1] == ' ' || line[i-1] == '\t' {
+				return strings.TrimSpace(line[:i])
+			}
 		}
 	}
 	return line
 }
 
-func (p *Parser) Parse() (*ParsedData, error) {
+func (p *Parser) parseLines() error {
+	if p.importStack == nil {
+		p.importStack = make(map[string]bool)
+	}
+	if p.imported == nil {
+		p.imported = make(map[string]bool)
+	}
+
 	idx := 0
 	for idx < len(p.Lines) {
 		line := p.Lines[idx]
@@ -993,9 +1018,17 @@ func (p *Parser) Parse() (*ParsedData, error) {
 			continue
 		}
 
+		if strings.HasPrefix(line, "import ") || line == "import" {
+			if err := p.processImport(line); err != nil {
+				return NewParseError(lineNum, 1, err.Error(), line)
+			}
+			idx++
+			continue
+		}
+
 		if strings.HasPrefix(line, "var ") {
 			if err := p.parseVar(line, "global"); err != nil {
-				return nil, NewParseError(lineNum, 1, err.Error(), line)
+				return NewParseError(lineNum, 1, err.Error(), line)
 			}
 			idx++
 			continue
@@ -1004,7 +1037,7 @@ func (p *Parser) Parse() (*ParsedData, error) {
 		if len(line) > 0 && line[0] == '_' && (len(line) == 1 || line[1] == ' ' || line[1] == '(' || line[1] == '<' || line[1] == '{') {
 			consumed, err := p.parseCommand(idx, line, true)
 			if err != nil {
-				return nil, NewParseError(lineNum, 1, err.Error(), line)
+				return NewParseError(lineNum, 1, err.Error(), line)
 			}
 			idx += consumed
 			if consumed == 0 {
@@ -1015,7 +1048,7 @@ func (p *Parser) Parse() (*ParsedData, error) {
 
 		consumed, err := p.parseCommand(idx, line, false)
 		if err != nil {
-			return nil, NewParseError(lineNum, 1, err.Error(), line)
+			return NewParseError(lineNum, 1, err.Error(), line)
 		}
 		idx += consumed
 		if consumed == 0 {
@@ -1023,15 +1056,102 @@ func (p *Parser) Parse() (*ParsedData, error) {
 		}
 	}
 
-	if err := p.validatePrerequisites(); err != nil {
+	return nil
+}
+
+func (p *Parser) processImport(line string) error {
+	spec := strings.TrimSpace(strings.TrimPrefix(line, "import"))
+	spec = strings.Trim(spec, `"`)
+	if spec == "" {
+		return fmt.Errorf("import requires a file path")
+	}
+
+	path := spec
+	if !filepath.IsAbs(path) {
+		dir := filepath.Dir(strings.TrimPrefix(p.InputFile, "file://"))
+		path = filepath.Join(dir, spec)
+	}
+	cleanPath := filepath.Clean(path)
+	if p.importStack[cleanPath] {
+		return fmt.Errorf("circular import of %q", spec)
+	}
+	if p.imported[cleanPath] {
+		// Already merged (e.g. reached through a different import path).
+		return nil
+	}
+	p.importStack[cleanPath] = true
+	defer delete(p.importStack, cleanPath)
+	p.imported[cleanPath] = true
+
+	content, err := os.ReadFile(cleanPath)
+	if err != nil {
+		return fmt.Errorf("failed to read import %q: %w", spec, err)
+	}
+
+	imported := NewParserFromContent(cleanPath, string(content))
+	imported.importStack = p.importStack
+	imported.imported = p.imported
+	if err := imported.parseLines(); err != nil {
+		return err
+	}
+
+	p.Data.Variables = append(p.Data.Variables, imported.Data.Variables...)
+	for _, cmd := range imported.Data.Commands {
+		if existing, err := p.Data.GetCommand(cmd.Name); err == nil && existing != nil {
+			return fmt.Errorf("duplicate command %q from import %q", cmd.Name, spec)
+		}
+		p.Data.Commands = append(p.Data.Commands, cmd)
+	}
+	return nil
+}
+
+func (p *Parser) classifyPrereqs() error {
+	for _, cmd := range p.Data.Commands {
+		var cmdDeps, fileDeps []string
+		for _, prereq := range cmd.Prereqs {
+			prereq = strings.TrimSpace(prereq)
+			if prereq == "" {
+				continue
+			}
+			if _, err := p.Data.GetCommand(prereq); err == nil {
+				cmdDeps = append(cmdDeps, prereq)
+			} else if isFileDep(prereq) {
+				fileDeps = append(fileDeps, prereq)
+			} else {
+				return &MissingDependencyError{
+					Command:    cmd.Name,
+					PrereqName: prereq,
+				}
+			}
+		}
+		cmd.Prereqs = cmdDeps
+		cmd.FileDeps = fileDeps
+	}
+	return nil
+}
+
+func (p *Parser) Parse() (*ParsedData, error) {
+	if err := p.parseLines(); err != nil {
+		return nil, err
+	}
+
+	p.Data.buildIndexMaps()
+
+	seen := make(map[string]bool)
+	for _, cmd := range p.Data.Commands {
+		if seen[cmd.Name] {
+			return nil, fmt.Errorf("duplicate command %q", cmd.Name)
+		}
+		seen[cmd.Name] = true
+	}
+
+	if err := p.classifyPrereqs(); err != nil {
 		return nil, err
 	}
 
 	if err := p.detectCircularDependencies(); err != nil {
 		return nil, err
 	}
-
-	p.Data.buildIndexMaps()
 
 	return p.Data, nil
 }

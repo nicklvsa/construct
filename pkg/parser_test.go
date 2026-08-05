@@ -1085,8 +1085,10 @@ func TestExtractWorkDir(t *testing.T) {
 		{name: "no workdir with prereqs", input: "build < test {", want: ""},
 		{name: "simple workdir", input: "build in subdir {", want: "subdir"},
 		{name: "workdir with args", input: "build (arg1) in subdir {", want: "subdir"},
-		{name: "workdir with prereqs", input: "build < test in subdir {", want: "subdir"},
-		{name: "workdir with args and prereqs", input: "deploy (env) < build in deep/dir {", want: "deep/dir"},
+		// "in <dir>" after "<" belongs to the prerequisites, not the command.
+		{name: "workdir before prereqs", input: "build in subdir < test {", want: "subdir"},
+		{name: "prereq in dir does not set command workdir", input: "build < test in subdir {", want: ""},
+		{name: "workdir with args and prereqs", input: "deploy (env) in dir < build in deep/dir {", want: "dir"},
 		{name: "cloud command with workdir", input: "|deploy| in cloud/dir {", want: "cloud/dir"},
 		{name: "workdir with dot path", input: "build in ./local {", want: "./local"},
 		{name: "workdir with env ref", input: "build in @HOMEDIR/projects {", want: "@HOMEDIR/projects"},

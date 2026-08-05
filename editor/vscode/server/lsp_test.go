@@ -1,6 +1,9 @@
 package main
 
 import (
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -42,18 +45,21 @@ main < gen in subdir {
 }
 
 func TestWorkDirAtPositionLastIn(t *testing.T) {
-	line := "main < gen in a, test in b {"
-	// The last " in " binds the workdir (matches the parser).
-	dir, start, end, ok := workDirAtPosition(line, strings.Index(line, "b"))
-	if !ok || dir != "b" {
-		t.Fatalf("workDirAtPosition on %q = %q (ok=%v), want %q", line, dir, ok, "b")
+	line := "main in root < gen in a, test in b {"
+	dir, start, end, ok := workDirAtPosition(line, strings.Index(line, "root"))
+	if !ok || dir != "root" {
+		t.Fatalf("workDirAtPosition on %q = %q (ok=%v), want %q", line, dir, ok, "root")
 	}
-	if line[start:end] != "b" {
-		t.Errorf("column span = %q, want %q", line[start:end], "b")
+	if line[start:end] != "root" {
+		t.Errorf("column span = %q, want %q", line[start:end], "root")
 	}
-	// Hovering an earlier " in " (part of a prereq name) is not the workdir.
-	if _, _, _, ok := workDirAtPosition(line, strings.Index(line, "a")); ok {
-		t.Error("expected no workdir hit on the first 'in' occurrence")
+	// Prereq dirs after "<" are not the command's workdir.
+	if _, _, _, ok := workDirAtPosition(line, strings.Index(line, "b")); ok {
+		t.Error("expected no workdir hit for a prereq 'in' occurrence")
+	}
+	// No workdir declared at all.
+	if _, _, _, ok := workDirAtPosition("main < gen {", 3); ok {
+		t.Error("expected no workdir hit without an 'in' modifier")
 	}
 }
 
@@ -78,6 +84,70 @@ _ {
 	cmd = enclosingCommand(lines, 0, data)
 	if cmd == nil || cmd.Name != "log" {
 		t.Fatalf("enclosingCommand(line 1) = %v, want log", cmd)
+	}
+}
+
+// TestDefinitionAcrossImport verifies that go-to-definition on a prerequisite
+// defined in an imported file jumps to that file.
+func TestDefinitionAcrossImport(t *testing.T) {
+	dir := t.TempDir()
+	libPath := filepath.Join(dir, "lib.constfile")
+	os.WriteFile(libPath, []byte("build {\n    echo hi\n}\n"), 0644)
+	mainText := "import \"lib.constfile\"\nrelease < build {\n    echo done\n}\n"
+	mainPath := filepath.Join(dir, "main.constfile")
+	os.WriteFile(mainPath, []byte(mainText), 0644)
+
+	uri := pathToURI(mainPath)
+	s := newServer()
+	s.updateDoc(uri, mainText, 1)
+
+	lines := strings.Split(mainText, "\n")
+	params, _ := json.Marshal(map[string]interface{}{
+		"textDocument": map[string]string{"uri": uri},
+		"position":     map[string]int{"line": 1, "character": strings.Index(lines[1], "build") + 2},
+	})
+	res, err := s.handleDefinition(params)
+	if err != nil {
+		t.Fatalf("definition: %v", err)
+	}
+	loc, ok := res.(location)
+	if !ok {
+		t.Fatalf("expected location, got %T", res)
+	}
+	if want := pathToURI(libPath); loc.URI != want {
+		t.Errorf("definition URI = %q, want %q", loc.URI, want)
+	}
+	if loc.Range.Start.Line != 0 {
+		t.Errorf("definition line = %d, want 0", loc.Range.Start.Line)
+	}
+}
+
+// TestDefinitionLocalCommandStillResolves verifies local prereqs still resolve
+// within the current document (no spurious cross-file jump).
+func TestDefinitionLocalCommandStillResolves(t *testing.T) {
+	text := "gen {\n    echo hi\n}\nmain < gen {\n    echo done\n}\n"
+	uri := "file:///x/main.constfile"
+	s := newServer()
+	s.updateDoc(uri, text, 1)
+
+	lines := strings.Split(text, "\n")
+	params, _ := json.Marshal(map[string]interface{}{
+		"textDocument": map[string]string{"uri": uri},
+		"position":     map[string]int{"line": 3, "character": strings.Index(lines[3], "gen") + 2},
+	})
+	res, err := s.handleDefinition(params)
+	if err != nil {
+		t.Fatalf("definition: %v", err)
+	}
+	loc, ok := res.(location)
+	if !ok {
+		t.Fatalf("expected location, got %T", res)
+	}
+	if loc.URI != uri {
+		t.Errorf("definition URI = %q, want current doc %q", loc.URI, uri)
+	}
+	if loc.Range.Start.Line != 0 {
+		t.Errorf("definition line = %d, want 0", loc.Range.Start.Line)
 	}
 }
 

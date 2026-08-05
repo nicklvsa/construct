@@ -79,10 +79,6 @@ type textDocumentPositionParams struct {
 	Position position `json:"position"`
 }
 
-type initializeParams struct {
-	RootURI string `json:"rootUri"`
-}
-
 type initializeResult struct {
 	Capabilities serverCapabilities `json:"capabilities"`
 }
@@ -149,7 +145,7 @@ func (s *server) dispatch(method string, params json.RawMessage) (interface{}, e
 	}
 }
 
-func (s *server) handleInitialize(params json.RawMessage) (interface{}, error) {
+func (s *server) handleInitialize(_ json.RawMessage) (any, error) {
 	return initializeResult{
 		Capabilities: serverCapabilities{
 			TextDocumentSync:   1, // full document sync
@@ -160,7 +156,7 @@ func (s *server) handleInitialize(params json.RawMessage) (interface{}, error) {
 	}, nil
 }
 
-func (s *server) handleDidOpen(params json.RawMessage) (interface{}, error) {
+func (s *server) handleDidOpen(params json.RawMessage) (any, error) {
 	var p struct {
 		TextDocument textDocumentItem `json:"textDocument"`
 	}
@@ -172,7 +168,7 @@ func (s *server) handleDidOpen(params json.RawMessage) (interface{}, error) {
 	return nil, nil
 }
 
-func (s *server) handleDidChange(params json.RawMessage) (interface{}, error) {
+func (s *server) handleDidChange(params json.RawMessage) (any, error) {
 	var p didChangeTextDocumentParams
 	if err := json.Unmarshal(params, &p); err != nil {
 		return nil, fmt.Errorf("bad params: %w", err)
@@ -183,7 +179,6 @@ func (s *server) handleDidChange(params json.RawMessage) (interface{}, error) {
 	return nil, nil
 }
 
-// updateDoc re-parses the document and publishes diagnostics.
 func (s *server) updateDoc(uri, text string, version int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -191,7 +186,6 @@ func (s *server) updateDoc(uri, text string, version int) {
 	parser := pkg.NewParserFromContent(uri, text)
 	data, err := parser.Parse()
 	if err != nil {
-		// Keep last good data if present; diagnostics carry the error.
 		st := &docState{text: text, version: version}
 		if old, ok := s.docs[uri]; ok {
 			st.data = old.data
@@ -266,10 +260,7 @@ func parseErrorToDiagnostics(err error, text string) []diagnostic {
 
 func fullRange(text string) range_ {
 	lines := strings.Split(text, "\n")
-	endLine := len(lines) - 1
-	if endLine < 0 {
-		endLine = 0
-	}
+	endLine := max(len(lines)-1, 0)
 	endChar := len(lines[endLine])
 	return range_{
 		Start: position{Line: 0, Character: 0},
@@ -277,8 +268,6 @@ func fullRange(text string) range_ {
 	}
 }
 
-// duplicatePrereqWarnings scans command headers for duplicate prerequisites and
-// generates warning diagnostics on the duplicate occurrences.
 func duplicatePrereqWarnings(text string, data *pkg.ParsedData) []diagnostic {
 	diags := []diagnostic{}
 	lines := strings.Split(text, "\n")
@@ -287,16 +276,17 @@ func duplicatePrereqWarnings(text string, data *pkg.ParsedData) []diagnostic {
 		if lt < 0 {
 			continue
 		}
+
 		brace := strings.IndexByte(line[lt:], '{')
 		if brace < 0 {
 			continue
 		}
+
 		segment := line[lt+1 : lt+brace]
 
-		// Split on commas and identify prereq names (tokens that are known commands).
 		seen := map[string]bool{}
 		searchPos := 0
-		for _, part := range strings.Split(segment, ",") {
+		for part := range strings.SplitSeq(segment, ",") {
 			part = strings.TrimSpace(part)
 			if part == "" {
 				continue
@@ -394,7 +384,7 @@ func namedOutputHints(text string, data *pkg.ParsedData) []diagnostic {
 					})
 					continue
 				}
-				// Check if a named output is available at this index.
+
 				if hint := namedOutputAt(data, cmdName, idx); hint != "" {
 					diags = append(diags, diagnostic{
 						Range:    refRange(lineIdx, absIdx, refLen),
@@ -756,6 +746,10 @@ func (s *server) handleDefinition(params json.RawMessage) (interface{}, error) {
 				}, nil
 			}
 		}
+		// The definition may live in an imported file.
+		if loc, ok := s.commandLocationInImport(doc, target, p.TextDocument.URI); ok {
+			return loc, nil
+		}
 	}
 
 	if dir, startCol, endCol, ok := workDirAtPosition(line, char); ok {
@@ -828,6 +822,39 @@ func (s *server) handleCompletion(params json.RawMessage) (interface{}, error) {
 	}
 
 	return completionList{Items: items}, nil
+}
+
+func (s *server) commandLocationInImport(doc *docState, name, docURI string) (location, bool) {
+	cmd, err := doc.data.GetCommand(name)
+	if err != nil || cmd == nil || cmd.SourceFile == "" {
+		return location{}, false
+	}
+	// Local commands carry the document's URI (or path) as their source.
+	if strings.TrimPrefix(cmd.SourceFile, "file://") == strings.TrimPrefix(docURI, "file://") {
+		return location{}, false
+	}
+
+	path := uriToPath(cmd.SourceFile)
+	if path == "" {
+		path = cmd.SourceFile
+	}
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return location{}, false
+	}
+	for i, l := range strings.Split(string(content), "\n") {
+		if cn, ok := commandNameAtLine(l); ok && cn == name {
+			col := max(strings.Index(l, cn), 0)
+			return location{
+				URI: pathToURI(path),
+				Range: range_{
+					Start: position{Line: i, Character: col},
+					End:   position{Line: i, Character: col + len(cn)},
+				},
+			}, true
+		}
+	}
+	return location{}, false
 }
 
 func refAtPosition(line string, char int) (string, string) {
@@ -926,8 +953,8 @@ func commandNameAtLine(line string) (string, bool) {
 func extractVarDeclName(line string) string {
 	s := strings.TrimPrefix(line, "var ")
 	s = strings.TrimSpace(s)
-	if eq := strings.IndexByte(s, '='); eq >= 0 {
-		return strings.TrimSpace(s[:eq])
+	if before, _, ok := strings.Cut(s, "="); ok {
+		return strings.TrimSpace(before)
 	}
 	return s
 }
@@ -937,7 +964,7 @@ func prereqNameAtPosition(line string, char int) (string, bool) {
 	if lt < 0 {
 		return "", false
 	}
-	// End of the prereq region: the opening brace (or end of line).
+
 	end := strings.IndexByte(line[lt:], '{')
 	var region string
 	if end >= 0 {
@@ -945,7 +972,7 @@ func prereqNameAtPosition(line string, char int) (string, bool) {
 	} else {
 		region = line[lt+1:]
 	}
-	// Absolute offset of the region start within the full line.
+
 	regionStart := lt + 1
 	if char < regionStart || char > regionStart+len(region) {
 		return "", false
@@ -996,7 +1023,7 @@ func fileDepAtPosition(line string, char int) (token string, startCol, endCol in
 		return "", 0, 0, false
 	}
 
-	for _, part := range strings.Split(region, ",") {
+	for part := range strings.SplitSeq(region, ",") {
 		part = strings.TrimSpace(part)
 		if part == "" || !looksLikeFileDep(part) {
 			continue
@@ -1020,29 +1047,34 @@ func looksLikeFileDep(token string) bool {
 }
 
 func workDirAtPosition(line string, char int) (dir string, startCol, endCol int, ok bool) {
-	inIdx := strings.LastIndex(line, " in ")
+	header := line
+	if before, _, ok := strings.Cut(line, "<"); ok {
+		header = before
+	}
+
+	inIdx := strings.LastIndex(header, " in ")
 	if inIdx < 0 {
 		return "", 0, 0, false
 	}
 
 	dirStart := inIdx + 4 // skip " in "
-	rest := line[dirStart:]
+	rest := header[dirStart:]
 	braceIdx := strings.IndexByte(rest, '{')
 
 	var dirEnd int
 	if braceIdx >= 0 {
 		dirEnd = dirStart + braceIdx
 	} else {
-		dirEnd = len(line)
+		dirEnd = len(header)
 	}
 
-	dir = strings.TrimSpace(line[dirStart:dirEnd])
+	dir = strings.TrimSpace(header[dirStart:dirEnd])
 	if dir == "" {
 		return "", 0, 0, false
 	}
 
 	// Recompute the trimmed column span for the actual directory text.
-	trimStart := dirStart + strings.Index(line[dirStart:dirEnd], dir)
+	trimStart := dirStart + strings.Index(header[dirStart:dirEnd], dir)
 	trimEnd := trimStart + len(dir)
 
 	if char < trimStart || char > trimEnd {
@@ -1053,7 +1085,6 @@ func workDirAtPosition(line string, char int) (dir string, startCol, endCol int,
 }
 
 func resolveWorkDir(dir, docURI string) string {
-	// Resolve @env references in the directory.
 	dir = resolveEnvRefsInString(dir)
 	if filepath.IsAbs(dir) {
 		return filepath.Clean(dir)
@@ -1068,7 +1099,6 @@ func resolveWorkDir(dir, docURI string) string {
 	return filepath.Clean(resolved)
 }
 
-// pathToURI converts a native filesystem path to a file:// URI.
 func pathToURI(p string) string {
 	abs, err := filepath.Abs(p)
 	if err != nil {
@@ -1078,7 +1108,6 @@ func pathToURI(p string) string {
 	return u.String()
 }
 
-// uriToPath converts a file:// URI to a native filesystem path.
 func uriToPath(uri string) string {
 	u, err := url.Parse(uri)
 	if err != nil || u.Scheme != "file" {
