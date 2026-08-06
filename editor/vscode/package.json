@@ -5,6 +5,10 @@
 	"version": "0.2.0",
 	"publisher": "nicklvsa",
 	"license": "MIT",
+	"repository": {
+		"type": "git",
+		"url": "https://github.com/nicklvsa/construct"
+	},
 	"engines": {
 		"vscode": "^1.75.0"
 	},
