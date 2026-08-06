@@ -359,13 +359,10 @@ func namedOutputHints(text string, data *pkg.ParsedData) []diagnostic {
 			searchFrom = absIdx + 1 + len(name)
 			refLen := len(name) + 1
 
-			before, after, ok := strings.Cut(name, ".")
+			cmdName, suffix, ok := splitCommandRef(data, name)
 			if !ok {
 				continue // plain &var, not a prereq output ref
 			}
-
-			cmdName := before
-			suffix := after
 
 			cmd, err := data.GetCommand(cmdName)
 			if err != nil || cmd == nil {
@@ -519,6 +516,19 @@ func (s *server) handleHover(params json.RawMessage) (interface{}, error) {
 					}, nil
 				}
 			}
+
+			if invoked, ln, found := invokeCaptureHint(cmd.Body, name); found {
+				loc := "unknown line"
+				if ln > 0 {
+					loc = fmt.Sprintf("line %d", ln)
+				}
+				return hoverResult{
+					Contents: markupContent{
+						Kind:  "markdown",
+						Value: fmt.Sprintf("`%s` — output captured by `invoke %s as %s` (%s)\n\nAvailable from that statement onward.", name, invoked, name, loc),
+					},
+				}, nil
+			}
 		}
 	}
 
@@ -547,14 +557,30 @@ func (s *server) handleHover(params json.RawMessage) (interface{}, error) {
 		}
 	}
 
-	if dir, _, _, ok := workDirAtPosition(line, char); ok {
-		resolved := resolveWorkDir(dir, p.TextDocument.URI)
-		return hoverResult{
-			Contents: markupContent{
-				Kind:  "markdown",
-				Value: fmt.Sprintf("📂 working directory: `%s`\n\nresolved: `%s`", dir, resolved),
-			},
-		}, nil
+	// Hover over an `invoke <command>` target.
+	if target, _, _, ok := invokeNameAtPosition(line, char); ok {
+		if cmd, err := doc.data.GetCommand(target); err == nil {
+			return hoverResult{
+				Contents: markupContent{
+					Kind:  "markdown",
+					Value: "invokes: " + commandHover(cmd),
+				},
+			}, nil
+		}
+	}
+
+	if hdr, isHdr := commandNameAtLine(line); isHdr {
+		if _, err := doc.data.GetCommand(hdr); err == nil {
+			if dir, _, _, ok := workDirAtPosition(line, char); ok {
+				resolved := resolveWorkDir(dir, p.TextDocument.URI)
+				return hoverResult{
+					Contents: markupContent{
+						Kind:  "markdown",
+						Value: fmt.Sprintf("📂 working directory: `%s`\n\nresolved: `%s`", dir, resolved),
+					},
+				}, nil
+			}
+		}
 	}
 
 	return nil, nil
@@ -595,8 +621,19 @@ func commandHover(c *pkg.Command) string {
 	return b.String()
 }
 
+func splitCommandRef(data *pkg.ParsedData, name string) (cmdName, suffix string, ok bool) {
+	parts := strings.Split(name, ".")
+	for i := len(parts); i > 1; i-- {
+		candidate := strings.Join(parts[:i], ".")
+		if _, err := data.GetCommand(candidate); err == nil {
+			return candidate, strings.Join(parts[i:], "."), true
+		}
+	}
+	return "", "", false
+}
+
 func varHoverMessage(name string, data *pkg.ParsedData) string {
-	before, after, ok := strings.Cut(name, ".")
+	cmdName, suffix, ok := splitCommandRef(data, name)
 	if !ok {
 		// Plain &var — look it up in the variable map.
 		v, err := data.GetVariable(name, "")
@@ -614,8 +651,6 @@ func varHoverMessage(name string, data *pkg.ParsedData) string {
 		return fmt.Sprintf("`%s` (scope: `%s`)\n\nvalue: `%s`", name, v.Scope, v.Value)
 	}
 
-	cmdName := before
-	suffix := after
 	cmd, err := data.GetCommand(cmdName)
 	if err != nil || cmd == nil {
 		return ""
@@ -663,8 +698,6 @@ func stringToInt(s string) int64 {
 	return n
 }
 
-// ---- definition ----
-
 func (s *server) handleDefinition(params json.RawMessage) (interface{}, error) {
 	var p textDocumentPositionParams
 	if err := json.Unmarshal(params, &p); err != nil {
@@ -685,7 +718,6 @@ func (s *server) handleDefinition(params json.RawMessage) (interface{}, error) {
 	line := lines[p.Position.Line]
 	char := p.Position.Character
 
-	// Go-to-definition for &varName references.
 	if _, name := refAtPosition(line, char); name != "" {
 		// Find the declaration line ("var name ...") anywhere in the doc.
 		for i, l := range lines {
@@ -701,6 +733,37 @@ func (s *server) handleDefinition(params json.RawMessage) (interface{}, error) {
 						},
 					}, nil
 				}
+			}
+		}
+
+		if cmd := enclosingCommand(lines, p.Position.Line, doc.data); cmd != nil {
+			if _, ln, found := invokeCaptureHint(cmd.Body, name); found && ln > 0 {
+				invokeLine := lines[ln-1]
+				col := max(strings.Index(invokeLine, "as "+name), 0)
+				return location{
+					URI: p.TextDocument.URI,
+					Range: range_{
+						Start: position{Line: ln - 1, Character: col},
+						End:   position{Line: ln - 1, Character: col + len("as "+name)},
+					},
+				}, nil
+			}
+		}
+	}
+
+	if target, ok := prereqNameAtPosition(line, char); ok {
+		if _, err := doc.data.GetCommand(target); err == nil {
+			if loc, ok := s.findCommandLocation(doc, target, p.TextDocument.URI); ok {
+				return loc, nil
+			}
+		}
+	}
+
+	// invoke <command> targets resolve the same way.
+	if target, _, _, ok := invokeNameAtPosition(line, char); ok {
+		if _, err := doc.data.GetCommand(target); err == nil {
+			if loc, ok := s.findCommandLocation(doc, target, p.TextDocument.URI); ok {
+				return loc, nil
 			}
 		}
 	}
@@ -737,34 +800,25 @@ func (s *server) handleDefinition(params json.RawMessage) (interface{}, error) {
 	}
 
 	if target, ok := prereqNameAtPosition(line, char); ok {
-		for i, l := range lines {
-			if cn, _ := commandNameAtLine(l); cn == target {
-				col := max(strings.Index(l, cn), 0)
-				return location{
-					URI: p.TextDocument.URI,
-					Range: range_{
-						Start: position{Line: i, Character: col},
-						End:   position{Line: i, Character: col + len(cn)},
-					},
-				}, nil
-			}
-		}
-		// The definition may live in an imported file.
-		if loc, ok := s.commandLocationInImport(doc, target, p.TextDocument.URI); ok {
+		if loc, ok := s.findCommandLocation(doc, target, p.TextDocument.URI); ok {
 			return loc, nil
 		}
 	}
 
-	if dir, startCol, endCol, ok := workDirAtPosition(line, char); ok {
-		resolved := resolveWorkDir(dir, p.TextDocument.URI)
-		uri := pathToURI(resolved)
-		return location{
-			URI: uri,
-			Range: range_{
-				Start: position{Line: p.Position.Line, Character: startCol},
-				End:   position{Line: p.Position.Line, Character: endCol},
-			},
-		}, nil
+	if hdr, isHdr := commandNameAtLine(line); isHdr {
+		if _, err := doc.data.GetCommand(hdr); err == nil {
+			if dir, startCol, endCol, ok := workDirAtPosition(line, char); ok {
+				resolved := resolveWorkDir(dir, p.TextDocument.URI)
+				uri := pathToURI(resolved)
+				return location{
+					URI: uri,
+					Range: range_{
+						Start: position{Line: p.Position.Line, Character: startCol},
+						End:   position{Line: p.Position.Line, Character: endCol},
+					},
+				}, nil
+			}
+		}
 	}
 
 	if name, isCmd := commandNameAtLine(line); isCmd {
@@ -824,40 +878,156 @@ func (s *server) handleCompletion(params json.RawMessage) (interface{}, error) {
 		return completionList{Items: items}, nil
 	}
 
+	leadTrim := strings.TrimLeft(line, " \t")
+	if strings.HasPrefix(leadTrim, "invoke ") && p.Position.Character >= len(line)-len(leadTrim)+len("invoke ") {
+		for _, c := range doc.data.Commands {
+			items = append(items, completionItem{Label: c.Name, Kind: 3}) // Function
+		}
+		return completionList{Items: items}, nil
+	}
+
 	return completionList{Items: items}, nil
 }
 
-func (s *server) commandLocationInImport(doc *docState, name, docURI string) (location, bool) {
+func commandHeaderCandidates(name string) []string {
+	var out []string
+	cur := name
+	for {
+		out = append(out, cur)
+		i := strings.IndexByte(cur, '.')
+		if i < 0 {
+			return out
+		}
+		cur = cur[i+1:]
+		if cur == "" {
+			return out
+		}
+	}
+}
+
+func (s *server) findCommandLocation(doc *docState, name, docURI string) (location, bool) {
 	cmd, err := doc.data.GetCommand(name)
 	if err != nil || cmd == nil || cmd.SourceFile == "" {
 		return location{}, false
 	}
-	// Local commands carry the document's URI (or path) as their source.
-	if strings.TrimPrefix(cmd.SourceFile, "file://") == strings.TrimPrefix(docURI, "file://") {
+
+	readLoc := func(path string, isDoc bool) (location, bool) {
+		var content []byte
+		var readErr error
+		if isDoc {
+			content = []byte(doc.text)
+		} else {
+			content, readErr = os.ReadFile(path)
+		}
+		if readErr != nil && content == nil {
+			return location{}, false
+		}
+
+		lines := strings.Split(string(content), "\n")
+		candidates := commandHeaderCandidates(name)
+
+		if cmd.SourceLine > 0 && cmd.SourceLine-1 < len(lines) {
+			headerLine := lines[cmd.SourceLine-1]
+			matched := name
+			col := 0
+			for _, c := range candidates {
+				if idx := strings.Index(headerLine, c); idx >= 0 {
+					matched = c
+					col = idx
+					break
+				}
+			}
+			uri := pathToURI(path)
+			if isDoc {
+				uri = docURI
+			}
+			return location{
+				URI: uri,
+				Range: range_{
+					Start: position{Line: cmd.SourceLine - 1, Character: col},
+					End:   position{Line: cmd.SourceLine - 1, Character: col + len(matched)},
+				},
+			}, true
+		}
+
+		for i, l := range lines {
+			if cn, ok := commandNameAtLine(l); ok {
+				for _, c := range candidates {
+					if cn == c {
+						col := max(strings.Index(l, cn), 0)
+						uri := pathToURI(path)
+						if isDoc {
+							uri = docURI
+						}
+						return location{
+							URI: uri,
+							Range: range_{
+								Start: position{Line: i, Character: col},
+								End:   position{Line: i, Character: col + len(cn)},
+							},
+						}, true
+					}
+				}
+			}
+		}
 		return location{}, false
+	}
+
+	if strings.TrimPrefix(cmd.SourceFile, "file://") == strings.TrimPrefix(docURI, "file://") {
+		return readLoc(cmd.SourceFile, true)
 	}
 
 	path := uriToPath(cmd.SourceFile)
 	if path == "" {
 		path = cmd.SourceFile
 	}
-	content, err := os.ReadFile(path)
-	if err != nil {
-		return location{}, false
+	return readLoc(path, false)
+}
+
+func invokeNameAtPosition(line string, char int) (string, int, int, bool) {
+	trimmed := strings.TrimSpace(line)
+	lead := len(line) - len(trimmed)
+	if !strings.HasPrefix(trimmed, "invoke ") {
+		return "", 0, 0, false
 	}
-	for i, l := range strings.Split(string(content), "\n") {
-		if cn, ok := commandNameAtLine(l); ok && cn == name {
-			col := max(strings.Index(l, cn), 0)
-			return location{
-				URI: pathToURI(path),
-				Range: range_{
-					Start: position{Line: i, Character: col},
-					End:   position{Line: i, Character: col + len(cn)},
-				},
-			}, true
+	rest := trimmed[len("invoke "):]
+	j := 0
+	for j < len(rest) && isPrereqIdentRune(rune(rest[j])) {
+		j++
+	}
+	if j == 0 {
+		return "", 0, 0, false
+	}
+	name := rest[:j]
+	start := lead + len("invoke ")
+	end := start + j
+	if char < start || char > end {
+		return "", 0, 0, false
+	}
+	return name, start, end, true
+}
+
+func invokeCaptureHint(body []pkg.BodyStatement, name string) (invoked string, line int, found bool) {
+	for _, stmt := range body {
+		switch stmt.Type {
+		case "invoke":
+			if stmt.OutputName == name {
+				return stmt.Shell, stmt.SourceLine, true
+			}
+		case "if":
+			if inv, ln, f := invokeCaptureHint(stmt.ThenBody, name); f {
+				return inv, ln, f
+			}
+			if inv, ln, f := invokeCaptureHint(stmt.ElseBody, name); f {
+				return inv, ln, f
+			}
+		case "for":
+			if inv, ln, f := invokeCaptureHint(stmt.LoopBody, name); f {
+				return inv, ln, f
+			}
 		}
 	}
-	return location{}, false
+	return "", 0, false
 }
 
 func refAtPosition(line string, char int) (string, string) {
@@ -997,14 +1167,14 @@ func prereqNameAtPosition(line string, char int) (string, bool) {
 		return "", false
 	}
 	name := string(runes[start:endRel])
-	if name == "" || looksLikeFileDep(name) {
+	if name == "" {
 		return "", false
 	}
 	return name, true
 }
 
 func isPrereqIdentRune(r rune) bool {
-	return isIdentRune(r) || (r >= '0' && r <= '9') || r == '-'
+	return isIdentRune(r) || (r >= '0' && r <= '9') || r == '-' || r == '.'
 }
 
 func fileDepAtPosition(line string, char int) (token string, startCol, endCol int, ok bool) {

@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -25,7 +26,7 @@ func TestElseIfParsing(t *testing.T) {
 }`
 	lines := strings.Split(in, "\n")
 	p := &Parser{Data: &ParsedData{}, Lines: lines}
-	if _, err := p.parseCommand(0, "build {", false); err != nil {
+	if _, err := p.parseCommand(0, "build {", false, 1, ""); err != nil {
 		t.Fatalf("parse: %v", err)
 	}
 	cmd := p.Data.Commands[0]
@@ -275,6 +276,209 @@ usecmd < libcmd {
 	}
 	if _, err := data.GetCommand("usecmd"); err != nil {
 		t.Fatalf("usecmd missing: %v", err)
+	}
+}
+
+func TestImportNamespace(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "lib.constfile"), []byte(`var version = 2
+libcmd {
+    $ echo lib &version
+}
+use < libcmd {
+    for l in &libcmd.* {
+        $ echo got:&l
+    }
+}
+shadow {
+    var version = 3
+    $ echo local &version
+}
+`), 0644)
+	os.WriteFile(filepath.Join(dir, "main.constfile"), []byte(`import "lib.constfile" as lib
+usecmd < lib.use {
+    $ echo &lib.version / &lib.use.0
+}
+`), 0644)
+
+	p, err := NewParser(filepath.Join(dir, "main.constfile"))
+	if err != nil {
+		t.Fatalf("NewParser: %v", err)
+	}
+	data, err := p.Parse()
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+
+	libcmd, err := data.GetCommand("lib.libcmd")
+	if err != nil {
+		t.Fatalf("namespaced command missing: %v", err)
+	}
+	if len(libcmd.Prereqs) != 0 {
+		t.Errorf("libcmd prereqs = %v", libcmd.Prereqs)
+	}
+	libuse, err := data.GetCommand("lib.use")
+	if err != nil {
+		t.Fatalf("namespaced use missing: %v", err)
+	}
+	if len(libuse.Prereqs) != 1 || libuse.Prereqs[0] != "lib.libcmd" {
+		t.Errorf("namespaced prereq not rewritten: %v", libuse.Prereqs)
+	}
+	if !strings.Contains(libuse.Body[0].LoopItems, "&lib.libcmd.*") {
+		t.Errorf("loop items not rewritten: %q", libuse.Body[0].LoopItems)
+	}
+	if !strings.Contains(libuse.Body[0].LoopBody[0].Shell, "&l") {
+		t.Errorf("loop body broken: %q", libuse.Body[0].LoopBody[0].Shell)
+	}
+	shadowCmd, err := data.GetCommand("lib.shadow")
+	if err != nil {
+		t.Fatalf("shadow command missing: %v", err)
+	}
+	if !strings.Contains(shadowCmd.Body[0].Shell, "&version") || strings.Contains(shadowCmd.Body[0].Shell, "&lib.version") {
+		t.Errorf("shadowed local ref rewritten: %q", shadowCmd.Body[0].Shell)
+	}
+	// Global variable renamed.
+	if v, ok := data.LookupVariable("lib.version", "global"); !ok || v != "2" {
+		t.Errorf("namespaced variable = %q, %v; want \"2\", true", v, ok)
+	}
+	// Command-scoped variable scope follows the renamed command.
+	if v, ok := data.LookupVariable("version", "lib.shadow"); !ok || v != "3" {
+		t.Errorf("scoped variable = %q, %v; want \"3\", true", v, ok)
+	}
+	// Watch files include the import.
+	if !slices.Contains(data.SourceFiles, filepath.Join(dir, "lib.constfile")) {
+		t.Errorf("SourceFiles missing import: %v", data.SourceFiles)
+	}
+
+	usecmd, err := data.GetCommand("usecmd")
+	if err != nil {
+		t.Fatalf("usecmd missing: %v", err)
+	}
+	// Execute: prereq output refs across the namespace must resolve.
+	usecmd.PrereqCmds = []*Command{libuse}
+	libuse.PrereqOutput = []string{"got:lib 2"}
+	if err := executorEval(data, usecmd); err != nil {
+		t.Fatalf("exec failed: %v", err)
+	}
+}
+
+func TestImportNamespaceSameFileTwice(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "d.constfile"), []byte(`libcmd {
+    echo lib
+}
+`), 0644)
+	os.WriteFile(filepath.Join(dir, "main.constfile"), []byte(`import "d.constfile" as a
+import "d.constfile" as b
+a1 < a.libcmd {
+    $ echo a
+}
+b1 < b.libcmd {
+    $ echo b
+}
+`), 0644)
+
+	p, err := NewParser(filepath.Join(dir, "main.constfile"))
+	if err != nil {
+		t.Fatalf("NewParser: %v", err)
+	}
+	data, err := p.Parse()
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if _, err := data.GetCommand("a.libcmd"); err != nil {
+		t.Errorf("a.libcmd missing: %v", err)
+	}
+	if _, err := data.GetCommand("b.libcmd"); err != nil {
+		t.Errorf("b.libcmd missing: %v", err)
+	}
+}
+
+func TestImportNamespaceInvalid(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "lib.constfile"), []byte(`libcmd {
+    echo lib
+}
+`), 0644)
+	os.WriteFile(filepath.Join(dir, "main.constfile"), []byte(`import "lib.constfile" as bad-name!
+`), 0644)
+
+	p, err := NewParser(filepath.Join(dir, "main.constfile"))
+	if err != nil {
+		t.Fatalf("NewParser: %v", err)
+	}
+	if _, err := p.Parse(); err == nil || !strings.Contains(err.Error(), "namespace") {
+		t.Fatalf("expected namespace error, got %v", err)
+	}
+}
+
+func TestInvokeStatement(t *testing.T) {
+	in := `gen {
+    $ echo hello
+}
+use {
+    invoke gen
+    invoke gen as captured
+    $ echo "final: &captured"
+}
+selfref {
+    invoke selfref
+}
+`
+	p := NewParserFromContent("t.constfile", in)
+	data, err := p.Parse()
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	use, err := data.GetCommand("use")
+	if err != nil {
+		t.Fatalf("use missing: %v", err)
+	}
+	if use.Body[0].Type != "invoke" || use.Body[0].Shell != "gen" {
+		t.Errorf("invoke stmt not parsed: %+v", use.Body[0])
+	}
+	if use.Body[1].Type != "invoke" || use.Body[1].Shell != "gen" || use.Body[1].OutputName != "captured" {
+		t.Errorf("invoke as stmt not parsed: %+v", use.Body[1])
+	}
+	if err := executorEval(data, use); err != nil {
+		t.Fatalf("exec: %v", err)
+	}
+	if v, ok := data.LookupVariable("captured", "use"); !ok || v != "hello" {
+		t.Errorf("captured invoke output = %q, %v; want \"hello\", true", v, ok)
+	}
+
+	selfref, err := data.GetCommand("selfref")
+	if err != nil {
+		t.Fatalf("selfref missing: %v", err)
+	}
+	if err := executorEval(data, selfref); err == nil || !strings.Contains(err.Error(), "circular invoke") {
+		t.Errorf("expected circular invoke error, got %v", err)
+	}
+}
+
+func TestEnvBlock(t *testing.T) {
+	in := `build {
+    env { FOO=bar, BAZ=qux }
+    $ echo "env: $FOO $BAZ"
+}
+`
+	p := NewParserFromContent("t.constfile", in)
+	data, err := p.Parse()
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	cmd, err := data.GetCommand("build")
+	if err != nil {
+		t.Fatalf("build missing: %v", err)
+	}
+	if len(cmd.Body) != 2 || cmd.Body[0].Type != "env" {
+		t.Fatalf("env stmt not parsed: %+v", cmd.Body)
+	}
+	if len(cmd.Body[0].Env) != 2 || cmd.Body[0].Env[0] != "FOO=bar" {
+		t.Errorf("env pairs = %v", cmd.Body[0].Env)
+	}
+	if err := executorEval(data, cmd); err != nil {
+		t.Fatalf("exec: %v", err)
 	}
 }
 
@@ -665,7 +869,7 @@ func TestEscapeHatch(t *testing.T) {
 	p := &Parser{Data: &ParsedData{}}
 	p.Data.Variables = append(p.Data.Variables, &Variable{Name: "foo", Value: "F", Scope: "global"})
 	name, scope := "x", "global"
-	if got := p.tryEvalExpression(`a \&foo b \@HOME c \$5`, &name, &scope); got != `a &foo b @HOME c $5` {
+	if got := p.tryEvalExpression(`a \&foo b \@HOME c \$5`, &name, &scope, 1); got != `a &foo b @HOME c $5` {
 		t.Errorf("tryEvalExpression escape = %q", got)
 	}
 }
@@ -1091,7 +1295,7 @@ func TestCacheKeyIncludesArgs(t *testing.T) {
 	run("debug")
 	run("release")
 
-	fc := loadFileCache()
+	fc := loadFileCache(filepath.Join(dir, cacheDir))
 	if len(fc) != 2 {
 		t.Errorf("manifest has %d entries, want 2 (one per config)", len(fc))
 	}

@@ -23,6 +23,7 @@ construct Constfile-<name> <command>    # run a command
 | `Constfile-advanced-control` | Any | `else if` chains, logical operators (`&&`, `\|\|`, `!`, parens), error-tolerance marker (`!`), matrices, loop control, single-line blocks, `exists()`/`missing()`/`glob()`, loop index, numeric ranges, escape hatch |
 | `Constfile-parallel-build` | Any | DAG-parallel prerequisites (`--concurrent`), call-site `in <dir>` workdir overrides |
 | `Constfile-artifacts` (+ `example.env`) | Any | `produces` (make-style up-to-date checks), `--env-file` loading, `require()`, `--jobs`, `--watch` |
+| `Constfile-modern-features` (+ `Constfile-shared-lib`, `Constfile-shared-other`) | Multi-file | Namespaced imports (`import ... as ns`), doc comments (`--list`), per-command `env { }` blocks, `invoke` with output capture |
 
 ## Feature Coverage
 
@@ -46,5 +47,9 @@ construct Constfile-<name> <command>    # run a command
 - **Lazy variables (`$`)** — `Constfile-go-webapp`, `Constfile-python-project`, `Constfile-rust`
 - **Environment refs (`@`)** — `Constfile-python-project`, `Constfile-c-cpp`
 - **Imports (`import`)** — `Constfile-imports`
+- **Namespaced imports (`import ... as ns`)** — `Constfile-modern-features`
+- **Doc comments (`--list`)** — `Constfile-modern-features`
+- **Per-command `env { }` blocks** — `Constfile-modern-features`
+- **`invoke` with output capture** — `Constfile-modern-features`
 - **Error tolerance (`!`)** — `Constfile-advanced-control`
 - **DAG-parallel prerequisites** — `Constfile-parallel-build`

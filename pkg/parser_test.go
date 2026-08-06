@@ -419,7 +419,7 @@ func TestParseVariable(t *testing.T) {
 				Data:  &ParsedData{},
 				Lines: []string{},
 			}
-			err := parser.parseVar(tt.input, tt.expectScope)
+			err := parser.parseVar(tt.input, tt.expectScope, 1)
 			if err != nil {
 				t.Errorf("unexpected error: %v", err)
 			}
@@ -511,7 +511,7 @@ func TestParseCommand(t *testing.T) {
 				Lines: lines,
 			}
 
-			_, err := parser.parseCommand(0, tt.input, tt.isDefault)
+			_, err := parser.parseCommand(0, tt.input, tt.isDefault, 1, "")
 			if err != nil {
 				t.Errorf("unexpected error: %v", err)
 			}
@@ -555,7 +555,7 @@ func TestParseUnclosedBrace(t *testing.T) {
 		Lines: lines,
 	}
 
-	_, err := parser.parseCommand(0, input, false)
+	_, err := parser.parseCommand(0, input, false, 1, "")
 	if err == nil {
 		t.Errorf("expected error for unclosed brace, got nil")
 	}
@@ -764,7 +764,7 @@ func TestPrereqWhitespace(t *testing.T) {
 		Lines: lines,
 	}
 
-	_, err := parser.parseCommand(0, input, false)
+	_, err := parser.parseCommand(0, input, false, 1, "")
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}
@@ -828,7 +828,7 @@ func TestArgumentParsing(t *testing.T) {
 		Lines: lines,
 	}
 
-	_, err := parser.parseCommand(0, input, false)
+	_, err := parser.parseCommand(0, input, false, 1, "")
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}
@@ -870,7 +870,7 @@ func TestScopedVariableParsing(t *testing.T) {
 		Lines: lines,
 	}
 
-	_, err := parser.parseCommand(0, input, false)
+	_, err := parser.parseCommand(0, input, false, 1, "")
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}
@@ -894,13 +894,11 @@ func TestScopedVariableParsing(t *testing.T) {
 	}
 }
 
-// TestTryEvalExpression covers the three resolution forms (@env, &ref, and the
-// $ lazy command) plus plain-text passthrough.
 func TestTryEvalExpression(t *testing.T) {
 	t.Run("plain text passes through unchanged", func(t *testing.T) {
 		p := &Parser{Data: &ParsedData{}}
 		name, scope := "x", "global"
-		got := p.tryEvalExpression("hello world", &name, &scope)
+		got := p.tryEvalExpression("hello world", &name, &scope, 1)
 		if got != "hello world" {
 			t.Errorf("got %q, want %q", got, "hello world")
 		}
@@ -910,7 +908,7 @@ func TestTryEvalExpression(t *testing.T) {
 		t.Setenv("CONSTRUCT_TEST_ENV", "envvalue")
 		p := &Parser{Data: &ParsedData{}}
 		name, scope := "x", "global"
-		got := p.tryEvalExpression("v=@CONSTRUCT_TEST_ENV", &name, &scope)
+		got := p.tryEvalExpression("v=@CONSTRUCT_TEST_ENV", &name, &scope, 1)
 		if got != "v=envvalue" {
 			t.Errorf("got %q, want %q", got, "v=envvalue")
 		}
@@ -919,7 +917,7 @@ func TestTryEvalExpression(t *testing.T) {
 	t.Run("@env undefined expands to empty", func(t *testing.T) {
 		p := &Parser{Data: &ParsedData{}}
 		name, scope := "x", "global"
-		got := p.tryEvalExpression("[@CONSTRUCT_NOPE_NOT_SET]", &name, &scope)
+		got := p.tryEvalExpression("[@CONSTRUCT_NOPE_NOT_SET]", &name, &scope, 1)
 		if got != "[]" {
 			t.Errorf("got %q, want %q", got, "[]")
 		}
@@ -929,7 +927,7 @@ func TestTryEvalExpression(t *testing.T) {
 		p := &Parser{Data: &ParsedData{}}
 		p.Data.Variables = append(p.Data.Variables, &Variable{Name: "g", Value: "GVAL", Scope: "global"})
 		name, scope := "x", "global"
-		got := p.tryEvalExpression("&g!", &name, &scope)
+		got := p.tryEvalExpression("&g!", &name, &scope, 1)
 		if got != "GVAL!" {
 			t.Errorf("got %q, want %q", got, "GVAL!")
 		}
@@ -939,7 +937,7 @@ func TestTryEvalExpression(t *testing.T) {
 		p := &Parser{Data: &ParsedData{}}
 		p.Data.Variables = append(p.Data.Variables, &Variable{Name: "loc", Value: "LOCVAL", Scope: "mycmd"})
 		name, scope := "x", "mycmd"
-		got := p.tryEvalExpression("&loc", &name, &scope)
+		got := p.tryEvalExpression("&loc", &name, &scope, 1)
 		if got != "LOCVAL" {
 			t.Errorf("got %q, want %q", got, "LOCVAL")
 		}
@@ -949,7 +947,7 @@ func TestTryEvalExpression(t *testing.T) {
 		p := &Parser{Data: &ParsedData{}}
 		name, scope := "x", "global"
 		// The reference is consumed but resolves to nothing.
-		got := p.tryEvalExpression("a&missing b", &name, &scope)
+		got := p.tryEvalExpression("a&missing b", &name, &scope, 1)
 		if got != "a b" {
 			t.Errorf("got %q, want %q", got, "a b")
 		}
@@ -958,7 +956,7 @@ func TestTryEvalExpression(t *testing.T) {
 	t.Run("$ creates a lazy command and stops evaluation", func(t *testing.T) {
 		p := &Parser{Data: &ParsedData{}}
 		name, scope := "myvar", "global"
-		_ = p.tryEvalExpression("$ echo hi", &name, &scope)
+		_ = p.tryEvalExpression("$ echo hi", &name, &scope, 1)
 		if len(p.Data.Commands) != 1 {
 			t.Fatalf("expected 1 lazy command, got %d", len(p.Data.Commands))
 		}
@@ -978,7 +976,7 @@ func TestTryEvalExpression(t *testing.T) {
 	t.Run("$ without varName/context is treated as literal", func(t *testing.T) {
 		p := &Parser{Data: &ParsedData{}}
 		// No varName/scope => the $ branch is skipped, $ stays literal.
-		got := p.tryEvalExpression("$5", nil, nil)
+		got := p.tryEvalExpression("$5", nil, nil, 1)
 		if got != "$5" {
 			t.Errorf("got %q, want %q", got, "$5")
 		}
@@ -989,7 +987,7 @@ func TestTryEvalExpression(t *testing.T) {
 func TestParseVarValidation(t *testing.T) {
 	t.Run("name containing var is extracted correctly", func(t *testing.T) {
 		p := &Parser{Data: &ParsedData{}}
-		if err := p.parseVar("var var_name = x", "global"); err != nil {
+		if err := p.parseVar("var var_name = x", "global", 1); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 		if len(p.Data.Variables) != 1 {
@@ -1002,7 +1000,7 @@ func TestParseVarValidation(t *testing.T) {
 
 	t.Run("empty name returns an error", func(t *testing.T) {
 		p := &Parser{Data: &ParsedData{}}
-		err := p.parseVar("var = x", "global")
+		err := p.parseVar("var = x", "global", 1)
 		if err == nil {
 			t.Fatal("expected error for empty variable name, got nil")
 		}
@@ -1013,7 +1011,7 @@ func TestParseVarValidation(t *testing.T) {
 
 	t.Run("bare var with no equals creates empty-valued variable", func(t *testing.T) {
 		p := &Parser{Data: &ParsedData{}}
-		if err := p.parseVar("var onlyname", "global"); err != nil {
+		if err := p.parseVar("var onlyname", "global", 1); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 		if len(p.Data.Variables) != 1 || p.Data.Variables[0].Name != "onlyname" {
@@ -1061,7 +1059,7 @@ func TestParseCommandWorkDir(t *testing.T) {
 	lines := strings.Split(input, "\n")
 	parser := &Parser{Data: &ParsedData{}, Lines: lines}
 
-	if _, err := parser.parseCommand(0, input, false); err != nil {
+	if _, err := parser.parseCommand(0, input, false, 1, ""); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if len(parser.Data.Commands) != 1 {
@@ -1086,7 +1084,7 @@ func TestParseIfBlock(t *testing.T) {
 	lines := strings.Split(input, "\n")
 	parser := &Parser{Data: &ParsedData{}, Lines: lines}
 
-	if _, err := parser.parseCommand(0, "build {", false); err != nil {
+	if _, err := parser.parseCommand(0, "build {", false, 1, ""); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if len(parser.Data.Commands) != 1 {
@@ -1127,7 +1125,7 @@ func TestParseIfBlockNoElse(t *testing.T) {
 	lines := strings.Split(input, "\n")
 	parser := &Parser{Data: &ParsedData{}, Lines: lines}
 
-	if _, err := parser.parseCommand(0, "build {", false); err != nil {
+	if _, err := parser.parseCommand(0, "build {", false, 1, ""); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	cmd := parser.Data.Commands[0]
@@ -1151,7 +1149,7 @@ func TestParseForBlock(t *testing.T) {
 	lines := strings.Split(input, "\n")
 	parser := &Parser{Data: &ParsedData{}, Lines: lines}
 
-	if _, err := parser.parseCommand(0, "build {", false); err != nil {
+	if _, err := parser.parseCommand(0, "build {", false, 1, ""); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if len(parser.Data.Commands) != 1 {
@@ -1182,9 +1180,6 @@ func TestParseForBlock(t *testing.T) {
 	}
 }
 
-// TestParseForBlockWithIf verifies an if block nests inside a for loop.
-// Regression test: parseForBlock previously broke on any line starting with
-// '}', so a nested if's closing brace terminated the for early.
 func TestParseForBlockWithIf(t *testing.T) {
 	input := `build {
     for item in a, b {
@@ -1200,7 +1195,7 @@ func TestParseForBlockWithIf(t *testing.T) {
 	lines := strings.Split(input, "\n")
 	parser := &Parser{Data: &ParsedData{}, Lines: lines}
 
-	if _, err := parser.parseCommand(0, "build {", false); err != nil {
+	if _, err := parser.parseCommand(0, "build {", false, 1, ""); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	cmd := parser.Data.Commands[0]
@@ -1211,9 +1206,9 @@ func TestParseForBlockWithIf(t *testing.T) {
 	if cmd.Body[0].Type != "for" {
 		t.Fatalf("stmt[0] type = %q, want 'for'", cmd.Body[0].Type)
 	}
+
 	loopBody := cmd.Body[0].LoopBody
-	// Loop body should contain: [if, shell:tail] — proving the if's closing
-	// braces did NOT terminate the for, and the tail line is still inside.
+
 	if len(loopBody) != 2 {
 		t.Fatalf("expected 2 statements in loop body, got %d: %#v", len(loopBody), loopBody)
 	}
@@ -1247,7 +1242,7 @@ func TestParseForBlockNestedFor(t *testing.T) {
 	lines := strings.Split(input, "\n")
 	parser := &Parser{Data: &ParsedData{}, Lines: lines}
 
-	if _, err := parser.parseCommand(0, "build {", false); err != nil {
+	if _, err := parser.parseCommand(0, "build {", false, 1, ""); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	cmd := parser.Data.Commands[0]

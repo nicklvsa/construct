@@ -1,0 +1,10 @@
+var version = 9
+
+# Builds the other component.
+build {
+    $ echo "building other &version"
+}
+
+healthcheck {
+    $ echo "other healthy"
+}

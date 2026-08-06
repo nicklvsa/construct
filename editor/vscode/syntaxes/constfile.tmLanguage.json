@@ -39,7 +39,7 @@
 			"patterns": [
 				{
 					"name": "keyword.control.constfile",
-					"match": "\\b(opt|if|else|for|matrix|in|contains|import|continue|break|exists|missing|glob|require|produces)\\b"
+					"match": "\\b(opt|if|else|for|matrix|in|contains|import|continue|break|exists|missing|glob|require|produces|env|invoke)\\b"
 				}
 			]
 		},
@@ -211,6 +211,44 @@
 					"captures": {
 						"2": { "name": "keyword.control.constfile" },
 						"4": { "name": "entity.name.label.constfile" }
+					}
+				},
+				{
+					"comment": "env { KEY=value } block — scoped distinctly from shell text",
+					"name": "meta.block.env.constfile",
+					"begin": "^\\s*(env)(\\s*)(\\{)",
+					"beginCaptures": {
+						"1": { "name": "keyword.control.env.constfile" },
+						"3": { "name": "punctuation.definition.block.constfile" }
+					},
+					"end": "\\}",
+					"endCaptures": {
+						"0": { "name": "punctuation.definition.block.constfile" }
+					},
+					"patterns": [
+						{
+							"comment": "KEY=VALUE entry (single-line comma-separated and multi-line forms)",
+							"name": "meta.env-entry.constfile",
+							"match": "([A-Za-z_][A-Za-z0-9_]*)(\\s*)(=)(\\s*)([^,\\n}]*)(,?)",
+							"captures": {
+								"1": { "name": "variable.other.readwrite.constfile" },
+								"3": { "name": "keyword.operator.assignment.constfile" },
+								"5": { "name": "string.interpolated.constfile" },
+								"6": { "name": "punctuation.separator.comma.constfile" }
+							}
+						},
+						{ "include": "#comments" },
+						{ "include": "#var-ref" },
+						{ "include": "#env-ref" },
+						{ "include": "#strings" }
+					]
+				},
+				{
+					"comment": "invoke <command> — keyword plus highlighted target name. Stops at the target so a trailing 'as <name>' capture falls to the as-tag pattern.",
+					"match": "^\\s*(invoke)(\\s+)([A-Za-z_][A-Za-z0-9_.-]*)",
+					"captures": {
+						"1": { "name": "keyword.control.invoke.constfile" },
+						"3": { "name": "entity.name.type.constfile" }
 					}
 				},
 				{ "include": "#keywords" },

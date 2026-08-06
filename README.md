@@ -31,7 +31,8 @@ construct [options] [Constfile] [commands...]
 | `--debug` | Enable debug mode for verbose output |
 | `--concurrent` | Execute commands and their prerequisites concurrently (DAG-parallel) |
 | `--jobs N` | Cap parallel commands (implies `--concurrent`) |
-| `--watch` | Rerun when the Constfile or its dependencies change |
+| `--watch` | Rerun when the Constfile, its imports, or its dependencies change |
+| `--choose` | Interactively select targets to run |
 | `--dry-run` | Show commands without executing them |
 | `--list` | List all available commands |
 | `--env-file PATH` | Load environment variables from a dotenv-style file |
@@ -113,6 +114,96 @@ deploy < build {
 
 Import paths resolve relative to the importing file. Imports can import other
 files; circular imports and duplicate command names are errors.
+
+#### Namespaced imports
+
+To merge two Constfiles that define same-named commands, give the import a
+namespace. Every command, variable, and reference inside becomes
+`ns.name`:
+
+```
+import "lib.constfile" as lib
+import "other.constfile" as other
+
+deploy < lib.build {
+    $ echo "lib version: &lib.version"
+    $ echo "other version: &other.version"
+}
+```
+
+- Commands are renamed (`lib.build`), so both files can define `build`.
+- Global variables are renamed (`lib.version`); reference them as `&lib.version`.
+- Prerequisites, `invoke` targets, and prereq outputs inside the imported file
+  are rewritten automatically (`&gen.0` becomes `&lib.gen.0`).
+- References to *local* variables (scoped to a command or a loop) are left
+  alone, so shadowing keeps working.
+- The same file may be imported twice under different namespaces.
+- Nested namespaces compose: `lib` importing `sub` as `sub` yields `lib.sub.*`.
+
+### Doc Comments
+
+A `#` or `//` comment directly above a command becomes its description,
+shown by `construct --list`:
+
+```
+# Builds the app and bundles assets
+build {
+    $ go build -o app .
+}
+```
+
+### Per-Command Environment
+
+Set environment variables for the rest of the enclosing command body with an
+`env` block — single-line (comma-separated) or multi-line:
+
+```
+test {
+    env { CI=true, RETRIES=3 }
+    $ pytest
+}
+
+deploy {
+    env {
+        REGION=us-east-1
+        PROFILE=prod
+    }
+    if "@REGION" == "us-east-1" {
+        $ aws deploy --region &REGION
+    }
+}
+```
+
+Values may reference `&variables` and `@env` refs; they are visible both to
+child processes and to later `@NAME` references and conditions in the same
+command. `env` blocks apply from their position to the end of the command
+body (including nested `if`/`for` blocks).
+
+### Invoke
+
+`invoke <command>` runs another command's body inline, imperatively — unlike a
+prerequisite, no dependency tracking happens and it can be placed anywhere,
+including inside conditionals. The invoked body executes in the caller's
+scope, so it can see the caller's variables, arguments, and loop variables:
+
+```
+gen {
+    $ echo line-one
+    $ echo line-two
+}
+
+use {
+    invoke gen                    # streams to stdout
+    invoke gen as lines           # captures output into &lines
+    for l in &lines {
+        $ echo "captured: &l"
+    }
+}
+```
+
+`invoke` only runs the body; prerequisites, file deps, and up-to-date checks
+of the invoked command are ignored. Self-referential or circular invokes are
+rejected.
 
 ### Variable Scopes
 
@@ -397,3 +488,7 @@ Construct validates:
 - Circular dependencies in prerequisites
 - Missing prerequisite commands
 - Unclosed command blocks
+
+Failures are reported with their source location, e.g.
+`Constfile:42: command '...' failed (exit 1)` — the file and line of the
+failing statement — and parse errors include the offending line.

@@ -1,11 +1,13 @@
 package main
 
 import (
+	"bufio"
 	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -28,6 +30,7 @@ type options struct {
 	dryRun      bool
 	showList    bool
 	watch       bool
+	choose      bool
 	jobs        int
 	envFile     string
 	overrides   []string
@@ -49,6 +52,7 @@ Options:
   --concurrent      Execute commands and their prerequisites concurrently
   --jobs N          Max parallel commands (implies --concurrent)
   --watch           Rerun when the Constfile or dependencies change
+  --choose          Interactively select targets to run
   --dry-run         Show commands without executing them
   --list            List all available commands
   -e, --env k=v     Override a variable (repeatable)
@@ -75,16 +79,27 @@ func fileExists(path string) bool {
 	return err == nil
 }
 
+// isLazyName reports whether a command is an internal lazy-eval helper
+// (possibly prefixed by an import namespace, e.g. "lib.__lazy_x_global").
+func isLazyName(name string) bool {
+	return strings.HasPrefix(name, "__lazy_") || strings.Contains(name, ".__lazy_")
+}
+
 func listCommands(data *pkg.ParsedData) {
 	fmt.Println("Available commands:")
 	for _, cmd := range data.Commands {
-		if cmd.Name == "_" || strings.HasPrefix(cmd.Name, "__lazy_") {
+		if cmd.Name == "_" || isLazyName(cmd.Name) {
 			continue
 		}
 		if cmd.IsDefault {
 			fmt.Printf("  %s (default)\n", cmd.Name)
 		} else {
 			fmt.Printf("  %s\n", cmd.Name)
+		}
+		if cmd.Description != "" {
+			for _, l := range strings.Split(cmd.Description, "\n") {
+				fmt.Printf("    %s\n", l)
+			}
 		}
 		if cmd.WorkDir != "" {
 			fmt.Printf("    Working dir: %s\n", cmd.WorkDir)
@@ -134,6 +149,10 @@ func printDryRunBody(body []pkg.BodyStatement, indent int) {
 			fmt.Printf("%s}\n", prefix)
 		case "continue", "break":
 			fmt.Printf("%s%s\n", prefix, stmt.Type)
+		case "invoke":
+			fmt.Printf("%sinvoke %s\n", prefix, stmt.Shell)
+		case "env":
+			fmt.Printf("%senv { %s }\n", prefix, strings.Join(stmt.Env, ", "))
 		default:
 			fmt.Printf("%s%s\n", prefix, stmt.Shell)
 		}
@@ -173,9 +192,68 @@ func defineFlags(fs *flag.FlagSet, o *options) {
 	fs.BoolVar(&o.concurrent, "concurrent", false, "Run concurrently")
 	fs.BoolVar(&o.dryRun, "dry-run", false, "Dry run")
 	fs.BoolVar(&o.watch, "watch", false, "Rerun when files change")
+	fs.BoolVar(&o.choose, "choose", false, "Interactively select targets")
 	fs.IntVar(&o.jobs, "jobs", 0, "Max parallel commands (0 = unlimited)")
 	fs.StringVar(&o.envFile, "env-file", "", "Load environment from file")
 	fs.StringArrayVarP(&o.overrides, "env", "e", []string{}, "Override variable (key=value)")
+}
+
+// chooseTargets interactively prompts for which commands to run, accepting
+// comma/space-separated numbers or names. An empty answer runs the default
+// command; an invalid token re-prompts.
+func chooseTargets(data *pkg.ParsedData) ([]string, error) {
+	var names []string
+	for _, cmd := range data.Commands {
+		if cmd.Name == "_" || isLazyName(cmd.Name) {
+			continue
+		}
+		names = append(names, cmd.Name)
+	}
+	if len(names) == 0 {
+		return nil, fmt.Errorf("no commands to choose from")
+	}
+
+	reader := bufio.NewReader(os.Stdin)
+	for {
+		fmt.Println("Select targets (numbers or names; empty = default):")
+		for i, n := range names {
+			fmt.Printf("  %d. %s\n", i+1, n)
+		}
+		fmt.Print("> ")
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			return nil, err // EOF / Ctrl-D aborts
+		}
+
+		var selected []string
+		invalid := false
+		for _, tok := range strings.FieldsFunc(strings.TrimSpace(line), func(r rune) bool {
+			return r == ',' || r == ' ' || r == '\t'
+		}) {
+			tok = strings.TrimSpace(tok)
+			if tok == "" {
+				continue
+			}
+			if idx, err := strconv.Atoi(tok); err == nil {
+				if idx < 1 || idx > len(names) {
+					fmt.Fprintf(os.Stderr, "invalid target %q (1-%d)\n", tok, len(names))
+					invalid = true
+					break
+				}
+				selected = append(selected, names[idx-1])
+			} else if _, err := data.GetCommand(tok); err == nil {
+				selected = append(selected, tok)
+			} else {
+				fmt.Fprintf(os.Stderr, "unknown target %q\n", tok)
+				invalid = true
+				break
+			}
+		}
+		if invalid {
+			continue
+		}
+		return selected, nil // empty selection => default command
+	}
 }
 
 func executeBuild(inputs *ConstructInput, o *options) ([]string, error) {
@@ -231,10 +309,20 @@ func executeBuild(inputs *ConstructInput, o *options) ([]string, error) {
 		return nil, nil
 	}
 
+	// Interactive picking only makes sense for a single run, not per
+	// iteration of --watch.
+	if o.choose && !o.dryRun && !o.watch {
+		chosen, err := chooseTargets(data)
+		if err != nil {
+			return nil, err
+		}
+		inputs.Commands = chosen
+	}
+
 	if o.dryRun {
 		fmt.Println("Dry run mode - commands that would be executed:")
 		for _, cmd := range data.Commands {
-			if strings.HasPrefix(cmd.Name, "__lazy_") {
+			if isLazyName(cmd.Name) {
 				continue
 			}
 			if len(inputs.Commands) == 0 || slices.Contains(inputs.Commands, cmd.Name) {
@@ -263,6 +351,11 @@ func executeBuild(inputs *ConstructInput, o *options) ([]string, error) {
 func collectWatchFiles(fileName string, data *pkg.ParsedData) []string {
 	baseDir := filepath.Dir(fileName)
 	files := []string{fileName}
+	for _, sf := range data.SourceFiles {
+		if sf != fileName {
+			files = append(files, sf)
+		}
+	}
 	for _, cmd := range data.Commands {
 		for _, pat := range append(append([]string{}, cmd.FileDeps...), cmd.Produces...) {
 			full := filepath.Join(baseDir, pat)

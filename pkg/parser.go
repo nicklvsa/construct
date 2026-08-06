@@ -15,6 +15,8 @@ type ParsedData struct {
 	Variables []*Variable `json:"variables"`
 	Commands  []*Command  `json:"commands"`
 
+	SourceFiles []string `json:"source_files,omitempty"`
+
 	variableMap map[string]*Variable // key: "scope.name"
 	commandMap  map[string]*Command  // key: command name
 
@@ -198,7 +200,7 @@ type LazyOutput struct {
 }
 
 type BodyStatement struct {
-	Type       string          `json:"type"` // "shell", "if", or "for"
+	Type       string          `json:"type"` // "shell", "if", "for", "invoke", or "env"
 	Shell      string          `json:"shell,omitempty"`
 	OutputName string          `json:"output_name,omitempty"`
 	Cond       string          `json:"cond,omitempty"`
@@ -208,6 +210,8 @@ type BodyStatement struct {
 	LoopIndex  string          `json:"loop_index,omitempty"`
 	LoopItems  string          `json:"loop_items,omitempty"`
 	LoopBody   []BodyStatement `json:"loop_body,omitempty"`
+	Env        []string        `json:"env,omitempty"`
+	SourceLine int             `json:"source_line,omitempty"`
 }
 
 type Command struct {
@@ -227,6 +231,8 @@ type Command struct {
 	PrereqCmds      []*Command        `json:"prereq_cmds"`
 	WorkDir         string            `json:"work_dir"`
 	Body            []BodyStatement   `json:"body"`
+	SourceLine      int               `json:"source_line,omitempty"`
+	Description     string            `json:"description,omitempty"`
 }
 
 func NewParser(file string) (*Parser, error) {
@@ -264,7 +270,7 @@ func (p *Parser) findVariable(varName string, scope *string) (*Variable, error) 
 	return nil, fmt.Errorf("cannot find %s", varName)
 }
 
-func (p *Parser) tryEvalExpression(expression string, varName *string, varScope *string) string {
+func (p *Parser) tryEvalExpression(expression string, varName *string, varScope *string, lineNum int) string {
 	expression = strings.TrimSpace(expression)
 
 	var result strings.Builder
@@ -324,9 +330,11 @@ func (p *Parser) tryEvalExpression(expression string, varName *string, varScope 
 		if char == '$' && varName != nil && varScope != nil {
 			restOfLine := strings.TrimSpace(string(runes[i+1:]))
 			p.Data.Commands = append(p.Data.Commands, &Command{
-				Name:     fmt.Sprintf("__lazy_%s_%s", *varName, *varScope),
-				LazyEval: &LazyOutput{VarName: *varName, Scope: *varScope},
-				Body:     []BodyStatement{{Type: "shell", Shell: fmt.Sprintf("$ %s", restOfLine)}},
+				Name:       fmt.Sprintf("__lazy_%s_%s", *varName, *varScope),
+				LazyEval:   &LazyOutput{VarName: *varName, Scope: *varScope},
+				Body:       []BodyStatement{{Type: "shell", Shell: fmt.Sprintf("$ %s", restOfLine), SourceLine: lineNum}},
+				SourceLine: lineNum,
+				SourceFile: p.InputFile,
 			})
 			i = len(runes)
 			continue
@@ -339,7 +347,7 @@ func (p *Parser) tryEvalExpression(expression string, varName *string, varScope 
 	return result.String()
 }
 
-func (p *Parser) parseVar(line string, scope string) error {
+func (p *Parser) parseVar(line string, scope string, lineNum int) error {
 	pieces := strings.SplitN(line, "=", 2)
 
 	variableName := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(pieces[0]), "var"))
@@ -349,7 +357,7 @@ func (p *Parser) parseVar(line string, scope string) error {
 
 	var variableValue string
 	if len(pieces) > 1 {
-		variableValue = p.tryEvalExpression(pieces[1], &variableName, &scope)
+		variableValue = p.tryEvalExpression(pieces[1], &variableName, &scope, lineNum)
 	}
 
 	p.Data.Variables = append(p.Data.Variables, &Variable{
@@ -376,8 +384,6 @@ func parseCommandName(line string) string {
 		}
 	}
 
-	// Find the earliest terminator: (, <, {, " in " workdir modifier, or
-	// " produces " output clause.
 	inIdx := strings.Index(line, " in ")
 	prodIdx := findProducesIdx(line)
 	terminators := []rune{'(', '<', '{'}
@@ -595,13 +601,19 @@ func isFileDep(token string) bool {
 	return false
 }
 
-func (p *Parser) parseCommandBody(startIdx int, commandName string) ([]string, int, error) {
-	var body []string
+type rawLine struct {
+	text string
+	num  int
+}
+
+func (p *Parser) parseCommandBody(startIdx int, commandName string) ([]rawLine, int, error) {
+	var body []rawLine
 	depth := 0
 
 	for i := startIdx; i < len(p.Lines); i++ {
 		line := p.Lines[i]
 		trimmedLine := strings.TrimSpace(line)
+		lineNum := i + 1
 
 		opens := strings.Count(trimmedLine, "{")
 		closes := strings.Count(trimmedLine, "}")
@@ -609,6 +621,7 @@ func (p *Parser) parseCommandBody(startIdx int, commandName string) ([]string, i
 		isIfHeader := strings.HasPrefix(trimmedLine, "if ") && opens > 0
 		isForHeader := strings.HasPrefix(trimmedLine, "for ") && opens > 0
 		isMatrixHeader := strings.HasPrefix(trimmedLine, "matrix ") && opens > 0
+		isEnvHeader := strings.HasPrefix(trimmedLine, "env ") && opens > 0
 		isElseCompound := strings.HasPrefix(trimmedLine, "}") && strings.Contains(trimmedLine, "else")
 
 		if isElseCompound {
@@ -616,21 +629,21 @@ func (p *Parser) parseCommandBody(startIdx int, commandName string) ([]string, i
 				depth-- // close then-block
 			}
 			depth++ // open else-block
-			body = append(body, trimmedLine)
+			body = append(body, rawLine{text: trimmedLine, num: lineNum})
 			continue
 		}
 
 		if strings.HasPrefix(trimmedLine, "}") {
 			if depth > 0 {
 				depth--
-				body = append(body, trimmedLine)
+				body = append(body, rawLine{text: trimmedLine, num: lineNum})
 				continue
 			}
 
 			return body, i + 1, nil
 		}
 
-		if isIfHeader || isForHeader || isMatrixHeader {
+		if isIfHeader || isForHeader || isMatrixHeader || isEnvHeader {
 			depth += opens - closes
 		}
 
@@ -638,17 +651,18 @@ func (p *Parser) parseCommandBody(startIdx int, commandName string) ([]string, i
 			continue
 		}
 
-		body = append(body, trimmedLine)
+		body = append(body, rawLine{text: trimmedLine, num: lineNum})
 	}
 
 	return nil, startIdx, fmt.Errorf("unclosed command body for '%s' (missing '}')", commandName)
 }
 
-func (p *Parser) parseBodyStatements(raw []string, scope string) ([]BodyStatement, error) {
+func (p *Parser) parseBodyStatements(raw []rawLine, scope string) ([]BodyStatement, error) {
 	var stmts []BodyStatement
 	i := 0
 	for i < len(raw) {
-		line := raw[i]
+		line := raw[i].text
+		lineNum := raw[i].num
 
 		line = stripInlineComment(line)
 		if line == "" {
@@ -657,7 +671,7 @@ func (p *Parser) parseBodyStatements(raw []string, scope string) ([]BodyStatemen
 		}
 
 		if strings.HasPrefix(line, "var ") || strings.HasPrefix(line, "var\t") {
-			if err := p.parseVar(line, scope); err != nil {
+			if err := p.parseVar(line, scope, lineNum); err != nil {
 				return nil, err
 			}
 			i++
@@ -695,28 +709,54 @@ func (p *Parser) parseBodyStatements(raw []string, scope string) ([]BodyStatemen
 			continue
 		}
 
+		if strings.HasPrefix(line, "env ") && strings.Contains(line, "{") {
+			stmt, consumed, err := p.parseEnvBlock(raw[i:])
+			if err != nil {
+				return nil, err
+			}
+			stmts = append(stmts, stmt)
+			i += consumed
+			continue
+		}
+
+		if strings.HasPrefix(line, "invoke ") {
+			rest := strings.TrimSpace(line[len("invoke "):])
+			name, outputName := extractOutputName(rest)
+			name = strings.TrimSpace(name)
+			if name == "" {
+				return nil, fmt.Errorf("invoke requires a command name")
+			}
+			stmts = append(stmts, BodyStatement{Type: "invoke", Shell: name, OutputName: outputName, SourceLine: lineNum})
+			i++
+			continue
+		}
+
 		if strings.HasPrefix(line, "continue if ") {
 			cond := strings.TrimSpace(line[len("continue if "):])
 			stmts = append(stmts, BodyStatement{
-				Type:     "if",
-				Cond:     cond,
-				ThenBody: []BodyStatement{{Type: "continue"}},
+				Type:       "if",
+				Cond:       cond,
+				ThenBody:   []BodyStatement{{Type: "continue", SourceLine: lineNum}},
+				SourceLine: lineNum,
 			})
 			i++
 			continue
 		}
+
 		if strings.HasPrefix(line, "break if ") {
 			cond := strings.TrimSpace(line[len("break if "):])
 			stmts = append(stmts, BodyStatement{
-				Type:     "if",
-				Cond:     cond,
-				ThenBody: []BodyStatement{{Type: "break"}},
+				Type:       "if",
+				Cond:       cond,
+				ThenBody:   []BodyStatement{{Type: "break", SourceLine: lineNum}},
+				SourceLine: lineNum,
 			})
 			i++
 			continue
 		}
+
 		if line == "continue" || line == "break" {
-			stmts = append(stmts, BodyStatement{Type: line})
+			stmts = append(stmts, BodyStatement{Type: line, SourceLine: lineNum})
 			i++
 			continue
 		}
@@ -727,7 +767,7 @@ func (p *Parser) parseBodyStatements(raw []string, scope string) ([]BodyStatemen
 		}
 
 		shell, outputName := extractOutputName(line)
-		stmts = append(stmts, BodyStatement{Type: "shell", Shell: shell, OutputName: outputName})
+		stmts = append(stmts, BodyStatement{Type: "shell", Shell: shell, OutputName: outputName, SourceLine: lineNum})
 		i++
 	}
 	return stmts, nil
@@ -827,20 +867,30 @@ func splitSingleLineIf(line string) (string, string, bool) {
 	return "", "", false
 }
 
-func (p *Parser) parseIfBlock(raw []string, scope string) (BodyStatement, int, error) {
-	header := raw[0]
+// atLine tags each statement string with the source line it came from.
+func atLine(texts []string, num int) []rawLine {
+	out := make([]rawLine, len(texts))
+	for i, t := range texts {
+		out[i] = rawLine{text: t, num: num}
+	}
+	return out
+}
+
+func (p *Parser) parseIfBlock(raw []rawLine, scope string) (BodyStatement, int, error) {
+	header := raw[0].text
+	headerNum := raw[0].num
 	cond := extractIfCondition(header)
 
 	if then, elsePart, ok := splitSingleLineIf(header); ok {
-		thenStmts, err := p.parseBodyStatements(splitStatements(then), scope)
+		thenStmts, err := p.parseBodyStatements(atLine(splitStatements(then), headerNum), scope)
 		if err != nil {
 			return BodyStatement{}, 0, err
 		}
-		stmt := BodyStatement{Type: "if", Cond: cond, ThenBody: thenStmts}
+		stmt := BodyStatement{Type: "if", Cond: cond, ThenBody: thenStmts, SourceLine: headerNum}
 		switch {
 		case elsePart == "":
 		case strings.HasPrefix(elsePart, "else if "):
-			inner, _, err := p.parseIfBlock([]string{elsePart}, scope)
+			inner, _, err := p.parseIfBlock(atLine([]string{elsePart}, headerNum), scope)
 			if err != nil {
 				return BodyStatement{}, 0, err
 			}
@@ -850,7 +900,7 @@ func (p *Parser) parseIfBlock(raw []string, scope string) (BodyStatement, int, e
 			if !ok {
 				return BodyStatement{}, 0, fmt.Errorf("malformed single-line else: %q", elsePart)
 			}
-			elseStmts, err := p.parseBodyStatements(splitStatements(body), scope)
+			elseStmts, err := p.parseBodyStatements(atLine(splitStatements(body), headerNum), scope)
 			if err != nil {
 				return BodyStatement{}, 0, err
 			}
@@ -859,18 +909,19 @@ func (p *Parser) parseIfBlock(raw []string, scope string) (BodyStatement, int, e
 		return stmt, 1, nil
 	}
 
-	var thenLines []string
+	var thenLines []rawLine
 	consumed := 1
 	depth := 0
 	for consumed < len(raw) {
 		l := raw[consumed]
-		trimmed := strings.TrimSpace(l)
+		trimmed := strings.TrimSpace(l.text)
 
 		isInnerIf := strings.HasPrefix(trimmed, "if ") && strings.Contains(trimmed, "{")
 		isInnerFor := strings.HasPrefix(trimmed, "for ") && strings.Contains(trimmed, "{")
+		isInnerEnv := strings.HasPrefix(trimmed, "env ") && strings.Contains(trimmed, "{")
 		isElseCompound := strings.HasPrefix(trimmed, "}") && strings.Contains(trimmed, "else")
 
-		if isInnerIf || isInnerFor {
+		if isInnerIf || isInnerFor || isInnerEnv {
 			depth += strings.Count(trimmed, "{") - strings.Count(trimmed, "}")
 		}
 
@@ -906,12 +957,14 @@ func (p *Parser) parseIfBlock(raw []string, scope string) (BodyStatement, int, e
 	}
 
 	stmt := BodyStatement{
-		Type:     "if",
-		Cond:     cond,
-		ThenBody: thenStmts,
+		Type:       "if",
+		Cond:       cond,
+		ThenBody:   thenStmts,
+		SourceLine: headerNum,
 	}
 
-	closingLine := strings.TrimSpace(raw[consumed])
+	closing := raw[consumed]
+	closingLine := strings.TrimSpace(closing.text)
 	hasElse := strings.Contains(closingLine, "else")
 
 	if hasElse {
@@ -919,7 +972,7 @@ func (p *Parser) parseIfBlock(raw []string, scope string) (BodyStatement, int, e
 		rest := strings.TrimSpace(strings.TrimPrefix(closingLine, "}"))
 
 		if strings.HasPrefix(rest, "else if ") || rest == "else if" {
-			nestedRaw := append([]string{rest}, raw[consumed:]...)
+			nestedRaw := append(atLine([]string{rest}, closing.num), raw[consumed:]...)
 			elseIfStmt, elseConsumed, err := p.parseIfBlock(nestedRaw, scope)
 			if err != nil {
 				return BodyStatement{}, 0, err
@@ -929,16 +982,17 @@ func (p *Parser) parseIfBlock(raw []string, scope string) (BodyStatement, int, e
 			return stmt, consumed, nil
 		}
 
-		var elseLines []string
+		var elseLines []rawLine
 		depth := 0
 		for consumed < len(raw) {
 			l := raw[consumed]
-			trimmed := strings.TrimSpace(l)
+			trimmed := strings.TrimSpace(l.text)
 
 			isInnerIf := strings.HasPrefix(trimmed, "if ") && strings.Contains(trimmed, "{")
 			isInnerFor := strings.HasPrefix(trimmed, "for ") && strings.Contains(trimmed, "{")
+			isInnerEnv := strings.HasPrefix(trimmed, "env ") && strings.Contains(trimmed, "{")
 
-			if isInnerIf || isInnerFor {
+			if isInnerIf || isInnerFor || isInnerEnv {
 				depth += strings.Count(trimmed, "{") - strings.Count(trimmed, "}")
 			}
 
@@ -971,8 +1025,76 @@ func (p *Parser) parseIfBlock(raw []string, scope string) (BodyStatement, int, e
 	return stmt, consumed, nil
 }
 
-func (p *Parser) parseForBlock(raw []string, scope string) (BodyStatement, int, error) {
-	header := strings.TrimSpace(raw[0])
+func splitEnvPairs(s string) []string {
+	var out []string
+	inQuote := false
+	start := 0
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case '"':
+			inQuote = !inQuote
+		case ',':
+			if !inQuote {
+				out = append(out, strings.TrimSpace(s[start:i]))
+				start = i + 1
+			}
+		}
+	}
+	out = append(out, strings.TrimSpace(s[start:]))
+	return out
+}
+
+func parseEnvPairs(pairs []string) ([]string, error) {
+	var out []string
+	for _, pair := range pairs {
+		pair = strings.TrimSpace(pair)
+		if pair == "" {
+			continue
+		}
+		if !strings.Contains(pair, "=") {
+			return nil, fmt.Errorf("invalid env declaration %q (expected KEY=VALUE)", pair)
+		}
+		out = append(out, pair)
+	}
+	return out, nil
+}
+
+func (p *Parser) parseEnvBlock(raw []rawLine) (BodyStatement, int, error) {
+	headerLine := raw[0]
+	stmt := BodyStatement{Type: "env", SourceLine: headerLine.num}
+
+	if body, ok := singleLineBody(headerLine.text); ok {
+		pairs, err := parseEnvPairs(splitEnvPairs(body))
+		if err != nil {
+			return BodyStatement{}, 0, err
+		}
+		stmt.Env = pairs
+		return stmt, 1, nil
+	}
+
+	lines, endIdx, err := collectBodyLines(raw, 1)
+	if err != nil {
+		return BodyStatement{}, 0, fmt.Errorf("unclosed env block (missing '}')")
+	}
+	var pairs []string
+	for _, l := range lines {
+		l.text = stripInlineComment(l.text)
+		if strings.TrimSpace(l.text) == "" {
+			continue
+		}
+		pairs = append(pairs, l.text)
+	}
+	parsed, err := parseEnvPairs(pairs)
+	if err != nil {
+		return BodyStatement{}, 0, err
+	}
+	stmt.Env = parsed
+	return stmt, endIdx, nil
+}
+
+func (p *Parser) parseForBlock(raw []rawLine, scope string) (BodyStatement, int, error) {
+	headerLine := raw[0]
+	header := strings.TrimSpace(headerLine.text)
 	header = strings.TrimPrefix(header, "for")
 
 	before, _, ok := strings.Cut(header, "{")
@@ -1000,17 +1122,18 @@ func (p *Parser) parseForBlock(raw []string, scope string) (BodyStatement, int, 
 	}
 
 	// Single-line block: "for x in a, b { stmt }".
-	if body, ok := singleLineBody(raw[0]); ok {
-		bodyStmts, err := p.parseBodyStatements(splitStatements(body), scope)
+	if body, ok := singleLineBody(raw[0].text); ok {
+		bodyStmts, err := p.parseBodyStatements(atLine(splitStatements(body), headerLine.num), scope)
 		if err != nil {
 			return BodyStatement{}, 0, err
 		}
 		return BodyStatement{
-			Type:      "for",
-			LoopVar:   loopVar,
-			LoopIndex: loopIndex,
-			LoopItems: loopItems,
-			LoopBody:  bodyStmts,
+			Type:       "for",
+			LoopVar:    loopVar,
+			LoopIndex:  loopIndex,
+			LoopItems:  loopItems,
+			LoopBody:   bodyStmts,
+			SourceLine: headerLine.num,
 		}, 1, nil
 	}
 
@@ -1025,17 +1148,19 @@ func (p *Parser) parseForBlock(raw []string, scope string) (BodyStatement, int, 
 	}
 
 	stmt := BodyStatement{
-		Type:      "for",
-		LoopVar:   loopVar,
-		LoopIndex: loopIndex,
-		LoopItems: loopItems,
-		LoopBody:  bodyStmts,
+		Type:       "for",
+		LoopVar:    loopVar,
+		LoopIndex:  loopIndex,
+		LoopItems:  loopItems,
+		LoopBody:   bodyStmts,
+		SourceLine: headerLine.num,
 	}
 	return stmt, endIdx, nil
 }
 
-func (p *Parser) parseMatrixBlock(raw []string, scope string) (BodyStatement, int, error) {
-	header := strings.TrimSpace(raw[0])
+func (p *Parser) parseMatrixBlock(raw []rawLine, scope string) (BodyStatement, int, error) {
+	headerLine := raw[0]
+	header := strings.TrimSpace(headerLine.text)
 	header = strings.TrimPrefix(header, "matrix")
 
 	before, _, ok := strings.Cut(header, "{")
@@ -1060,24 +1185,25 @@ func (p *Parser) parseMatrixBlock(raw []string, scope string) (BodyStatement, in
 		items = append(items, it)
 	}
 
-	// Single-line block: "matrix ... { stmt }".
-	if body, ok := singleLineBody(raw[0]); ok {
-		bodyStmts, err := p.parseBodyStatements(splitStatements(body), scope)
+	if body, ok := singleLineBody(raw[0].text); ok {
+		bodyStmts, err := p.parseBodyStatements(atLine(splitStatements(body), headerLine.num), scope)
 		if err != nil {
 			return BodyStatement{}, 0, err
 		}
 		stmt := BodyStatement{
-			Type:      "for",
-			LoopVar:   vars[len(vars)-1],
-			LoopItems: items[len(items)-1],
-			LoopBody:  bodyStmts,
+			Type:       "for",
+			LoopVar:    vars[len(vars)-1],
+			LoopItems:  items[len(items)-1],
+			LoopBody:   bodyStmts,
+			SourceLine: headerLine.num,
 		}
 		for i := len(vars) - 2; i >= 0; i-- {
 			stmt = BodyStatement{
-				Type:      "for",
-				LoopVar:   vars[i],
-				LoopItems: items[i],
-				LoopBody:  []BodyStatement{stmt},
+				Type:       "for",
+				LoopVar:    vars[i],
+				LoopItems:  items[i],
+				LoopBody:   []BodyStatement{stmt},
+				SourceLine: headerLine.num,
 			}
 		}
 		return stmt, 1, nil
@@ -1094,28 +1220,31 @@ func (p *Parser) parseMatrixBlock(raw []string, scope string) (BodyStatement, in
 	}
 
 	stmt := BodyStatement{
-		Type:      "for",
-		LoopVar:   vars[len(vars)-1],
-		LoopItems: items[len(items)-1],
-		LoopBody:  bodyStmts,
+		Type:       "for",
+		LoopVar:    vars[len(vars)-1],
+		LoopItems:  items[len(items)-1],
+		LoopBody:   bodyStmts,
+		SourceLine: headerLine.num,
 	}
+
 	for i := len(vars) - 2; i >= 0; i-- {
 		stmt = BodyStatement{
-			Type:      "for",
-			LoopVar:   vars[i],
-			LoopItems: items[i],
-			LoopBody:  []BodyStatement{stmt},
+			Type:       "for",
+			LoopVar:    vars[i],
+			LoopItems:  items[i],
+			LoopBody:   []BodyStatement{stmt},
+			SourceLine: headerLine.num,
 		}
 	}
 	return stmt, endIdx, nil
 }
 
-func collectBodyLines(raw []string, start int) ([]string, int, error) {
-	var lines []string
+func collectBodyLines(raw []rawLine, start int) ([]rawLine, int, error) {
+	var lines []rawLine
 	depth := 0
 	for start < len(raw) {
 		l := raw[start]
-		trimmed := strings.TrimSpace(l)
+		trimmed := strings.TrimSpace(l.text)
 
 		// Net-brace accounting: "if x { stmt }" opens and closes on one line.
 		if isNestedBlockHeader(trimmed) {
@@ -1141,7 +1270,7 @@ func collectBodyLines(raw []string, start int) ([]string, int, error) {
 }
 
 func isNestedBlockHeader(t string) bool {
-	return (strings.HasPrefix(t, "if ") || strings.HasPrefix(t, "for ") || strings.HasPrefix(t, "matrix ")) && strings.Contains(t, "{")
+	return (strings.HasPrefix(t, "if ") || strings.HasPrefix(t, "for ") || strings.HasPrefix(t, "matrix ") || strings.HasPrefix(t, "env ")) && strings.Contains(t, "{")
 }
 
 func extractIfCondition(line string) string {
@@ -1168,7 +1297,7 @@ func extractIfCondition(line string) string {
 	return line
 }
 
-func (p *Parser) parseCommand(idx int, line string, isDefault bool) (int, error) {
+func (p *Parser) parseCommand(idx int, line string, isDefault bool, lineNum int, description string) (int, error) {
 	trimmedLine := strings.TrimSpace(line)
 	if !strings.Contains(trimmedLine, "{") {
 		return 0, nil
@@ -1204,6 +1333,8 @@ func (p *Parser) parseCommand(idx int, line string, isDefault bool) (int, error)
 		p.Data.Commands = append(p.Data.Commands, &Command{
 			Name:            commandName,
 			SourceFile:      p.InputFile,
+			SourceLine:      lineNum,
+			Description:     description,
 			CloudAccessible: cloudAccessible,
 			IsDefault:       isDefault,
 			Arguments:       commandArgs,
@@ -1225,9 +1356,14 @@ func (p *Parser) detectCircularDependencies() error {
 	var visit func(cmdName string, path []string) error
 	visit = func(cmdName string, path []string) error {
 		if inStack[cmdName] {
+			file := ""
+			if cmd, err := p.Data.GetCommand(cmdName); err == nil {
+				file = cmd.SourceFile
+			}
 			return &CircularDependencyError{
 				Command: cmdName,
 				Path:    append(path, cmdName),
+				File:    file,
 			}
 		}
 
@@ -1281,14 +1417,13 @@ func stripInlineComment(line string) string {
 			inQuote = !inQuote
 			continue
 		}
-		// A comment marker only starts a comment when preceded by whitespace
-		// (or line start), matching shell conventions. This keeps URLs and
-		// anchors intact: https://x and a#b are not comments.
+
 		if !inQuote && i+1 < len(line) && c == '/' && line[i+1] == '/' {
 			if i == 0 || line[i-1] == ' ' || line[i-1] == '\t' {
 				return strings.TrimSpace(line[:i])
 			}
 		}
+
 		if !inQuote && c == '#' {
 			if i == 0 || line[i-1] == ' ' || line[i-1] == '\t' {
 				return strings.TrimSpace(line[:i])
@@ -1307,9 +1442,17 @@ func (p *Parser) parseLines() error {
 	}
 
 	idx := 0
+	var pendingComment []string // doc comment lines before the next command
 	for idx < len(p.Lines) {
 		line := p.Lines[idx]
 		lineNum := idx + 1
+
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "#") || strings.HasPrefix(trimmed, "//") {
+			pendingComment = append(pendingComment, trimDocMarker(trimmed))
+			idx++
+			continue
+		}
 
 		line = stripInlineComment(line)
 		if line == "" {
@@ -1317,32 +1460,30 @@ func (p *Parser) parseLines() error {
 			continue
 		}
 
-		if strings.HasPrefix(line, "//") || strings.HasPrefix(line, "#") {
-			idx++
-			continue
-		}
-
 		if strings.HasPrefix(line, "import ") || line == "import" {
 			if err := p.processImport(line); err != nil {
-				return NewParseError(lineNum, 1, err.Error(), line)
+				return p.parseErr(lineNum, err, line)
 			}
+			pendingComment = nil
 			idx++
 			continue
 		}
 
 		if strings.HasPrefix(line, "var ") {
-			if err := p.parseVar(line, "global"); err != nil {
-				return NewParseError(lineNum, 1, err.Error(), line)
+			if err := p.parseVar(line, "global", lineNum); err != nil {
+				return p.parseErr(lineNum, err, line)
 			}
+			pendingComment = nil
 			idx++
 			continue
 		}
 
 		if len(line) > 0 && line[0] == '_' && (len(line) == 1 || line[1] == ' ' || line[1] == '(' || line[1] == '<' || line[1] == '{') {
-			consumed, err := p.parseCommand(idx, line, true)
+			consumed, err := p.parseCommand(idx, line, true, lineNum, strings.Join(pendingComment, "\n"))
 			if err != nil {
-				return NewParseError(lineNum, 1, err.Error(), line)
+				return p.parseErr(lineNum, err, line)
 			}
+			pendingComment = nil
 			idx += consumed
 			if consumed == 0 {
 				idx++
@@ -1350,10 +1491,11 @@ func (p *Parser) parseLines() error {
 			continue
 		}
 
-		consumed, err := p.parseCommand(idx, line, false)
+		consumed, err := p.parseCommand(idx, line, false, lineNum, strings.Join(pendingComment, "\n"))
 		if err != nil {
-			return NewParseError(lineNum, 1, err.Error(), line)
+			return p.parseErr(lineNum, err, line)
 		}
+		pendingComment = nil
 		idx += consumed
 		if consumed == 0 {
 			idx++
@@ -1363,11 +1505,34 @@ func (p *Parser) parseLines() error {
 	return nil
 }
 
-func (p *Parser) processImport(line string) error {
+func trimDocMarker(line string) string {
+	line = strings.TrimSpace(line)
+	line = strings.TrimLeft(line, "#/")
+	return strings.TrimSpace(line)
+}
+
+func parseImportSpec(line string) (path, ns string, err error) {
 	spec := strings.TrimSpace(strings.TrimPrefix(line, "import"))
+
+	if asIdx := strings.LastIndex(spec, " as "); asIdx >= 0 {
+		ns = strings.TrimSpace(spec[asIdx+4:])
+		spec = strings.TrimSpace(spec[:asIdx])
+		if !isValidIdent(ns) {
+			return "", "", fmt.Errorf("invalid import namespace %q (expected an identifier)", ns)
+		}
+	}
+
 	spec = strings.Trim(spec, `"`)
 	if spec == "" {
-		return fmt.Errorf("import requires a file path")
+		return "", "", fmt.Errorf("import requires a file path")
+	}
+	return spec, ns, nil
+}
+
+func (p *Parser) processImport(line string) error {
+	spec, ns, err := parseImportSpec(line)
+	if err != nil {
+		return err
 	}
 
 	path := spec
@@ -1375,17 +1540,24 @@ func (p *Parser) processImport(line string) error {
 		dir := filepath.Dir(strings.TrimPrefix(p.InputFile, "file://"))
 		path = filepath.Join(dir, spec)
 	}
+
 	cleanPath := filepath.Clean(path)
 	if p.importStack[cleanPath] {
 		return fmt.Errorf("circular import of %q", spec)
 	}
-	if p.imported[cleanPath] {
-		// Already merged (e.g. reached through a different import path).
+
+	dedupKey := cleanPath
+	if ns != "" {
+		dedupKey = cleanPath + "|" + ns
+	}
+
+	if p.imported[dedupKey] {
 		return nil
 	}
+
 	p.importStack[cleanPath] = true
 	defer delete(p.importStack, cleanPath)
-	p.imported[cleanPath] = true
+	p.imported[dedupKey] = true
 
 	content, err := os.ReadFile(cleanPath)
 	if err != nil {
@@ -1399,6 +1571,21 @@ func (p *Parser) processImport(line string) error {
 		return err
 	}
 
+	if ns != "" {
+		if err := renameImportNamespace(imported.Data, ns); err != nil {
+			return err
+		}
+	}
+
+	if !slices.Contains(p.Data.SourceFiles, cleanPath) {
+		p.Data.SourceFiles = append(p.Data.SourceFiles, cleanPath)
+	}
+	for _, sf := range imported.Data.SourceFiles {
+		if !slices.Contains(p.Data.SourceFiles, sf) {
+			p.Data.SourceFiles = append(p.Data.SourceFiles, sf)
+		}
+	}
+
 	p.Data.Variables = append(p.Data.Variables, imported.Data.Variables...)
 	for _, cmd := range imported.Data.Commands {
 		if existing, err := p.Data.GetCommand(cmd.Name); err == nil && existing != nil {
@@ -1407,6 +1594,249 @@ func (p *Parser) processImport(line string) error {
 		p.Data.Commands = append(p.Data.Commands, cmd)
 	}
 	return nil
+}
+
+func renameImportNamespace(data *ParsedData, ns string) error {
+	prefix := ns + "."
+
+	commandNew := make(map[string]string)
+	for _, c := range data.Commands {
+		commandNew[c.Name] = prefix + c.Name
+	}
+	globalNew := make(map[string]string)
+	for _, v := range data.Variables {
+		if v.Scope == "global" {
+			globalNew[v.Name] = prefix + v.Name
+		}
+	}
+
+	scopeNew := func(scope string) string {
+		if n, ok := commandNew[scope]; ok {
+			return n
+		}
+		return scope
+	}
+
+	shadows := make(map[string]map[string]bool, len(data.Commands))
+	for _, c := range data.Commands {
+		shadow := make(map[string]bool)
+		for _, v := range data.Variables {
+			if v.Scope == c.Name {
+				shadow[v.Name] = true
+			}
+		}
+		for _, arg := range c.Arguments {
+			shadow[arg.Name] = true
+		}
+		if c.LazyEval != nil && c.LazyEval.Scope != "global" {
+			// Lazy bodies resolve in their scope command's context.
+			if scopeCmd, err := data.GetCommand(c.LazyEval.Scope); err == nil {
+				for _, v := range data.Variables {
+					if v.Scope == scopeCmd.Name {
+						shadow[v.Name] = true
+					}
+				}
+				for _, arg := range scopeCmd.Arguments {
+					shadow[arg.Name] = true
+				}
+			}
+		}
+		collectLoopVars(c.Body, shadow)
+		shadows[c.Name] = shadow
+	}
+
+	for _, c := range data.Commands {
+		oldName := c.Name
+		shadow := shadows[oldName]
+		c.Name = commandNew[oldName]
+
+		for i, prereq := range c.Prereqs {
+			if n, ok := commandNew[strings.TrimSpace(prereq)]; ok {
+				c.Prereqs[i] = n
+			}
+		}
+
+		if len(c.PrereqDirs) > 0 {
+			newDirs := make(map[string]string, len(c.PrereqDirs))
+			for prereq, dir := range c.PrereqDirs {
+				if n, ok := commandNew[prereq]; ok {
+					newDirs[n] = dir
+				} else {
+					newDirs[prereq] = dir
+				}
+			}
+			c.PrereqDirs = newDirs
+		}
+
+		if c.LazyEval != nil {
+			if c.LazyEval.Scope == "global" {
+				if n, ok := globalNew[c.LazyEval.VarName]; ok {
+					c.LazyEval.VarName = n
+				}
+			} else {
+				c.LazyEval.Scope = scopeNew(c.LazyEval.Scope)
+			}
+		}
+
+		rename := func(full string) (string, bool) {
+			seg := firstIdent(full)
+			if seg == "" || shadow[seg] {
+				return "", false
+			}
+			if n, ok := globalNew[full]; ok {
+				return "&" + n, true
+			}
+			if n, ok := commandNew[seg]; ok {
+				return "&" + n + full[len(seg):], true
+			}
+			return "", false
+		}
+		renameBodyRefs(c.Body, rename)
+	}
+
+	for _, v := range data.Variables {
+		switch v.Scope {
+		case "global":
+			if n, ok := globalNew[v.Name]; ok {
+				v.Name = n
+			}
+		default:
+			v.Scope = scopeNew(v.Scope)
+		}
+	}
+
+	return nil
+}
+
+func collectLoopVars(stmts []BodyStatement, out map[string]bool) {
+	for _, stmt := range stmts {
+		switch stmt.Type {
+		case "for":
+			out[stmt.LoopVar] = true
+			if stmt.LoopIndex != "" {
+				out[stmt.LoopIndex] = true
+			}
+			collectLoopVars(stmt.LoopBody, out)
+		case "if":
+			collectLoopVars(stmt.ThenBody, out)
+			collectLoopVars(stmt.ElseBody, out)
+		}
+	}
+}
+
+func renameBodyRefs(stmts []BodyStatement, rename func(string) (string, bool)) {
+	for i := range stmts {
+		switch stmts[i].Type {
+		case "if":
+			stmts[i].Cond = renameVarRefs(stmts[i].Cond, rename)
+			renameBodyRefs(stmts[i].ThenBody, rename)
+			renameBodyRefs(stmts[i].ElseBody, rename)
+		case "for":
+			stmts[i].LoopItems = renameVarRefs(stmts[i].LoopItems, rename)
+			renameBodyRefs(stmts[i].LoopBody, rename)
+		case "invoke":
+			if s := stmts[i].Shell; s != "" {
+				rewritten := renameVarRefs("&"+s, rename)
+				if rewritten != "&"+s {
+					stmts[i].Shell = strings.TrimPrefix(rewritten, "&")
+				}
+			}
+		default:
+			stmts[i].Shell = renameVarRefs(stmts[i].Shell, rename)
+		}
+	}
+}
+
+func firstIdent(name string) string {
+	for i := 0; i < len(name); i++ {
+		if !isVarIdentByte(name[i]) && name[i] != '-' {
+			return name[:i]
+		}
+	}
+	return name
+}
+func renameVarRefs(s string, rename func(string) (string, bool)) string {
+	if strings.IndexByte(s, '&') < 0 {
+		return s
+	}
+	if !isASCII(s) {
+		return renameVarRefsRunes(s, rename)
+	}
+
+	var result strings.Builder
+	result.Grow(len(s))
+	i := 0
+	for i < len(s) {
+		if s[i] == '\\' && i+1 < len(s) && s[i+1] == '&' {
+			result.WriteByte('&')
+			i += 2
+			continue
+		}
+		if s[i] == '&' {
+			j := i + 1
+			start := j
+			for j < len(s) && isVarIdentByte(s[j]) {
+				j++
+			}
+			for j < len(s) && s[j] == '.' {
+				k := j + 1
+				ks := k
+				for k < len(s) && isVarIdentByte(s[k]) {
+					k++
+				}
+				if k == ks {
+					break // trailing '.' with no segment
+				}
+				j = k
+			}
+			if name := s[start:j]; name != "" {
+				if val, ok := rename(name); ok {
+					result.WriteString(val)
+					i = j
+					continue
+				}
+			}
+		}
+		result.WriteByte(s[i])
+		i++
+	}
+	return result.String()
+}
+
+func renameVarRefsRunes(s string, rename func(string) (string, bool)) string {
+	var result strings.Builder
+	runes := []rune(s)
+	i := 0
+	for i < len(runes) {
+		if runes[i] == '&' {
+			start := i + 1
+			j := start
+			for j < len(runes) && isVarIdentByte(byte(runes[j])) {
+				j++
+			}
+			for j < len(runes) && runes[j] == '.' {
+				k := j + 1
+				ks := k
+				for k < len(runes) && isVarIdentByte(byte(runes[k])) {
+					k++
+				}
+				if k == ks {
+					break
+				}
+				j = k
+			}
+			if j > start {
+				if val, ok := rename(string(runes[start:j])); ok {
+					result.WriteString(val)
+					i = j
+					continue
+				}
+			}
+		}
+		result.WriteRune(runes[i])
+		i++
+	}
+	return result.String()
 }
 
 func (p *Parser) classifyPrereqs() error {
@@ -1425,6 +1855,8 @@ func (p *Parser) classifyPrereqs() error {
 				return &MissingDependencyError{
 					Command:    cmd.Name,
 					PrereqName: prereq,
+					File:       cmd.SourceFile,
+					Line:       cmd.SourceLine,
 				}
 			}
 		}
@@ -1437,6 +1869,10 @@ func (p *Parser) classifyPrereqs() error {
 func (p *Parser) Parse() (*ParsedData, error) {
 	if err := p.parseLines(); err != nil {
 		return nil, err
+	}
+
+	if !slices.Contains(p.Data.SourceFiles, p.InputFile) {
+		p.Data.SourceFiles = append(p.Data.SourceFiles, p.InputFile)
 	}
 
 	p.Data.buildIndexMaps()

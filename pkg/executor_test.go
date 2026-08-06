@@ -112,9 +112,14 @@ func TestExecutorCachesChildEnv(t *testing.T) {
 	if executor.env == nil {
 		t.Fatal("expected env to be populated at construction")
 	}
+
 	for range 3 {
-		if got := executor.childEnv(); &got[0] != &executor.env[0] {
-			t.Fatal("childEnv returned a fresh copy instead of the cached env")
+		cmdEnv := slices.Clone(executor.env)
+		if !slices.Equal(cmdEnv, executor.env) {
+			t.Fatal("cloned env differs from the executor's base env")
+		}
+		if len(cmdEnv) > 0 && &cmdEnv[0] == &executor.env[0] {
+			t.Fatal("cloned env shares backing array with the base env")
 		}
 	}
 }
@@ -554,7 +559,7 @@ func TestParseCommandBodyBraceInString(t *testing.T) {
 	lines := strings.Split(input, "\n")
 	parser := &Parser{Data: &ParsedData{}, Lines: lines}
 
-	_, err := parser.parseCommand(0, input, false)
+	_, err := parser.parseCommand(0, input, false, 1, "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

@@ -1,0 +1,26 @@
+# Namespaced imports: lib and other can both define `build` without conflict.
+import "Constfile-shared-lib" as lib
+import "Constfile-shared-other" as other
+
+# Doc comment: shown by `construct --list`.
+# Builds everything and prints the shared versions.
+build-all < lib.build, other.build {
+    $ echo "lib version: &lib.version"
+    $ echo "other version: &other.version"
+}
+
+deploy {
+    env { REGION=us-east-1, CI=true }
+    $ echo "deploying to @REGION with CI=@CI"
+    if "@REGION" == "us-east-1" {
+        invoke other.healthcheck
+    }
+}
+
+# Reuse a body and capture its output.
+meta {
+    invoke lib.gen as lines
+    for l in &lines {
+        $ echo "captured: &l"
+    }
+}

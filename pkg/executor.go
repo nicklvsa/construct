@@ -1,6 +1,7 @@
 package pkg
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -12,6 +13,7 @@ import (
 	"path"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -27,13 +29,19 @@ type CommandError struct {
 	Cmd      string
 	ExitCode int
 	Stderr   string
+	File     string
+	Line     int
 }
 
 func (e *CommandError) Error() string {
-	if e.Stderr != "" {
-		return fmt.Sprintf("command '%s' failed (exit %d): %s", e.Cmd, e.ExitCode, e.Stderr)
+	loc := ""
+	if e.File != "" {
+		loc = fmt.Sprintf(" (%s:%d)", e.File, e.Line)
 	}
-	return fmt.Sprintf("command '%s' failed (exit %d)", e.Cmd, e.ExitCode)
+	if e.Stderr != "" {
+		return fmt.Sprintf("command '%s' failed (exit %d)%s: %s", e.Cmd, e.ExitCode, loc, e.Stderr)
+	}
+	return fmt.Sprintf("command '%s' failed (exit %d)%s", e.Cmd, e.ExitCode, loc)
 }
 
 type Executor struct {
@@ -54,6 +62,7 @@ type Executor struct {
 	jobs            int
 	sem             chan struct{}
 	mu              sync.Mutex
+	invokeDepth     map[string]int // in-progress invoke chains, for cycle detection
 }
 
 type commandRun struct {
@@ -97,10 +106,6 @@ func nonInteractiveArgs(shell string) []string {
 		return []string{"--noprofile", "--norc", "-c"}
 	}
 	return []string{"-c"}
-}
-
-func (e *Executor) childEnv() []string {
-	return e.env
 }
 
 func (e *Executor) computeChildEnv() []string {
@@ -262,9 +267,6 @@ func (e *Executor) executeCommand(command *Command) error {
 			return nil
 		}
 	}
-
-	// Make-style up-to-date check: skip when every produced artifact exists
-	// and no dependency is newer than the newest artifact.
 	if len(command.Produces) > 0 && !isPrereq {
 		if e.shouldSkipProduced(command, resolveValue, workDir) {
 			fmt.Printf("(%s up to date)\n", command.Name)
@@ -272,32 +274,111 @@ func (e *Executor) executeCommand(command *Command) error {
 		}
 	}
 
-	var execCommandBody func(target *Command, body []BodyStatement, isPrereq bool, workDir string) error
-	execCommandBody = func(target *Command, body []BodyStatement, isPrereq bool, workDir string) error {
+	var execCommandBody func(target *Command, body []BodyStatement, isPrereq bool, workDir string, srcFile string, out io.Writer, env []string) error
+	execCommandBody = func(target *Command, body []BodyStatement, isPrereq bool, workDir string, srcFile string, out io.Writer, env []string) error {
+		resolveBodyValue := func(s, scope string) string {
+			s = resolveVarRefs(s, func(name string) (string, bool) {
+				return e.StructuredParse.LookupVariable(name, scope)
+			})
+			return resolveEnvRefsWith(s, func(name string) string {
+				if v, ok := envLookupValue(env, name); ok {
+					return v
+				}
+				return os.Getenv(name)
+			})
+		}
+		envRef := func(s string) string {
+			return resolveEnvRefsSetWith(s, func(name string) (string, bool) {
+				if v, ok := envLookupValue(env, name); ok {
+					return v, true
+				}
+				return os.LookupEnv(name)
+			})
+		}
+
 		condBase := e.baseDir
 		if workDir != "" {
-			condBase = e.resolveWorkDir(resolveValue(workDir, target.Name))
+			condBase = e.resolveWorkDir(resolveBodyValue(workDir, target.Name))
 		}
 		for _, stmt := range body {
+			if stmt.Type == "env" {
+				for _, pair := range stmt.Env {
+					key, value, _ := strings.Cut(pair, "=")
+					value = resolveVarRefs(value, func(name string) (string, bool) {
+						return e.StructuredParse.LookupVariable(name, target.Name)
+					})
+					env = setEnvVar(env, key, envRef(value))
+					if e.debug {
+						fmt.Printf("[DEBUG] env %s=%s\n", key, value)
+					}
+				}
+				continue
+			}
+
 			if stmt.Type == "if" {
-				cond := resolveValue(stmt.Cond, target.Name)
+				cond := resolveBodyValue(stmt.Cond, target.Name)
 				if e.debug {
 					fmt.Printf("[DEBUG] Evaluating condition: %s\n", cond)
 				}
 				if evaluateConditionWithBase(cond, condBase) {
-					if err := execCommandBody(target, stmt.ThenBody, isPrereq, workDir); err != nil {
+					if err := execCommandBody(target, stmt.ThenBody, isPrereq, workDir, srcFile, out, env); err != nil {
 						return err
 					}
 				} else if stmt.ElseBody != nil {
-					if err := execCommandBody(target, stmt.ElseBody, isPrereq, workDir); err != nil {
+					if err := execCommandBody(target, stmt.ElseBody, isPrereq, workDir, srcFile, out, env); err != nil {
 						return err
 					}
 				}
 				continue
 			}
 
+			if stmt.Type == "invoke" {
+				invoked, err := e.StructuredParse.GetCommand(strings.TrimSpace(stmt.Shell))
+				if err != nil {
+					return err
+				}
+				if e.invokeDepth == nil {
+					e.invokeDepth = make(map[string]int)
+				}
+				e.mu.Lock()
+				if e.invokeDepth[invoked.Name] > 0 {
+					e.mu.Unlock()
+					return fmt.Errorf("circular invoke of command '%s'", invoked.Name)
+				}
+				e.invokeDepth[invoked.Name]++
+				e.mu.Unlock()
+				invokeErr := func() error {
+					defer func() {
+						e.mu.Lock()
+						e.invokeDepth[invoked.Name]--
+						e.mu.Unlock()
+					}()
+					argFlags := make(map[string]bool, len(target.Arguments))
+					for _, arg := range target.Arguments {
+						argFlags[target.Name+":"+arg.Name] = true
+					}
+					cleaned := e.cleanStatements(invoked.Body, target, argFlags)
+					if stmt.OutputName != "" {
+						var buf bytes.Buffer
+						if err := execCommandBody(target, cleaned, isPrereq, workDir, invoked.SourceFile, &buf, env); err != nil {
+							return err
+						}
+						e.StructuredParse.SetVariable(stmt.OutputName, target.Name, strings.TrimSpace(buf.String()))
+						if e.debug {
+							fmt.Printf("[DEBUG] invoke %s captured %d bytes\n", invoked.Name, buf.Len())
+						}
+						return nil
+					}
+					return execCommandBody(target, cleaned, isPrereq, workDir, invoked.SourceFile, nil, env)
+				}()
+				if invokeErr != nil {
+					return invokeErr
+				}
+				continue
+			}
+
 			if stmt.Type == "for" {
-				items := resolveValue(stmt.LoopItems, target.Name)
+				items := resolveBodyValue(stmt.LoopItems, target.Name)
 				items = e.expandOutputRefs(items, target.Name)
 				if items == "" {
 					continue
@@ -306,7 +387,7 @@ func (e *Executor) executeCommand(command *Command) error {
 				if strings.ContainsAny(items, "*?") {
 					wd := "."
 					if workDir != "" {
-						wd = e.resolveWorkDir(resolveValue(workDir, target.Name))
+						wd = e.resolveWorkDir(resolveBodyValue(workDir, target.Name))
 					} else if e.baseDir != "" {
 						wd = e.baseDir
 					}
@@ -343,7 +424,7 @@ func (e *Executor) executeCommand(command *Command) error {
 						fmt.Printf("[DEBUG] For loop %s = %s\n", stmt.LoopVar, item)
 					}
 					cleaned := e.cleanStatements(stmt.LoopBody, target, argFlags)
-					err := execCommandBody(target, cleaned, isPrereq, workDir)
+					err := execCommandBody(target, cleaned, isPrereq, workDir, srcFile, out, env)
 					switch {
 					case errors.Is(err, errLoopContinue):
 						continue
@@ -374,12 +455,14 @@ func (e *Executor) executeCommand(command *Command) error {
 				cmdLine = strings.TrimSpace(cmdLine[1:])
 			}
 
+			cmdLine = envRef(cmdLine)
+
 			args := append(e.shellArgs, cmdLine)
 			cmd := exec.Command(e.shellName, args...)
 			if workDir != "" {
-				cmd.Dir = e.resolveWorkDir(resolveValue(workDir, target.Name))
+				cmd.Dir = e.resolveWorkDir(resolveBodyValue(workDir, target.Name))
 			}
-			cmd.Env = e.childEnv()
+			cmd.Env = env
 
 			var fullCommand string
 			if e.debug {
@@ -398,7 +481,7 @@ func (e *Executor) executeCommand(command *Command) error {
 			}
 
 			release := e.acquire()
-			if !e.debug && !isPrereq && target.LazyEval == nil {
+			if !e.debug && !isPrereq && target.LazyEval == nil && out == nil {
 				cmd.Stdout = os.Stdout
 				cmd.Stderr = os.Stderr
 				err := cmd.Run()
@@ -412,6 +495,8 @@ func (e *Executor) executeCommand(command *Command) error {
 						return &CommandError{
 							Cmd:      e.shellName + " " + strings.Join(args, " "),
 							ExitCode: exitCode,
+							File:     srcFile,
+							Line:     stmt.SourceLine,
 						}
 					}
 				}
@@ -425,6 +510,7 @@ func (e *Executor) executeCommand(command *Command) error {
 			} else {
 				stdout, err = cmd.Output()
 			}
+
 			release()
 
 			output := stdout
@@ -461,11 +547,21 @@ func (e *Executor) executeCommand(command *Command) error {
 						Cmd:      fullCommand,
 						ExitCode: exitCode,
 						Stderr:   string(stderr),
+						File:     srcFile,
+						Line:     stmt.SourceLine,
 					}
 				}
 			}
 
 			strOutput := strings.TrimSpace(string(output))
+
+			if out != nil {
+				if err == nil {
+					// The capture buffer cannot fail; ignore write errors.
+					_, _ = out.Write(output)
+				}
+				continue
+			}
 
 			switch {
 			case isPrereq:
@@ -523,20 +619,22 @@ func (e *Executor) executeCommand(command *Command) error {
 			for i, stmt := range stmts {
 				if stmt.Type == "if" {
 					out[i] = BodyStatement{
-						Type:     "if",
-						Cond:     stmt.Cond,
-						ThenBody: cleanStmts(stmt.ThenBody),
-						ElseBody: cleanStmts(stmt.ElseBody),
+						Type:       "if",
+						Cond:       stmt.Cond,
+						ThenBody:   cleanStmts(stmt.ThenBody),
+						ElseBody:   cleanStmts(stmt.ElseBody),
+						SourceLine: stmt.SourceLine,
 					}
 					continue
 				}
 				if stmt.Type == "for" {
 					out[i] = BodyStatement{
-						Type:      "for",
-						LoopVar:   stmt.LoopVar,
-						LoopIndex: stmt.LoopIndex,
-						LoopItems: e.cleanShellLine(cmd, stmt.LoopItems, argFlags),
-						LoopBody:  stmt.LoopBody,
+						Type:       "for",
+						LoopVar:    stmt.LoopVar,
+						LoopIndex:  stmt.LoopIndex,
+						LoopItems:  e.cleanShellLine(cmd, stmt.LoopItems, argFlags),
+						LoopBody:   stmt.LoopBody,
+						SourceLine: stmt.SourceLine,
 					}
 					continue
 				}
@@ -544,7 +642,11 @@ func (e *Executor) executeCommand(command *Command) error {
 					out[i] = stmt
 					continue
 				}
-				out[i] = BodyStatement{Type: "shell", Shell: e.cleanShellLine(cmd, stmt.Shell, argFlags), OutputName: stmt.OutputName}
+				if stmt.Type == "invoke" || stmt.Type == "env" {
+					out[i] = stmt
+					continue
+				}
+				out[i] = BodyStatement{Type: "shell", Shell: e.cleanShellLine(cmd, stmt.Shell, argFlags), OutputName: stmt.OutputName, SourceLine: stmt.SourceLine}
 			}
 			return out
 		}
@@ -616,7 +718,9 @@ func (e *Executor) executeCommand(command *Command) error {
 		return err
 	}
 
-	if err := execCommandBody(command, body, isPrereq, workDir); err != nil {
+	cmdEnv := slices.Clone(e.env)
+
+	if err := execCommandBody(command, body, isPrereq, workDir, command.SourceFile, nil, cmdEnv); err != nil {
 		return err
 	}
 
@@ -633,23 +737,27 @@ func (e *Executor) cleanStatements(stmts []BodyStatement, cmd *Command, argFlags
 		switch stmt.Type {
 		case "if":
 			out[i] = BodyStatement{
-				Type:     "if",
-				Cond:     stmt.Cond,
-				ThenBody: e.cleanStatements(stmt.ThenBody, cmd, argFlags),
-				ElseBody: e.cleanStatements(stmt.ElseBody, cmd, argFlags),
+				Type:       "if",
+				Cond:       stmt.Cond,
+				ThenBody:   e.cleanStatements(stmt.ThenBody, cmd, argFlags),
+				ElseBody:   e.cleanStatements(stmt.ElseBody, cmd, argFlags),
+				SourceLine: stmt.SourceLine,
 			}
 		case "for":
 			out[i] = BodyStatement{
-				Type:      "for",
-				LoopVar:   stmt.LoopVar,
-				LoopIndex: stmt.LoopIndex,
-				LoopItems: e.cleanShellLine(cmd, stmt.LoopItems, argFlags),
-				LoopBody:  stmt.LoopBody,
+				Type:       "for",
+				LoopVar:    stmt.LoopVar,
+				LoopIndex:  stmt.LoopIndex,
+				LoopItems:  e.cleanShellLine(cmd, stmt.LoopItems, argFlags),
+				LoopBody:   stmt.LoopBody,
+				SourceLine: stmt.SourceLine,
 			}
 		case "continue", "break":
 			out[i] = stmt
+		case "invoke", "env":
+			out[i] = stmt
 		default:
-			out[i] = BodyStatement{Type: "shell", Shell: e.cleanShellLine(cmd, stmt.Shell, argFlags), OutputName: stmt.OutputName}
+			out[i] = BodyStatement{Type: "shell", Shell: e.cleanShellLine(cmd, stmt.Shell, argFlags), OutputName: stmt.OutputName, SourceLine: stmt.SourceLine}
 		}
 	}
 	return out
@@ -698,11 +806,6 @@ func (e *Executor) cleanShellLine(cmd *Command, line string, argFlags map[string
 	return resolveEnvRefsSet(line)
 }
 
-// expandOutputRefs replaces &prereq.* references in loop items with the
-// comma-joined positional outputs of that prereq (registered as variables in
-// the current command's scope). A known command with no outputs expands to
-// nothing; anything that isn't a prereq output ref is left untouched, so file
-// globs like &dir/*.go are unaffected.
 func (e *Executor) expandOutputRefs(items, scope string) string {
 	if !strings.Contains(items, ".*") {
 		return items
@@ -715,6 +818,14 @@ func (e *Executor) expandOutputRefs(items, scope string) string {
 			for j < len(items) && isVarIdentByte(items[j]) {
 				j++
 			}
+
+			for j < len(items) && items[j] == '.' && j+1 < len(items) && isVarIdentByte(items[j+1]) {
+				j++
+				for j < len(items) && isVarIdentByte(items[j]) {
+					j++
+				}
+			}
+
 			if j+1 < len(items) && items[j] == '.' && items[j+1] == '*' {
 				name := items[i+1 : j]
 				if _, err := e.StructuredParse.GetCommand(name); err == nil {
@@ -741,6 +852,29 @@ func (e *Executor) expandOutputRefs(items, scope string) string {
 func isVarIdentByte(c byte) bool {
 	return c == '_' || c == '-' ||
 		(c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
+}
+
+// envLookupValue finds KEY=value in an env slice.
+func envLookupValue(env []string, name string) (string, bool) {
+	prefix := name + "="
+	for _, kv := range env {
+		if strings.HasPrefix(kv, prefix) {
+			return kv[len(prefix):], true
+		}
+	}
+	return "", false
+}
+
+func setEnvVar(env []string, key, value string) []string {
+	prefix := key + "="
+	out := make([]string, 0, len(env)+1)
+	for _, kv := range env {
+		if strings.HasPrefix(kv, prefix) {
+			continue // replaced below
+		}
+		out = append(out, kv)
+	}
+	return append(out, prefix+value)
 }
 
 func escapeShellValue(s string) string {
@@ -796,14 +930,11 @@ func resolveVarRefs(line string, lookup func(string) (string, bool)) string {
 			for j < len(line) && isVarIdentByte(line[j]) {
 				j++
 			}
-			if j < len(line) && line[j] == '.' {
-				k := j + 1
-				ks := k
-				for k < len(line) && isPlainIdentByte(line[k]) {
-					k++
-				}
-				if k > ks {
-					j = k
+
+			for j < len(line) && line[j] == '.' && j+1 < len(line) && isPlainIdentByte(line[j+1]) {
+				j++
+				for j < len(line) && isPlainIdentByte(line[j]) {
+					j++
 				}
 			}
 			if name := line[start:j]; name != "" {
@@ -833,17 +964,13 @@ func resolveVarRefsRunes(line string, lookup func(string) (string, bool)) string
 				j++
 			}
 
-			if j < len(runes) && runes[j] == '.' {
-				k := j + 1
-				for k < len(runes) && (unicode.IsLetter(runes[k]) || unicode.IsDigit(runes[k]) || runes[k] == '_') {
-					k++
-				}
-				if k > j+1 {
-					name.WriteRune('.')
-					for m := j + 1; m < k; m++ {
-						name.WriteRune(runes[m])
-					}
-					j = k
+			// Consume dotted segments so namespaced names resolve as wholes.
+			for j < len(runes) && runes[j] == '.' && j+1 < len(runes) && (unicode.IsLetter(runes[j+1]) || unicode.IsDigit(runes[j+1]) || runes[j+1] == '_') {
+				name.WriteRune('.')
+				j++
+				for j < len(runes) && (unicode.IsLetter(runes[j]) || unicode.IsDigit(runes[j]) || runes[j] == '_') {
+					name.WriteRune(runes[j])
+					j++
 				}
 			}
 			if name.Len() > 0 {
@@ -862,17 +989,20 @@ func resolveVarRefsRunes(line string, lookup func(string) (string, bool)) string
 
 // resolveEnvRefs replaces @ENVNAME references with the corresponding env var.
 func resolveEnvRefs(s string) string {
+	return resolveEnvRefsWith(s, os.Getenv)
+}
+
+func resolveEnvRefsWith(s string, lookup func(string) string) string {
 	if strings.IndexByte(s, '@') < 0 {
 		return s
 	}
 	if !isASCII(s) {
-		return resolveEnvRefsRunes(s)
+		return resolveEnvRefsRunesWith(s, lookup)
 	}
 
 	var result strings.Builder
 	result.Grow(len(s))
 	for i := 0; i < len(s); {
-		// "\@" escapes the marker: "@" is written literally.
 		if s[i] == '\\' && i+1 < len(s) && s[i+1] == '@' {
 			result.WriteByte('@')
 			i += 2
@@ -885,7 +1015,7 @@ func resolveEnvRefs(s string) string {
 				j++
 			}
 			if j > start {
-				result.WriteString(os.Getenv(s[start:j]))
+				result.WriteString(lookup(s[start:j]))
 				i = j
 				continue
 			}
@@ -897,6 +1027,13 @@ func resolveEnvRefs(s string) string {
 }
 
 func resolveEnvRefsSet(s string) string {
+	return resolveEnvRefsSetWith(s, func(name string) (string, bool) {
+		val, ok := os.LookupEnv(name)
+		return val, ok
+	})
+}
+
+func resolveEnvRefsSetWith(s string, lookup func(string) (string, bool)) string {
 	if strings.IndexByte(s, '@') < 0 {
 		return s
 	}
@@ -916,7 +1053,7 @@ func resolveEnvRefsSet(s string) string {
 				j++
 			}
 			if j > start {
-				if val, ok := os.LookupEnv(s[start:j]); ok {
+				if val, ok := lookup(s[start:j]); ok {
 					result.WriteString(val)
 					i = j
 					continue
@@ -930,6 +1067,10 @@ func resolveEnvRefsSet(s string) string {
 }
 
 func resolveEnvRefsRunes(s string) string {
+	return resolveEnvRefsRunesWith(s, os.Getenv)
+}
+
+func resolveEnvRefsRunesWith(s string, lookup func(string) string) string {
 	var result strings.Builder
 	runes := []rune(s)
 	for i := 0; i < len(runes); {
@@ -941,7 +1082,7 @@ func resolveEnvRefsRunes(s string) string {
 				j++
 			}
 			if name.Len() > 0 {
-				result.WriteString(os.Getenv(name.String()))
+				result.WriteString(lookup(name.String()))
 				i = j
 				continue
 			}
@@ -1019,7 +1160,7 @@ func evaluateConditionWithBase(cond, base string) bool {
 	if idx := findTopLevelOp(cond, " in "); idx > 0 {
 		left := strings.Trim(strings.TrimSpace(cond[:idx]), "\"")
 		list := strings.Trim(strings.TrimSpace(cond[idx+len(" in "):]), "\"")
-		for _, item := range strings.Split(list, ",") {
+		for item := range strings.SplitSeq(list, ",") {
 			if left == strings.TrimSpace(item) {
 				return true
 			}
@@ -1331,8 +1472,15 @@ const cacheDir = ".construct-cache"
 
 type fileCache map[string]map[string]string
 
-func loadFileCache() fileCache {
-	data, err := os.ReadFile(filepath.Join(cacheDir, "manifest.json"))
+func (e *Executor) cacheDirFor() string {
+	if e.baseDir != "" {
+		return filepath.Join(e.baseDir, cacheDir)
+	}
+	return cacheDir
+}
+
+func loadFileCache(dir string) fileCache {
+	data, err := os.ReadFile(filepath.Join(dir, "manifest.json"))
 	if err != nil {
 		return fileCache{}
 	}
@@ -1343,12 +1491,12 @@ func loadFileCache() fileCache {
 	return fc
 }
 
-func (fc fileCache) save() {
-	if err := os.MkdirAll(cacheDir, 0755); err != nil {
+func (fc fileCache) save(dir string) {
+	if err := os.MkdirAll(dir, 0755); err != nil {
 		return
 	}
 	data, _ := json.MarshalIndent(fc, "", "  ")
-	os.WriteFile(filepath.Join(cacheDir, "manifest.json"), data, 0644)
+	os.WriteFile(filepath.Join(dir, "manifest.json"), data, 0644)
 }
 
 func hashFile(path string) string {
@@ -1388,7 +1536,7 @@ func (e *Executor) cacheManifest() fileCache {
 	defer e.mu.Unlock()
 
 	if !e.cacheLoaded {
-		e.cache = loadFileCache()
+		e.cache = loadFileCache(e.cacheDirFor())
 		e.cacheLoaded = true
 	}
 	return e.cache
@@ -1480,7 +1628,7 @@ func (e *Executor) shouldSkipProduced(cmd *Command, resolve func(string, string)
 	for _, d := range expandFileDeps(cmd.FileDeps, wd) {
 		info, err := os.Stat(d)
 		if err != nil {
-			return false // missing dependency => rebuild
+			return false
 		}
 		if info.ModTime().After(newest) {
 			return false
@@ -1500,7 +1648,7 @@ func (e *Executor) updateCache(cmd *Command, resolve func(string, string) string
 	defer e.mu.Unlock()
 
 	if !e.cacheLoaded {
-		e.cache = loadFileCache()
+		e.cache = loadFileCache(e.cacheDirFor())
 		e.cacheLoaded = true
 	}
 	fc := e.cache
@@ -1512,5 +1660,5 @@ func (e *Executor) updateCache(cmd *Command, resolve func(string, string) string
 	for i, f := range files {
 		fc[key][f] = hashes[i]
 	}
-	fc.save()
+	fc.save(e.cacheDirFor())
 }
