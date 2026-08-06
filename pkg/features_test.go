@@ -486,8 +486,6 @@ func TestEnvBlock(t *testing.T) {
 	}
 }
 
-// TestEnvBlockAmpRef verifies &refs to env vars resolve in shell lines that
-// appear after the env block (which are cleaned before the block runs).
 func TestEnvBlockAmpRef(t *testing.T) {
 	in := `build {
     env { MODE=fast, N=2 }
