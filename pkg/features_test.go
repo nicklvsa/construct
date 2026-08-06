@@ -480,6 +480,43 @@ func TestEnvBlock(t *testing.T) {
 	if err := executorEval(data, cmd); err != nil {
 		t.Fatalf("exec: %v", err)
 	}
+	// Env vars are visible as &refs in later shell lines and conditions.
+	if v, ok := data.LookupVariable("FOO", "build"); !ok || v != "bar" {
+		t.Errorf("env var as &ref = %q, %v; want \"bar\", true", v, ok)
+	}
+}
+
+// TestEnvBlockAmpRef verifies &refs to env vars resolve in shell lines that
+// appear after the env block (which are cleaned before the block runs).
+func TestEnvBlockAmpRef(t *testing.T) {
+	in := `build {
+    env { MODE=fast, N=2 }
+    $ echo "mode=&MODE"
+    for i in 1..&N {
+        $ echo "iter &i @MODE"
+    }
+}
+`
+	p := NewParserFromContent("t.constfile", in)
+	data, err := p.Parse()
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	cmd, err := data.GetCommand("build")
+	if err != nil {
+		t.Fatalf("build missing: %v", err)
+	}
+	r, _, restore := captureStreams(t)
+	err = executorEval(data, cmd)
+	restore()
+	if err != nil {
+		t.Fatalf("exec: %v", err)
+	}
+	out, _ := io.ReadAll(r)
+	got := strings.ReplaceAll(string(out), "\r\n", "\n")
+	if got != "mode=fast\niter 1 fast\niter 2 fast\n" {
+		t.Errorf("stdout = %q, want &refs and @refs resolved", got)
+	}
 }
 
 func TestEnvBlockNested(t *testing.T) {

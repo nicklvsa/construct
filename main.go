@@ -31,6 +31,7 @@ type options struct {
 	showList    bool
 	watch       bool
 	choose      bool
+	timing      bool
 	jobs        int
 	envFile     string
 	overrides   []string
@@ -53,6 +54,7 @@ Options:
   --jobs N          Max parallel commands (implies --concurrent)
   --watch           Rerun when the Constfile or dependencies change
   --choose          Interactively select targets to run
+  --timing          Print per-command elapsed time
   --dry-run         Show commands without executing them
   --list            List all available commands
   -e, --env k=v     Override a variable (repeatable)
@@ -134,9 +136,16 @@ func printDryRunBody(body []pkg.BodyStatement, indent int) {
 		case "if":
 			fmt.Printf("%sif %s {\n", prefix, stmt.Cond)
 			printDryRunBody(stmt.ThenBody, indent+1)
-			if len(stmt.ElseBody) > 0 {
+			elseBody := stmt.ElseBody
+			for len(elseBody) == 1 && elseBody[0].Type == "if" {
+				inner := elseBody[0]
+				fmt.Printf("%s} else if %s {\n", prefix, inner.Cond)
+				printDryRunBody(inner.ThenBody, indent+1)
+				elseBody = inner.ElseBody
+			}
+			if len(elseBody) > 0 {
 				fmt.Printf("%s} else {\n", prefix)
-				printDryRunBody(stmt.ElseBody, indent+1)
+				printDryRunBody(elseBody, indent+1)
 			}
 			fmt.Printf("%s}\n", prefix)
 		case "for":
@@ -193,6 +202,7 @@ func defineFlags(fs *flag.FlagSet, o *options) {
 	fs.BoolVar(&o.dryRun, "dry-run", false, "Dry run")
 	fs.BoolVar(&o.watch, "watch", false, "Rerun when files change")
 	fs.BoolVar(&o.choose, "choose", false, "Interactively select targets")
+	fs.BoolVar(&o.timing, "timing", false, "Print per-command elapsed time")
 	fs.IntVar(&o.jobs, "jobs", 0, "Max parallel commands (0 = unlimited)")
 	fs.StringVar(&o.envFile, "env-file", "", "Load environment from file")
 	fs.StringArrayVarP(&o.overrides, "env", "e", []string{}, "Override variable (key=value)")
@@ -271,6 +281,7 @@ func executeBuild(inputs *ConstructInput, o *options) ([]string, error) {
 	executor := pkg.NewExecutor(data, o.concurrent, o.debug)
 	executor.SetBaseDir(filepath.Dir(inputs.FileName))
 	executor.SetJobs(o.jobs)
+	executor.SetTiming(o.timing)
 	executor.RegisterArgumentFlags(flagSet)
 	flagSet.ParseErrorsWhitelist.UnknownFlags = false
 	if err := flagSet.Parse(os.Args[1:]); err != nil {

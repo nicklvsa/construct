@@ -63,6 +63,7 @@ type Executor struct {
 	sem             chan struct{}
 	mu              sync.Mutex
 	invokeDepth     map[string]int // in-progress invoke chains, for cycle detection
+	timing          bool           // print per-command elapsed time
 }
 
 type commandRun struct {
@@ -210,6 +211,11 @@ func (e *Executor) SetJobs(n int) {
 	}
 }
 
+// SetTiming enables per-command elapsed-time output.
+func (e *Executor) SetTiming(t bool) {
+	e.timing = t
+}
+
 func (e *Executor) acquire() (release func()) {
 	if e.sem == nil {
 		return func() {}
@@ -246,6 +252,7 @@ func (e *Executor) EvaluateCommand(command *Command) error {
 }
 
 func (e *Executor) executeCommand(command *Command) error {
+	start := time.Now()
 	e.mu.Lock()
 	workDir := command.WorkDir
 	isPrereq := command.IsPrereq
@@ -300,18 +307,30 @@ func (e *Executor) executeCommand(command *Command) error {
 		if workDir != "" {
 			condBase = e.resolveWorkDir(resolveBodyValue(workDir, target.Name))
 		}
-		for _, stmt := range body {
+		for i := 0; i < len(body); i++ {
+			stmt := body[i]
 			if stmt.Type == "env" {
 				for _, pair := range stmt.Env {
 					key, value, _ := strings.Cut(pair, "=")
 					value = resolveVarRefs(value, func(name string) (string, bool) {
 						return e.StructuredParse.LookupVariable(name, target.Name)
 					})
-					*env = setEnvVar(*env, key, envRef(value))
+
+					resolved := envRef(value)
+					*env = setEnvVar(*env, key, resolved)
+
+					e.StructuredParse.SetVariable(key, target.Name, resolved)
 					if e.debug {
-						fmt.Printf("[DEBUG] env %s=%s\n", key, value)
+						fmt.Printf("[DEBUG] env %s=%s\n", key, resolved)
 					}
 				}
+
+				argFlags := make(map[string]bool, len(target.Arguments))
+				for _, arg := range target.Arguments {
+					argFlags[target.Name+":"+arg.Name] = true
+				}
+				rest := e.cleanStatements(body[i+1:], target, argFlags)
+				body = append(body[:i+1], rest...)
 				continue
 			}
 
@@ -726,6 +745,10 @@ func (e *Executor) executeCommand(command *Command) error {
 
 	if len(command.FileDeps) > 0 && !isPrereq && len(command.Produces) == 0 {
 		e.updateCache(command, resolveValue, workDir)
+	}
+
+	if e.timing && !isPrereq && command.LazyEval == nil {
+		fmt.Printf("(%s completed in %s)\n", command.Name, time.Since(start).Round(time.Millisecond))
 	}
 
 	return nil
@@ -1312,9 +1335,7 @@ func (e *Executor) tryApplyCloudBody(cmd *Command) error {
 		return nil
 	}
 
-	for _, stmt := range external.Body {
-		cmd.Body = append(cmd.Body, stmt)
-	}
+	cmd.Body = append(cmd.Body, external.Body...)
 	cmd.CloudAccessible = false
 	return nil
 }
@@ -1525,7 +1546,9 @@ func (fc fileCache) save(dir string) {
 		return
 	}
 	data, _ := json.MarshalIndent(fc, "", "  ")
-	os.WriteFile(filepath.Join(dir, "manifest.json"), data, 0644)
+	// A failed manifest write is not fatal; the build result stands, and the
+	// cache is simply rebuilt on the next run.
+	_ = os.WriteFile(filepath.Join(dir, "manifest.json"), data, 0644)
 }
 
 func hashFile(path string) string {

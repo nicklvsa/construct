@@ -33,6 +33,7 @@ construct [options] [Constfile] [commands...]
 | `--jobs N` | Cap parallel commands (implies `--concurrent`) |
 | `--watch` | Rerun when the Constfile, its imports, or its dependencies change |
 | `--choose` | Interactively select targets to run |
+| `--timing` | Print per-command elapsed time |
 | `--dry-run` | Show commands without executing them |
 | `--list` | List all available commands |
 | `--env-file PATH` | Load environment variables from a dotenv-style file |
@@ -181,8 +182,10 @@ deploy {
 
 Values may reference `&variables` and `@env` refs; they are visible both to
 child processes and to later `@NAME` references and conditions in the same
-command. `env` blocks apply from their position to the end of the command
-body (including nested `if`/`for` blocks).
+command. Env-block variables also resolve as `&NAME` refs in subsequent
+statements (including inside loops, e.g. `for i in 1..&N`). `env` blocks
+apply from their position to the end of the command body (including nested
+`if`/`for` blocks).
 
 ### Invoke
 
