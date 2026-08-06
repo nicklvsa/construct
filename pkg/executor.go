@@ -274,14 +274,14 @@ func (e *Executor) executeCommand(command *Command) error {
 		}
 	}
 
-	var execCommandBody func(target *Command, body []BodyStatement, isPrereq bool, workDir string, srcFile string, out io.Writer, env []string) error
-	execCommandBody = func(target *Command, body []BodyStatement, isPrereq bool, workDir string, srcFile string, out io.Writer, env []string) error {
+	var execCommandBody func(target *Command, body []BodyStatement, isPrereq bool, workDir string, srcFile string, out io.Writer, env *[]string) error
+	execCommandBody = func(target *Command, body []BodyStatement, isPrereq bool, workDir string, srcFile string, out io.Writer, env *[]string) error {
 		resolveBodyValue := func(s, scope string) string {
 			s = resolveVarRefs(s, func(name string) (string, bool) {
 				return e.StructuredParse.LookupVariable(name, scope)
 			})
 			return resolveEnvRefsWith(s, func(name string) string {
-				if v, ok := envLookupValue(env, name); ok {
+				if v, ok := envLookupValue(*env, name); ok {
 					return v
 				}
 				return os.Getenv(name)
@@ -289,7 +289,7 @@ func (e *Executor) executeCommand(command *Command) error {
 		}
 		envRef := func(s string) string {
 			return resolveEnvRefsSetWith(s, func(name string) (string, bool) {
-				if v, ok := envLookupValue(env, name); ok {
+				if v, ok := envLookupValue(*env, name); ok {
 					return v, true
 				}
 				return os.LookupEnv(name)
@@ -307,7 +307,7 @@ func (e *Executor) executeCommand(command *Command) error {
 					value = resolveVarRefs(value, func(name string) (string, bool) {
 						return e.StructuredParse.LookupVariable(name, target.Name)
 					})
-					env = setEnvVar(env, key, envRef(value))
+					*env = setEnvVar(*env, key, envRef(value))
 					if e.debug {
 						fmt.Printf("[DEBUG] env %s=%s\n", key, value)
 					}
@@ -462,7 +462,7 @@ func (e *Executor) executeCommand(command *Command) error {
 			if workDir != "" {
 				cmd.Dir = e.resolveWorkDir(resolveBodyValue(workDir, target.Name))
 			}
-			cmd.Env = env
+			cmd.Env = *env
 
 			var fullCommand string
 			if e.debug {
@@ -720,7 +720,7 @@ func (e *Executor) executeCommand(command *Command) error {
 
 	cmdEnv := slices.Clone(e.env)
 
-	if err := execCommandBody(command, body, isPrereq, workDir, command.SourceFile, nil, cmdEnv); err != nil {
+	if err := execCommandBody(command, body, isPrereq, workDir, command.SourceFile, nil, &cmdEnv); err != nil {
 		return err
 	}
 
@@ -943,6 +943,14 @@ func resolveVarRefs(line string, lookup func(string) (string, bool)) string {
 					i = j
 					continue
 				}
+
+				if dot := strings.IndexByte(name, '.'); dot > 0 {
+					if val, ok := lookup(name[:dot]); ok {
+						result.WriteString(val)
+						i = start + dot
+						continue
+					}
+				}
 			}
 		}
 		result.WriteByte(line[i])
@@ -964,7 +972,6 @@ func resolveVarRefsRunes(line string, lookup func(string) (string, bool)) string
 				j++
 			}
 
-			// Consume dotted segments so namespaced names resolve as wholes.
 			for j < len(runes) && runes[j] == '.' && j+1 < len(runes) && (unicode.IsLetter(runes[j+1]) || unicode.IsDigit(runes[j+1]) || runes[j+1] == '_') {
 				name.WriteRune('.')
 				j++
@@ -974,10 +981,20 @@ func resolveVarRefsRunes(line string, lookup func(string) (string, bool)) string
 				}
 			}
 			if name.Len() > 0 {
-				if val, ok := lookup(name.String()); ok {
+				full := name.String()
+				if val, ok := lookup(full); ok {
 					result.WriteString(val)
 					i = j
 					continue
+				}
+
+				dot := strings.IndexByte(full, '.')
+				if dot > 0 {
+					if val, ok := lookup(full[:dot]); ok {
+						result.WriteString(val)
+						i = i + 1 + dot
+						continue
+					}
 				}
 			}
 		}
@@ -1320,8 +1337,20 @@ func (e *Executor) Execute(commands []string) error {
 	}
 
 	neededScopes := make(map[string]bool)
-	for _, name := range targets {
+	var addPrereqs func(name string)
+	addPrereqs = func(name string) {
+		if neededScopes[name] {
+			return
+		}
 		neededScopes[name] = true
+		if cmd, err := e.StructuredParse.GetCommand(name); err == nil {
+			for _, prereq := range cmd.Prereqs {
+				addPrereqs(strings.TrimSpace(prereq))
+			}
+		}
+	}
+	for _, name := range targets {
+		addPrereqs(name)
 	}
 	neededScopes["global"] = true
 

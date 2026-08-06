@@ -88,6 +88,11 @@ empty string, so references never leak into the shell.
 Literal `&`/`@`/`$` text can be emitted with a backslash escape: `\&foo`,
 `\@VAR`, `\$` are not substituted.
 
+A `&ref` followed by a dot only resolves as a prereq output (or namespaced
+variable) when the full dotted name exists; otherwise the first segment
+resolves as a plain variable and the rest stays literal — so `&version.vsix`
+with `var version = 0.2.0` produces `0.2.0.vsix`.
+
 - Prerequisites: `cmd1, cmd2`
 - A prerequisite can run in its own directory at the call site: `main < gen in src/`
 - Error tolerance: prefix a body statement with `!` to let it fail without aborting the build

@@ -482,6 +482,41 @@ func TestEnvBlock(t *testing.T) {
 	}
 }
 
+func TestEnvBlockNested(t *testing.T) {
+	in := `build {
+    env { MODE=base }
+    if "@MODE" == "base" {
+        env { MODE=nested, EXTRA=1 }
+    }
+    $ echo "mode=@MODE extra=@EXTRA"
+    for i in 1, 2 {
+        env { LOOP=on }
+        $ echo "loop=@LOOP i=&i"
+    }
+    $ echo "after=@LOOP"
+}
+`
+	p := NewParserFromContent("t.constfile", in)
+	data, err := p.Parse()
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	cmd, err := data.GetCommand("build")
+	if err != nil {
+		t.Fatalf("build missing: %v", err)
+	}
+	// The shell line inside the if branch must see MODE=nested, not base.
+	if len(cmd.Body) != 5 || cmd.Body[1].Type != "if" {
+		t.Fatalf("unexpected body: %+v", cmd.Body)
+	}
+	if err := executorEval(data, cmd); err != nil {
+		t.Fatalf("exec: %v", err)
+	}
+	if v, ok := data.LookupVariable("i", "build"); !ok || v != "2" {
+		t.Errorf("loop var not set: %q, %v", v, ok)
+	}
+}
+
 func TestBodyComments(t *testing.T) {
 	in := `build {
     // setup phase

@@ -1,30 +1,44 @@
+# Builds the construct-lsp language server binary for the current platform.
 build-lsp in editor/vscode/server {
-    $ go build -o construct-lsp . as out
+    $ go build -o construct-lsp .
 }
 
+# Installs the extension's npm dependencies.
 install in editor/vscode {
     $ npm install --silent
 }
 
+# Packages and installs the host-platform extension.
 build-ext in editor/vscode < build-lsp, install {
+    var vsix_version = $ cd editor/vscode && node -p "require('./package.json').version"
     $ npx @vscode/vsce@latest package --no-yarn
-    $ code --install-extension constfile-0.2.0.vsix --force as final_out
+    $ code --install-extension constfile-&vsix_version.vsix --force as final_out
 }
 
+# Cross-compiles construct-lsp and packages the extension for every target
+# (darwin/win32/linux x x64/arm64).
 build-all < install {
-    for spec in darwin/arm64/darwin-arm64, darwin/amd64/darwin-x64, linux/amd64/linux-x64, linux/arm64/linux-arm64, windows/amd64/win32-x64, windows/arm64/win32-arm64 {
-        $ IFS=/ read -r goos goarch vscetarget <<< "&spec" && echo "==> $vscetarget (GOOS=$goos GOARCH=$goarch)"
-        $ rm -f editor/vscode/server/construct-lsp editor/vscode/server/construct-lsp.exe
-        if "&spec" contains "windows" {
-            $ IFS=/ read -r goos goarch vscetarget <<< "&spec" && cd editor/vscode/server && GOOS=$goos GOARCH=$goarch go build -o construct-lsp.exe .
-        } else {
-            $ IFS=/ read -r goos goarch vscetarget <<< "&spec" && cd editor/vscode/server && GOOS=$goos GOARCH=$goarch go build -o construct-lsp .
+    matrix goos in darwin, linux, windows; arch in amd64, arm64 {
+        env {
+            SUFFIX=
+            VSCEOS=darwin
+            VSCEARCH=arm64
         }
-        $ IFS=/ read -r goos goarch vscetarget <<< "&spec" && cd editor/vscode && npx @vscode/vsce@latest package --target "$vscetarget" --no-yarn
+        if "&goos" == "windows" {
+            env { SUFFIX=.exe, VSCEOS=win32 }
+        } else if "&goos" == "linux" {
+            env { VSCEOS=linux }
+        }
+        if "&arch" == "amd64" {
+            env { VSCEARCH=x64 }
+        }
+        $ echo "==> @VSCEOS-@VSCEARCH (GOOS=&goos GOARCH=&arch)"
+        $ rm -f editor/vscode/server/construct-lsp editor/vscode/server/construct-lsp.exe
+        $ cd editor/vscode/server && GOOS=&goos GOARCH=&arch go build -o construct-lsp@SUFFIX .
+        $ cd editor/vscode && npx @vscode/vsce@latest package --target "@VSCEOS-@VSCEARCH" --no-yarn
     }
 }
 
 _ < build-ext {
-    # echo "&build-ext.0"
     echo "&build-ext.final_out"
 }

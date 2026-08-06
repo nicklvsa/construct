@@ -616,6 +616,10 @@ func TestResolveVarRefs(t *testing.T) {
 		{name: "hyphenated ref", line: "echo &build-lsp.0", want: "echo output1"},
 		{name: "unknown ref passed through", line: "x &nope y", want: "x &nope y"},
 		{name: "bare ampersand not a ref", line: "a & b", want: "a & b"},
+		{name: "dotted fallback var+extension", line: "&g.vsix", want: "GV.vsix"},
+		{name: "dotted fallback mid text", line: "x&name.go y", want: "xnick.go y"},
+		{name: "full dotted name wins over fallback", line: "&build-lsp.0", want: "output1"},
+		{name: "unknown dotted stays literal", line: "&nope.vsix", want: "&nope.vsix"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -713,6 +717,46 @@ func TestEvaluateCommandPrereqCapture(t *testing.T) {
 	gen, _ := data.GetCommand("gen")
 	if len(gen.PrereqOutput) != 1 || gen.PrereqOutput[0] != "generated" {
 		t.Errorf("prereq output = %#v, want [\"generated\"]", gen.PrereqOutput)
+	}
+}
+
+// TestLazyVarEvaluatedForPrereqCommand verifies a lazy variable scoped to a
+// command is evaluated even when that command is only reached as a
+// prerequisite of the target (e.g. a default command depending on it).
+func TestLazyVarEvaluatedForPrereqCommand(t *testing.T) {
+	data := &ParsedData{
+		Commands: []*Command{
+			{
+				Name:      "_",
+				IsDefault: true,
+				Prereqs:   []string{"build-ext"},
+			},
+			{
+				Name: "build-ext",
+				Body: []BodyStatement{
+					{Type: "shell", Shell: "$ echo constfile-&vsix_version.vsix"},
+				},
+			},
+			{
+				Name:     "__lazy_vsix_version_build-ext",
+				LazyEval: &LazyOutput{VarName: "vsix_version", Scope: "build-ext"},
+				Body:     shellBody("echo 0.2.0"),
+			},
+		},
+	}
+	data.buildIndexMaps()
+
+	executor := NewExecutor(data, false, false)
+	if err := executor.Execute(nil); err != nil {
+		t.Fatalf("Execute failed: %v", err)
+	}
+
+	v, err := data.GetVariable("vsix_version", "build-ext")
+	if err != nil {
+		t.Fatalf("GetVariable failed: %v", err)
+	}
+	if v.Value != "0.2.0" {
+		t.Errorf("lazy var value = %q, want %q", v.Value, "0.2.0")
 	}
 }
 
