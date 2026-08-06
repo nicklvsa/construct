@@ -281,397 +281,14 @@ func (e *Executor) executeCommand(command *Command) error {
 		}
 	}
 
-	var execCommandBody func(target *Command, body []BodyStatement, isPrereq bool, workDir string, srcFile string, out io.Writer, env *[]string) error
-	execCommandBody = func(target *Command, body []BodyStatement, isPrereq bool, workDir string, srcFile string, out io.Writer, env *[]string) error {
-		resolveBodyValue := func(s, scope string) string {
-			s = resolveVarRefs(s, func(name string) (string, bool) {
-				return e.StructuredParse.LookupVariable(name, scope)
-			})
-			return resolveEnvRefsWith(s, func(name string) string {
-				if v, ok := envLookupValue(*env, name); ok {
-					return v
-				}
-				return os.Getenv(name)
-			})
-		}
-		envRef := func(s string) string {
-			return resolveEnvRefsSetWith(s, func(name string) (string, bool) {
-				if v, ok := envLookupValue(*env, name); ok {
-					return v, true
-				}
-				return os.LookupEnv(name)
-			})
-		}
-
-		condBase := e.baseDir
-		if workDir != "" {
-			condBase = e.resolveWorkDir(resolveBodyValue(workDir, target.Name))
-		}
-		for i := 0; i < len(body); i++ {
-			stmt := body[i]
-			if stmt.Type == "env" {
-				for _, pair := range stmt.Env {
-					key, value, _ := strings.Cut(pair, "=")
-					value = resolveVarRefs(value, func(name string) (string, bool) {
-						return e.StructuredParse.LookupVariable(name, target.Name)
-					})
-
-					resolved := envRef(value)
-					*env = setEnvVar(*env, key, resolved)
-
-					e.StructuredParse.SetVariable(key, target.Name, resolved)
-					if e.debug {
-						fmt.Printf("[DEBUG] env %s=%s\n", key, resolved)
-					}
-				}
-
-				argFlags := make(map[string]bool, len(target.Arguments))
-				for _, arg := range target.Arguments {
-					argFlags[target.Name+":"+arg.Name] = true
-				}
-				rest := e.cleanStatements(body[i+1:], target, argFlags)
-				body = append(body[:i+1], rest...)
-				continue
-			}
-
-			if stmt.Type == "if" {
-				cond := resolveBodyValue(stmt.Cond, target.Name)
-				if e.debug {
-					fmt.Printf("[DEBUG] Evaluating condition: %s\n", cond)
-				}
-				if evaluateConditionWithBase(cond, condBase) {
-					if err := execCommandBody(target, stmt.ThenBody, isPrereq, workDir, srcFile, out, env); err != nil {
-						return err
-					}
-				} else if stmt.ElseBody != nil {
-					if err := execCommandBody(target, stmt.ElseBody, isPrereq, workDir, srcFile, out, env); err != nil {
-						return err
-					}
-				}
-				continue
-			}
-
-			if stmt.Type == "invoke" {
-				invoked, err := e.StructuredParse.GetCommand(strings.TrimSpace(stmt.Shell))
-				if err != nil {
-					return err
-				}
-				if e.invokeDepth == nil {
-					e.invokeDepth = make(map[string]int)
-				}
-				e.mu.Lock()
-				if e.invokeDepth[invoked.Name] > 0 {
-					e.mu.Unlock()
-					return fmt.Errorf("circular invoke of command '%s'", invoked.Name)
-				}
-				e.invokeDepth[invoked.Name]++
-				e.mu.Unlock()
-				invokeErr := func() error {
-					defer func() {
-						e.mu.Lock()
-						e.invokeDepth[invoked.Name]--
-						e.mu.Unlock()
-					}()
-					argFlags := make(map[string]bool, len(target.Arguments))
-					for _, arg := range target.Arguments {
-						argFlags[target.Name+":"+arg.Name] = true
-					}
-					cleaned := e.cleanStatements(invoked.Body, target, argFlags)
-					if stmt.OutputName != "" {
-						var buf bytes.Buffer
-						if err := execCommandBody(target, cleaned, isPrereq, workDir, invoked.SourceFile, &buf, env); err != nil {
-							return err
-						}
-						e.StructuredParse.SetVariable(stmt.OutputName, target.Name, strings.TrimSpace(buf.String()))
-						if e.debug {
-							fmt.Printf("[DEBUG] invoke %s captured %d bytes\n", invoked.Name, buf.Len())
-						}
-						return nil
-					}
-					return execCommandBody(target, cleaned, isPrereq, workDir, invoked.SourceFile, nil, env)
-				}()
-				if invokeErr != nil {
-					return invokeErr
-				}
-				continue
-			}
-
-			if stmt.Type == "for" {
-				items := resolveBodyValue(stmt.LoopItems, target.Name)
-				items = e.expandOutputRefs(items, target.Name)
-				if items == "" {
-					continue
-				}
-				var expanded []string
-				if strings.ContainsAny(items, "*?") {
-					wd := "."
-					if workDir != "" {
-						wd = e.resolveWorkDir(resolveBodyValue(workDir, target.Name))
-					} else if e.baseDir != "" {
-						wd = e.baseDir
-					}
-					for _, pattern := range strings.Split(items, ",") {
-						pattern = strings.TrimSpace(pattern)
-						matches, _ := filepath.Glob(filepath.Join(wd, pattern))
-						if len(matches) == 0 {
-							matches = []string{pattern}
-						}
-						for _, m := range matches {
-							expanded = append(expanded, filepath.Base(m))
-						}
-					}
-				} else if rng, ok := expandRange(items); ok {
-					expanded = rng
-				} else {
-					for item := range strings.SplitSeq(items, ",") {
-						expanded = append(expanded, strings.TrimSpace(item))
-					}
-				}
-
-				argFlags := make(map[string]bool)
-				for _, arg := range target.Arguments {
-					argFlags[target.Name+":"+arg.Name] = true
-				}
-
-			iterLoop:
-				for idx, item := range expanded {
-					e.StructuredParse.SetVariable(stmt.LoopVar, target.Name, item)
-					if stmt.LoopIndex != "" {
-						e.StructuredParse.SetVariable(stmt.LoopIndex, target.Name, strconv.Itoa(idx))
-					}
-					if e.debug {
-						fmt.Printf("[DEBUG] For loop %s = %s\n", stmt.LoopVar, item)
-					}
-					cleaned := e.cleanStatements(stmt.LoopBody, target, argFlags)
-					err := execCommandBody(target, cleaned, isPrereq, workDir, srcFile, out, env)
-					switch {
-					case errors.Is(err, errLoopContinue):
-						continue
-					case errors.Is(err, errLoopBreak):
-						break iterLoop
-					case err != nil:
-						return err
-					}
-				}
-				continue
-			}
-
-			if stmt.Type == "continue" {
-				return errLoopContinue
-			}
-			if stmt.Type == "break" {
-				return errLoopBreak
-			}
-
-			cmdLine := stmt.Shell
-			if cmdLine == "" {
-				continue
-			}
-
-			ignoreErr := false
-			if strings.HasPrefix(cmdLine, "!") {
-				ignoreErr = true
-				cmdLine = strings.TrimSpace(cmdLine[1:])
-			}
-
-			cmdLine = envRef(cmdLine)
-
-			args := append(e.shellArgs, cmdLine)
-			cmd := exec.Command(e.shellName, args...)
-			if workDir != "" {
-				cmd.Dir = e.resolveWorkDir(resolveBodyValue(workDir, target.Name))
-			}
-			cmd.Env = *env
-
-			var fullCommand string
-			if e.debug {
-				fullCommand = e.shellName + " " + strings.Join(args, " ")
-			}
-
-			if e.debug {
-				switch {
-				case isPrereq:
-					fmt.Printf("[DEBUG] Running prerequisite %s: %s\n", target.Name, fullCommand)
-				case target.LazyEval != nil:
-					fmt.Printf("[DEBUG] Running lazy command for variable %s: %s\n", target.LazyEval.VarName, fullCommand)
-				default:
-					fmt.Printf("[DEBUG] Running command %s: %s\n", target.Name, fullCommand)
-				}
-			}
-
-			release := e.acquire()
-			if !e.debug && !isPrereq && target.LazyEval == nil && out == nil {
-				cmd.Stdout = os.Stdout
-				cmd.Stderr = os.Stderr
-				err := cmd.Run()
-				release()
-				if err != nil {
-					exitCode := 1
-					if ee, ok := err.(*exec.ExitError); ok {
-						exitCode = ee.ExitCode()
-					}
-					if !ignoreErr {
-						return &CommandError{
-							Cmd:      e.shellName + " " + strings.Join(args, " "),
-							ExitCode: exitCode,
-							File:     srcFile,
-							Line:     stmt.SourceLine,
-						}
-					}
-				}
-				continue
-			}
-
-			var stdout, stderr []byte
-			var err error
-			if e.debug {
-				stdout, stderr, err = capture(cmd)
-			} else {
-				stdout, err = cmd.Output()
-			}
-
-			release()
-
-			output := stdout
-			if len(stderr) > 0 {
-				if len(output) > 0 {
-					output = append(output, '\n')
-				}
-				output = append(output, stderr...)
-			}
-
-			if err != nil {
-				exitCode := 1
-				if ee, ok := err.(*exec.ExitError); ok {
-					exitCode = ee.ExitCode()
-				}
-
-				if e.debug {
-					fmt.Printf("[DEBUG] Command failed: %v\n", err)
-					if len(stderr) > 0 {
-						fmt.Printf("[DEBUG] Error output: %s\n", string(stderr))
-					}
-				}
-
-				if fullCommand == "" {
-					fullCommand = e.shellName + " " + strings.Join(args, " ")
-				}
-
-				if ignoreErr {
-					if e.debug {
-						fmt.Printf("[DEBUG] Ignoring failure (error-tolerant statement)\n")
-					}
-				} else {
-					return &CommandError{
-						Cmd:      fullCommand,
-						ExitCode: exitCode,
-						Stderr:   string(stderr),
-						File:     srcFile,
-						Line:     stmt.SourceLine,
-					}
-				}
-			}
-
-			strOutput := strings.TrimSpace(string(output))
-
-			if out != nil {
-				if err == nil {
-					// The capture buffer cannot fail; ignore write errors.
-					_, _ = out.Write(output)
-				}
-				continue
-			}
-
-			switch {
-			case isPrereq:
-				e.mu.Lock()
-				target.PrereqOutput = append(target.PrereqOutput, strOutput)
-				if stmt.OutputName != "" {
-					if target.NamedOutput == nil {
-						target.NamedOutput = make(map[string]string)
-					}
-					target.NamedOutput[stmt.OutputName] = strOutput
-				}
-				e.mu.Unlock()
-				if e.debug {
-					fmt.Printf("[DEBUG] Prereq output: %s\n", strOutput)
-					if stmt.OutputName != "" {
-						fmt.Printf("[DEBUG] Named output %s.%s = %s\n", target.Name, stmt.OutputName, strOutput)
-					}
-				}
-			case target.LazyEval != nil:
-				e.StructuredParse.SetVariable(target.LazyEval.VarName, target.LazyEval.Scope, strOutput)
-				if e.debug {
-					fmt.Printf("[DEBUG] Set variable %s.%s = %s\n", target.LazyEval.Scope, target.LazyEval.VarName, strOutput)
-				}
-			default:
-				fmt.Println(strOutput)
-			}
-		}
-
-		return nil
+	ctx := &execContext{
+		target:   command,
+		isPrereq: isPrereq,
+		workDir:  workDir,
+		srcFile:  command.SourceFile,
 	}
-
-	cleanCommandBody := func(cmd *Command) ([]BodyStatement, error) {
-		if len(cmd.PrereqCmds) > 0 {
-			for _, prereq := range cmd.PrereqCmds {
-				for idx, arg := range prereq.PrereqOutput {
-					varName := prereq.Name + "." + fmt.Sprintf("%d", idx)
-					e.StructuredParse.SetVariable(strings.TrimSpace(varName), cmd.Name, strings.TrimSpace(arg))
-				}
-				// Register named outputs (&prereq.name)
-				for name, val := range prereq.NamedOutput {
-					varName := prereq.Name + "." + name
-					e.StructuredParse.SetVariable(varName, cmd.Name, strings.TrimSpace(val))
-				}
-			}
-		}
-
-		argFlags := make(map[string]bool, len(cmd.Arguments))
-		for _, arg := range cmd.Arguments {
-			argFlags[cmd.Name+":"+arg.Name] = true
-		}
-
-		var cleanStmts func(stmts []BodyStatement) []BodyStatement
-		cleanStmts = func(stmts []BodyStatement) []BodyStatement {
-			out := make([]BodyStatement, len(stmts))
-			for i, stmt := range stmts {
-				if stmt.Type == "if" {
-					out[i] = BodyStatement{
-						Type:       "if",
-						Cond:       stmt.Cond,
-						ThenBody:   cleanStmts(stmt.ThenBody),
-						ElseBody:   cleanStmts(stmt.ElseBody),
-						SourceLine: stmt.SourceLine,
-					}
-					continue
-				}
-				if stmt.Type == "for" {
-					out[i] = BodyStatement{
-						Type:       "for",
-						LoopVar:    stmt.LoopVar,
-						LoopIndex:  stmt.LoopIndex,
-						LoopItems:  e.cleanShellLine(cmd, stmt.LoopItems, argFlags),
-						LoopBody:   stmt.LoopBody,
-						SourceLine: stmt.SourceLine,
-					}
-					continue
-				}
-				if stmt.Type == "continue" || stmt.Type == "break" {
-					out[i] = stmt
-					continue
-				}
-				if stmt.Type == "invoke" || stmt.Type == "env" {
-					out[i] = stmt
-					continue
-				}
-				out[i] = BodyStatement{Type: "shell", Shell: e.cleanShellLine(cmd, stmt.Shell, argFlags), OutputName: stmt.OutputName, SourceLine: stmt.SourceLine}
-			}
-			return out
-		}
-
-		return cleanStmts(cmd.Body), nil
-	}
+	cmdEnv := slices.Clone(e.env)
+	ctx.env = &cmdEnv
 
 	var prereqCmds []*Command
 	for _, prereqName := range command.Prereqs {
@@ -732,14 +349,12 @@ func (e *Executor) executeCommand(command *Command) error {
 		return err
 	}
 
-	body, err := cleanCommandBody(command)
+	body, err := e.cleanCommandBody(command)
 	if err != nil {
 		return err
 	}
 
-	cmdEnv := slices.Clone(e.env)
-
-	if err := execCommandBody(command, body, isPrereq, workDir, command.SourceFile, nil, &cmdEnv); err != nil {
+	if err := e.execBody(ctx, body); err != nil {
 		return err
 	}
 
@@ -754,11 +369,36 @@ func (e *Executor) executeCommand(command *Command) error {
 	return nil
 }
 
+func (e *Executor) argFlags(cmd *Command) map[string]bool {
+	flags := make(map[string]bool, len(cmd.Arguments))
+	for _, arg := range cmd.Arguments {
+		flags[cmd.Name+":"+arg.Name] = true
+	}
+	return flags
+}
+
+func (e *Executor) cleanCommandBody(cmd *Command) ([]BodyStatement, error) {
+	if len(cmd.PrereqCmds) > 0 {
+		for _, prereq := range cmd.PrereqCmds {
+			for idx, arg := range prereq.PrereqOutput {
+				varName := prereq.Name + "." + strconv.Itoa(idx)
+				e.StructuredParse.SetVariable(strings.TrimSpace(varName), cmd.Name, strings.TrimSpace(arg))
+			}
+
+			for name, val := range prereq.NamedOutput {
+				varName := prereq.Name + "." + name
+				e.StructuredParse.SetVariable(varName, cmd.Name, strings.TrimSpace(val))
+			}
+		}
+	}
+	return e.cleanStatements(cmd.Body, cmd, e.argFlags(cmd)), nil
+}
+
 func (e *Executor) cleanStatements(stmts []BodyStatement, cmd *Command, argFlags map[string]bool) []BodyStatement {
 	out := make([]BodyStatement, len(stmts))
 	for i, stmt := range stmts {
 		switch stmt.Type {
-		case "if":
+		case StmtIf:
 			out[i] = BodyStatement{
 				Type:       "if",
 				Cond:       stmt.Cond,
@@ -766,7 +406,7 @@ func (e *Executor) cleanStatements(stmts []BodyStatement, cmd *Command, argFlags
 				ElseBody:   e.cleanStatements(stmt.ElseBody, cmd, argFlags),
 				SourceLine: stmt.SourceLine,
 			}
-		case "for":
+		case StmtFor:
 			out[i] = BodyStatement{
 				Type:       "for",
 				LoopVar:    stmt.LoopVar,
@@ -775,12 +415,12 @@ func (e *Executor) cleanStatements(stmts []BodyStatement, cmd *Command, argFlags
 				LoopBody:   stmt.LoopBody,
 				SourceLine: stmt.SourceLine,
 			}
-		case "continue", "break":
+		case StmtContinue, StmtBreak:
 			out[i] = stmt
-		case "invoke", "env":
+		case StmtInvoke, "env":
 			out[i] = stmt
 		default:
-			out[i] = BodyStatement{Type: "shell", Shell: e.cleanShellLine(cmd, stmt.Shell, argFlags), OutputName: stmt.OutputName, SourceLine: stmt.SourceLine}
+			out[i] = BodyStatement{Type: StmtShell, Shell: e.cleanShellLine(cmd, stmt.Shell, argFlags), OutputName: stmt.OutputName, SourceLine: stmt.SourceLine}
 		}
 	}
 	return out
@@ -1338,6 +978,342 @@ func (e *Executor) tryApplyCloudBody(cmd *Command) error {
 	cmd.Body = append(cmd.Body, external.Body...)
 	cmd.CloudAccessible = false
 	return nil
+}
+
+type execContext struct {
+	target   *Command
+	isPrereq bool
+	workDir  string
+	srcFile  string
+	out      io.Writer
+	env      *[]string
+}
+
+func (e *Executor) resolveBodyValue(ctx *execContext, s, scope string) string {
+	s = resolveVarRefs(s, func(name string) (string, bool) {
+		return e.StructuredParse.LookupVariable(name, scope)
+	})
+	return resolveEnvRefsWith(s, func(name string) string {
+		if v, ok := envLookupValue(*ctx.env, name); ok {
+			return v
+		}
+		return os.Getenv(name)
+	})
+}
+
+func (e *Executor) resolveBodyEnvRef(ctx *execContext, s string) string {
+	return resolveEnvRefsSetWith(s, func(name string) (string, bool) {
+		if v, ok := envLookupValue(*ctx.env, name); ok {
+			return v, true
+		}
+		return os.LookupEnv(name)
+	})
+}
+
+func (e *Executor) execBody(ctx *execContext, body []BodyStatement) error {
+	condBase := e.baseDir
+	if ctx.workDir != "" {
+		condBase = e.resolveWorkDir(e.resolveBodyValue(ctx, ctx.workDir, ctx.target.Name))
+	}
+	for i := 0; i < len(body); i++ {
+		stmt := body[i]
+		switch stmt.Type {
+		case StmtEnv:
+			for _, pair := range stmt.Env {
+				key, value, _ := strings.Cut(pair, "=")
+				value = resolveVarRefs(value, func(name string) (string, bool) {
+					return e.StructuredParse.LookupVariable(name, ctx.target.Name)
+				})
+
+				resolved := e.resolveBodyEnvRef(ctx, value)
+				*ctx.env = setEnvVar(*ctx.env, key, resolved)
+				e.StructuredParse.SetVariable(key, ctx.target.Name, resolved)
+
+				if e.debug {
+					fmt.Printf("[DEBUG] env %s=%s\n", key, resolved)
+				}
+			}
+
+			rest := e.cleanStatements(body[i+1:], ctx.target, e.argFlags(ctx.target))
+			body = append(body[:i+1], rest...)
+
+		case StmtIf:
+			cond := e.resolveBodyValue(ctx, stmt.Cond, ctx.target.Name)
+			if e.debug {
+				fmt.Printf("[DEBUG] Evaluating condition: %s\n", cond)
+			}
+			if evaluateConditionWithBase(cond, condBase) {
+				if err := e.execBody(ctx, stmt.ThenBody); err != nil {
+					return err
+				}
+			} else if stmt.ElseBody != nil {
+				if err := e.execBody(ctx, stmt.ElseBody); err != nil {
+					return err
+				}
+			}
+
+		case StmtInvoke:
+			if err := e.invokeCommand(ctx, stmt); err != nil {
+				return err
+			}
+
+			if stmt.OutputName != "" {
+				rest := e.cleanStatements(body[i+1:], ctx.target, e.argFlags(ctx.target))
+				body = append(body[:i+1], rest...)
+			}
+
+		case StmtFor:
+			items := e.resolveBodyValue(ctx, stmt.LoopItems, ctx.target.Name)
+			items = e.expandOutputRefs(items, ctx.target.Name)
+			if items == "" {
+				continue
+			}
+			expanded := e.expandLoopItems(ctx, items)
+			argFlags := e.argFlags(ctx.target)
+
+		iterLoop:
+			for idx, item := range expanded {
+				e.StructuredParse.SetVariable(stmt.LoopVar, ctx.target.Name, item)
+				if stmt.LoopIndex != "" {
+					e.StructuredParse.SetVariable(stmt.LoopIndex, ctx.target.Name, strconv.Itoa(idx))
+				}
+				if e.debug {
+					fmt.Printf("[DEBUG] For loop %s = %s\n", stmt.LoopVar, item)
+				}
+				cleaned := e.cleanStatements(stmt.LoopBody, ctx.target, argFlags)
+				err := e.execBody(ctx, cleaned)
+				switch {
+				case errors.Is(err, errLoopContinue):
+					continue
+				case errors.Is(err, errLoopBreak):
+					break iterLoop
+				case err != nil:
+					return err
+				}
+			}
+
+		case StmtContinue:
+			return errLoopContinue
+		case StmtBreak:
+			return errLoopBreak
+
+		default:
+			if err := e.runShell(ctx, stmt); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func (e *Executor) invokeCommand(ctx *execContext, stmt BodyStatement) error {
+	invoked, err := e.StructuredParse.GetCommand(strings.TrimSpace(stmt.Shell))
+	if err != nil {
+		return err
+	}
+	if e.invokeDepth == nil {
+		e.invokeDepth = make(map[string]int)
+	}
+	e.mu.Lock()
+	if e.invokeDepth[invoked.Name] > 0 {
+		e.mu.Unlock()
+		return fmt.Errorf("circular invoke of command '%s'", invoked.Name)
+	}
+	e.invokeDepth[invoked.Name]++
+	e.mu.Unlock()
+
+	sub := *ctx // invoke bodies run in the caller's context
+	sub.srcFile = invoked.SourceFile
+	sub.out = nil
+	cleaned := e.cleanStatements(invoked.Body, ctx.target, e.argFlags(ctx.target))
+
+	var invokeErr error
+	if stmt.OutputName != "" {
+		var buf bytes.Buffer
+		sub.out = &buf
+		invokeErr = e.execBody(&sub, cleaned)
+		if invokeErr == nil {
+			e.StructuredParse.SetVariable(stmt.OutputName, ctx.target.Name, strings.TrimSpace(buf.String()))
+			if e.debug {
+				fmt.Printf("[DEBUG] invoke %s captured %d bytes\n", invoked.Name, buf.Len())
+			}
+		}
+	} else {
+		invokeErr = e.execBody(&sub, cleaned)
+	}
+
+	e.mu.Lock()
+	e.invokeDepth[invoked.Name]--
+	e.mu.Unlock()
+	return invokeErr
+}
+
+func (e *Executor) expandLoopItems(ctx *execContext, items string) []string {
+	var expanded []string
+	if strings.ContainsAny(items, "*?") {
+		wd := "."
+		if ctx.workDir != "" {
+			wd = e.resolveWorkDir(e.resolveBodyValue(ctx, ctx.workDir, ctx.target.Name))
+		} else if e.baseDir != "" {
+			wd = e.baseDir
+		}
+		for _, pattern := range strings.Split(items, ",") {
+			pattern = strings.TrimSpace(pattern)
+			matches, _ := filepath.Glob(filepath.Join(wd, pattern))
+			if len(matches) == 0 {
+				matches = []string{pattern}
+			}
+			for _, m := range matches {
+				expanded = append(expanded, filepath.Base(m))
+			}
+		}
+		return expanded
+	}
+	if rng, ok := expandRange(items); ok {
+		return rng
+	}
+	for item := range strings.SplitSeq(items, ",") {
+		expanded = append(expanded, strings.TrimSpace(item))
+	}
+	return expanded
+}
+
+func (e *Executor) runShell(ctx *execContext, stmt BodyStatement) error {
+	cmdLine := stmt.Shell
+	if cmdLine == "" {
+		return nil
+	}
+
+	ignoreErr := false
+	if strings.HasPrefix(cmdLine, "!") {
+		ignoreErr = true
+		cmdLine = strings.TrimSpace(cmdLine[1:])
+	}
+
+	cmdLine = e.resolveBodyEnvRef(ctx, cmdLine)
+	args := append(e.shellArgs, cmdLine)
+	cmd := exec.Command(e.shellName, args...)
+
+	if ctx.workDir != "" {
+		cmd.Dir = e.resolveWorkDir(e.resolveBodyValue(ctx, ctx.workDir, ctx.target.Name))
+	}
+	cmd.Env = *ctx.env
+
+	fullCommand := ""
+	if e.debug {
+		fullCommand = e.shellName + " " + strings.Join(args, " ")
+		switch {
+		case ctx.isPrereq:
+			fmt.Printf("[DEBUG] Running prerequisite %s: %s\n", ctx.target.Name, fullCommand)
+		case ctx.target.LazyEval != nil:
+			fmt.Printf("[DEBUG] Running lazy command for variable %s: %s\n", ctx.target.LazyEval.VarName, fullCommand)
+		default:
+			fmt.Printf("[DEBUG] Running command %s: %s\n", ctx.target.Name, fullCommand)
+		}
+	}
+
+	release := e.acquire()
+	stream := !e.debug && !ctx.isPrereq && ctx.target.LazyEval == nil && ctx.out == nil
+	if stream {
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		err := cmd.Run()
+		release()
+		if err != nil && !ignoreErr {
+			return &CommandError{
+				Cmd:      e.shellName + " " + strings.Join(args, " "),
+				ExitCode: exitCodeOf(err),
+				File:     ctx.srcFile,
+				Line:     stmt.SourceLine,
+			}
+		}
+		return nil
+	}
+
+	var stdout, stderr []byte
+	var err error
+	if e.debug {
+		stdout, stderr, err = capture(cmd)
+	} else {
+		stdout, err = cmd.Output()
+	}
+	release()
+
+	output := stdout
+	if len(stderr) > 0 {
+		if len(output) > 0 {
+			output = append(output, '\n')
+		}
+		output = append(output, stderr...)
+	}
+
+	if err != nil {
+		if e.debug {
+			fmt.Printf("[DEBUG] Command failed: %v\n", err)
+			if len(stderr) > 0 {
+				fmt.Printf("[DEBUG] Error output: %s\n", string(stderr))
+			}
+		}
+		if fullCommand == "" {
+			fullCommand = e.shellName + " " + strings.Join(args, " ")
+		}
+		if !ignoreErr {
+			return &CommandError{
+				Cmd:      fullCommand,
+				ExitCode: exitCodeOf(err),
+				Stderr:   string(stderr),
+				File:     ctx.srcFile,
+				Line:     stmt.SourceLine,
+			}
+		}
+		if e.debug {
+			fmt.Printf("[DEBUG] Ignoring failure (error-tolerant statement)\n")
+		}
+	}
+
+	strOutput := strings.TrimSpace(string(output))
+
+	if ctx.out != nil {
+		if err == nil {
+			_, _ = ctx.out.Write(output)
+		}
+		return nil
+	}
+
+	switch {
+	case ctx.isPrereq:
+		e.mu.Lock()
+		ctx.target.PrereqOutput = append(ctx.target.PrereqOutput, strOutput)
+		if stmt.OutputName != "" {
+			if ctx.target.NamedOutput == nil {
+				ctx.target.NamedOutput = make(map[string]string)
+			}
+			ctx.target.NamedOutput[stmt.OutputName] = strOutput
+		}
+		e.mu.Unlock()
+		if e.debug {
+			fmt.Printf("[DEBUG] Prereq output: %s\n", strOutput)
+			if stmt.OutputName != "" {
+				fmt.Printf("[DEBUG] Named output %s.%s = %s\n", ctx.target.Name, stmt.OutputName, strOutput)
+			}
+		}
+	case ctx.target.LazyEval != nil:
+		e.StructuredParse.SetVariable(ctx.target.LazyEval.VarName, ctx.target.LazyEval.Scope, strOutput)
+		if e.debug {
+			fmt.Printf("[DEBUG] Set variable %s.%s = %s\n", ctx.target.LazyEval.Scope, ctx.target.LazyEval.VarName, strOutput)
+		}
+	default:
+		fmt.Println(strOutput)
+	}
+	return nil
+}
+
+// exitCodeOf extracts the process exit code from an exec error (default 1).
+func exitCodeOf(err error) int {
+	if ee, ok := err.(*exec.ExitError); ok {
+		return ee.ExitCode()
+	}
+	return 1
 }
 
 func (e *Executor) Execute(commands []string) error {

@@ -133,11 +133,11 @@ func printDryRunBody(body []pkg.BodyStatement, indent int) {
 	prefix := strings.Repeat("  ", indent+1)
 	for _, stmt := range body {
 		switch stmt.Type {
-		case "if":
+		case pkg.StmtIf:
 			fmt.Printf("%sif %s {\n", prefix, stmt.Cond)
 			printDryRunBody(stmt.ThenBody, indent+1)
 			elseBody := stmt.ElseBody
-			for len(elseBody) == 1 && elseBody[0].Type == "if" {
+			for len(elseBody) == 1 && elseBody[0].Type == pkg.StmtIf {
 				inner := elseBody[0]
 				fmt.Printf("%s} else if %s {\n", prefix, inner.Cond)
 				printDryRunBody(inner.ThenBody, indent+1)
@@ -148,7 +148,7 @@ func printDryRunBody(body []pkg.BodyStatement, indent int) {
 				printDryRunBody(elseBody, indent+1)
 			}
 			fmt.Printf("%s}\n", prefix)
-		case "for":
+		case pkg.StmtFor:
 			loopVar := stmt.LoopVar
 			if stmt.LoopIndex != "" {
 				loopVar = stmt.LoopIndex + ", " + loopVar
@@ -156,11 +156,11 @@ func printDryRunBody(body []pkg.BodyStatement, indent int) {
 			fmt.Printf("%sfor %s in %s {\n", prefix, loopVar, stmt.LoopItems)
 			printDryRunBody(stmt.LoopBody, indent+1)
 			fmt.Printf("%s}\n", prefix)
-		case "continue", "break":
+		case pkg.StmtContinue, pkg.StmtBreak:
 			fmt.Printf("%s%s\n", prefix, stmt.Type)
-		case "invoke":
+		case pkg.StmtInvoke:
 			fmt.Printf("%sinvoke %s\n", prefix, stmt.Shell)
-		case "env":
+		case pkg.StmtEnv:
 			fmt.Printf("%senv { %s }\n", prefix, strings.Join(stmt.Env, ", "))
 		default:
 			fmt.Printf("%s%s\n", prefix, stmt.Shell)

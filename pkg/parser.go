@@ -199,8 +199,19 @@ type LazyOutput struct {
 	Scope   string `json:"scope"`
 }
 
+// BodyStatement statement types.
+const (
+	StmtShell    = "shell"
+	StmtIf       = "if"
+	StmtFor      = "for"
+	StmtInvoke   = "invoke"
+	StmtEnv      = "env"
+	StmtContinue = "continue"
+	StmtBreak    = "break"
+)
+
 type BodyStatement struct {
-	Type       string          `json:"type"` // "shell", "if", "for", "invoke", or "env"
+	Type       string          `json:"type"` // one of the Stmt* constants
 	Shell      string          `json:"shell,omitempty"`
 	OutputName string          `json:"output_name,omitempty"`
 	Cond       string          `json:"cond,omitempty"`
@@ -332,7 +343,7 @@ func (p *Parser) tryEvalExpression(expression string, varName *string, varScope 
 			p.Data.Commands = append(p.Data.Commands, &Command{
 				Name:       fmt.Sprintf("__lazy_%s_%s", *varName, *varScope),
 				LazyEval:   &LazyOutput{VarName: *varName, Scope: *varScope},
-				Body:       []BodyStatement{{Type: "shell", Shell: fmt.Sprintf("$ %s", restOfLine), SourceLine: lineNum}},
+				Body:       []BodyStatement{{Type: StmtShell, Shell: fmt.Sprintf("$ %s", restOfLine), SourceLine: lineNum}},
 				SourceLine: lineNum,
 				SourceFile: p.InputFile,
 			})
@@ -726,7 +737,7 @@ func (p *Parser) parseBodyStatements(raw []rawLine, scope string) ([]BodyStateme
 			if name == "" {
 				return nil, fmt.Errorf("invoke requires a command name")
 			}
-			stmts = append(stmts, BodyStatement{Type: "invoke", Shell: name, OutputName: outputName, SourceLine: lineNum})
+			stmts = append(stmts, BodyStatement{Type: StmtInvoke, Shell: name, OutputName: outputName, SourceLine: lineNum})
 			i++
 			continue
 		}
@@ -736,7 +747,7 @@ func (p *Parser) parseBodyStatements(raw []rawLine, scope string) ([]BodyStateme
 			stmts = append(stmts, BodyStatement{
 				Type:       "if",
 				Cond:       cond,
-				ThenBody:   []BodyStatement{{Type: "continue", SourceLine: lineNum}},
+				ThenBody:   []BodyStatement{{Type: StmtContinue, SourceLine: lineNum}},
 				SourceLine: lineNum,
 			})
 			i++
@@ -748,7 +759,7 @@ func (p *Parser) parseBodyStatements(raw []rawLine, scope string) ([]BodyStateme
 			stmts = append(stmts, BodyStatement{
 				Type:       "if",
 				Cond:       cond,
-				ThenBody:   []BodyStatement{{Type: "break", SourceLine: lineNum}},
+				ThenBody:   []BodyStatement{{Type: StmtBreak, SourceLine: lineNum}},
 				SourceLine: lineNum,
 			})
 			i++
@@ -756,7 +767,11 @@ func (p *Parser) parseBodyStatements(raw []rawLine, scope string) ([]BodyStateme
 		}
 
 		if line == "continue" || line == "break" {
-			stmts = append(stmts, BodyStatement{Type: line, SourceLine: lineNum})
+			stmtType := StmtContinue
+			if line == "break" {
+				stmtType = StmtBreak
+			}
+			stmts = append(stmts, BodyStatement{Type: stmtType, SourceLine: lineNum})
 			i++
 			continue
 		}
@@ -767,7 +782,7 @@ func (p *Parser) parseBodyStatements(raw []rawLine, scope string) ([]BodyStateme
 		}
 
 		shell, outputName := extractOutputName(line)
-		stmts = append(stmts, BodyStatement{Type: "shell", Shell: shell, OutputName: outputName, SourceLine: lineNum})
+		stmts = append(stmts, BodyStatement{Type: StmtShell, Shell: shell, OutputName: outputName, SourceLine: lineNum})
 		i++
 	}
 	return stmts, nil
@@ -886,7 +901,7 @@ func (p *Parser) parseIfBlock(raw []rawLine, scope string) (BodyStatement, int, 
 		if err != nil {
 			return BodyStatement{}, 0, err
 		}
-		stmt := BodyStatement{Type: "if", Cond: cond, ThenBody: thenStmts, SourceLine: headerNum}
+		stmt := BodyStatement{Type: StmtIf, Cond: cond, ThenBody: thenStmts, SourceLine: headerNum}
 		switch {
 		case elsePart == "":
 		case strings.HasPrefix(elsePart, "else if "):
@@ -1061,7 +1076,7 @@ func parseEnvPairs(pairs []string) ([]string, error) {
 
 func (p *Parser) parseEnvBlock(raw []rawLine) (BodyStatement, int, error) {
 	headerLine := raw[0]
-	stmt := BodyStatement{Type: "env", SourceLine: headerLine.num}
+	stmt := BodyStatement{Type: StmtEnv, SourceLine: headerLine.num}
 
 	if body, ok := singleLineBody(headerLine.text); ok {
 		pairs, err := parseEnvPairs(splitEnvPairs(body))

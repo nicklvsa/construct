@@ -416,9 +416,9 @@ func countShellLines(body []pkg.BodyStatement) int {
 	count := 0
 	for _, stmt := range body {
 		switch stmt.Type {
-		case "shell":
+		case pkg.StmtShell:
 			count++
-		case "if":
+		case pkg.StmtIf:
 			count += countShellLines(stmt.ThenBody)
 			count += countShellLines(stmt.ElseBody)
 		}
@@ -431,7 +431,7 @@ func hasNamedOutput(body []pkg.BodyStatement, name string) bool {
 		if stmt.OutputName == name {
 			return true
 		}
-		if stmt.Type == "if" {
+		if stmt.Type == pkg.StmtIf {
 			if hasNamedOutput(stmt.ThenBody, name) || hasNamedOutput(stmt.ElseBody, name) {
 				return true
 			}
@@ -448,7 +448,7 @@ func namedOutputAt(data *pkg.ParsedData, cmdName string, idx int) string {
 	}
 	shellIdx := 0
 	for _, stmt := range cmd.Body {
-		if stmt.Type != "shell" {
+		if stmt.Type != pkg.StmtShell {
 			continue
 		}
 		if stmt.OutputName != "" && shellIdx == idx {
@@ -658,14 +658,14 @@ func varHoverMessage(name string, data *pkg.ParsedData) string {
 
 	shellIdx := 0
 	for _, stmt := range cmd.Body {
-		if stmt.Type != "shell" {
+		if stmt.Type != pkg.StmtShell {
 			continue
 		}
 		matches := false
 		var namedHint string
-		if _, err := strconv.Atoi(suffix); err == nil {
+		if idx, err := strconv.Atoi(suffix); err == nil {
 			// Numeric index
-			if shellIdx == int(stringToInt(suffix)) {
+			if shellIdx == idx {
 				matches = true
 				if stmt.OutputName != "" {
 					namedHint = cmdName + "." + stmt.OutputName
@@ -685,17 +685,6 @@ func varHoverMessage(name string, data *pkg.ParsedData) string {
 		shellIdx++
 	}
 	return fmt.Sprintf("`%s` → output of `%s`", name, cmdName)
-}
-
-func stringToInt(s string) int64 {
-	var n int64
-	for _, c := range s {
-		if c < '0' || c > '9' {
-			break
-		}
-		n = n*10 + int64(c-'0')
-	}
-	return n
 }
 
 func (s *server) handleDefinition(params json.RawMessage) (interface{}, error) {
@@ -1010,18 +999,18 @@ func invokeNameAtPosition(line string, char int) (string, int, int, bool) {
 func invokeCaptureHint(body []pkg.BodyStatement, name string) (invoked string, line int, found bool) {
 	for _, stmt := range body {
 		switch stmt.Type {
-		case "invoke":
+		case pkg.StmtInvoke:
 			if stmt.OutputName == name {
 				return stmt.Shell, stmt.SourceLine, true
 			}
-		case "if":
+		case pkg.StmtIf:
 			if inv, ln, f := invokeCaptureHint(stmt.ThenBody, name); f {
 				return inv, ln, f
 			}
 			if inv, ln, f := invokeCaptureHint(stmt.ElseBody, name); f {
 				return inv, ln, f
 			}
-		case "for":
+		case pkg.StmtFor:
 			if inv, ln, f := invokeCaptureHint(stmt.LoopBody, name); f {
 				return inv, ln, f
 			}

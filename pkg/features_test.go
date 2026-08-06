@@ -456,6 +456,36 @@ selfref {
 	}
 }
 
+func TestInvokeCaptureVisibleAfter(t *testing.T) {
+	in := `gen {
+    $ echo hello
+}
+use {
+    invoke gen as captured
+    $ echo "final: &captured"
+}
+`
+	p := NewParserFromContent("t.constfile", in)
+	data, err := p.Parse()
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	use, err := data.GetCommand("use")
+	if err != nil {
+		t.Fatalf("use missing: %v", err)
+	}
+	r, _, restore := captureStreams(t)
+	err = executorEval(data, use)
+	restore()
+	if err != nil {
+		t.Fatalf("exec: %v", err)
+	}
+	out, _ := io.ReadAll(r)
+	if got := strings.TrimSpace(string(out)); got != "final: hello" {
+		t.Errorf("stdout = %q, want \"final: hello\"", got)
+	}
+}
+
 func TestEnvBlock(t *testing.T) {
 	in := `build {
     env { FOO=bar, BAZ=qux }
@@ -467,20 +497,24 @@ func TestEnvBlock(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
+
 	cmd, err := data.GetCommand("build")
 	if err != nil {
 		t.Fatalf("build missing: %v", err)
 	}
+
 	if len(cmd.Body) != 2 || cmd.Body[0].Type != "env" {
 		t.Fatalf("env stmt not parsed: %+v", cmd.Body)
 	}
+
 	if len(cmd.Body[0].Env) != 2 || cmd.Body[0].Env[0] != "FOO=bar" {
 		t.Errorf("env pairs = %v", cmd.Body[0].Env)
 	}
+
 	if err := executorEval(data, cmd); err != nil {
 		t.Fatalf("exec: %v", err)
 	}
-	// Env vars are visible as &refs in later shell lines and conditions.
+
 	if v, ok := data.LookupVariable("FOO", "build"); !ok || v != "bar" {
 		t.Errorf("env var as &ref = %q, %v; want \"bar\", true", v, ok)
 	}
@@ -614,8 +648,6 @@ func TestMatrixParsing(t *testing.T) {
 	}
 }
 
-// TestMatrixExecution verifies the cross product iterates all combinations
-// with both variables in scope, the last variable varying fastest.
 func TestMatrixExecution(t *testing.T) {
 	data := &ParsedData{
 		Commands: []*Command{{
