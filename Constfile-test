@@ -1,0 +1,12 @@
+log (thing_to_log) {
+    echo "Thing to log: &thing_to_log" as out
+}
+
+ls in examples {
+    $ ls -l as out
+}
+
+_ < log, ls {
+    echo "&log.out"
+    echo "&ls.out"
+}

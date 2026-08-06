@@ -1,6 +1,7 @@
 package pkg
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -116,11 +117,12 @@ func TestExtractArgumentString(t *testing.T) {
 	}
 }
 
-func TestExtractPrerequisiteString(t *testing.T) {
+func TestExtractPrerequisites(t *testing.T) {
 	tests := []struct {
 		name     string
 		input    string
 		expected string
+		dirs     map[string]string
 	}{
 		{
 			name:     "simple prerequisites",
@@ -152,13 +154,37 @@ func TestExtractPrerequisiteString(t *testing.T) {
 			input:    "|deploy| < build {",
 			expected: "build",
 		},
+		{
+			name:     "prereq with in dir modifier",
+			input:    "run < build in subdir {",
+			expected: "build",
+			dirs:     map[string]string{"build": "subdir"},
+		},
+		{
+			name:     "multiple prereqs with trailing in dir",
+			input:    "deploy < build, test in deep/dir {",
+			expected: "build, test",
+			dirs:     map[string]string{"test": "deep/dir"},
+		},
+		{
+			name:     "each prereq with its own in dir",
+			input:    "deploy < build in a, test in b {",
+			expected: "build, test",
+			dirs:     map[string]string{"build": "a", "test": "b"},
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := extractPrerequisiteString(tt.input)
-			if result != tt.expected {
-				t.Errorf("extractPrerequisiteString(%q) = %q, want %q", tt.input, result, tt.expected)
+			names, dirs, err := extractPrerequisites(tt.input)
+			if err != nil {
+				t.Fatalf("extractPrerequisites(%q) unexpected error: %v", tt.input, err)
+			}
+			if got := strings.Join(names, ", "); got != tt.expected {
+				t.Errorf("extractPrerequisites(%q) = %q, want %q", tt.input, got, tt.expected)
+			}
+			if !reflect.DeepEqual(dirs, tt.dirs) {
+				t.Errorf("extractPrerequisites(%q) dirs = %v, want %v", tt.input, dirs, tt.dirs)
 			}
 		})
 	}
@@ -205,7 +231,7 @@ func TestParseArgumentName(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			name, isOptional := parseArgumentName(tt.input)
+			name, isOptional, _ := parseArgumentName(tt.input)
 			if name != tt.expectedName {
 				t.Errorf("parseArgumentName(%q) name = %q, want %q", tt.input, name, tt.expectedName)
 			}
@@ -315,65 +341,6 @@ func TestParseArgumentList(t *testing.T) {
 	}
 }
 
-func TestParsePrerequisiteList(t *testing.T) {
-	tests := []struct {
-		name     string
-		input    string
-		expected []string
-	}{
-		{
-			name:     "single prerequisite",
-			input:    "build",
-			expected: []string{"build"},
-		},
-		{
-			name:     "multiple prerequisites",
-			input:    "build, test, lint",
-			expected: []string{"build", "test", "lint"},
-		},
-		{
-			name:     "prerequisites with extra spaces",
-			input:    "build , test , lint",
-			expected: []string{"build", "test", "lint"},
-		},
-		{
-			name:     "empty string",
-			input:    "",
-			expected: nil,
-		},
-		{
-			name:     "whitespace only",
-			input:    "   ",
-			expected: nil,
-		},
-		{
-			name:     "trailing comma",
-			input:    "build, test,",
-			expected: []string{"build", "test"},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result, err := parsePrerequisiteList(tt.input)
-			if err != nil {
-				t.Fatalf("parsePrerequisiteList(%q) unexpected error: %v", tt.input, err)
-			}
-
-			if len(result) != len(tt.expected) {
-				t.Errorf("parsePrerequisiteList(%q) returned %d prereqs, want %d", tt.input, len(result), len(tt.expected))
-				return
-			}
-
-			for i, prereq := range result {
-				if prereq != tt.expected[i] {
-					t.Errorf("prereq[%d] = %q, want %q", i, prereq, tt.expected[i])
-				}
-			}
-		})
-	}
-}
-
 // =============================================================================
 // Original tests (still passing with refactored code)
 // =============================================================================
@@ -452,7 +419,7 @@ func TestParseVariable(t *testing.T) {
 				Data:  &ParsedData{},
 				Lines: []string{},
 			}
-			err := parser.parseVar(tt.input, tt.expectScope)
+			err := parser.parseVar(tt.input, tt.expectScope, 1)
 			if err != nil {
 				t.Errorf("unexpected error: %v", err)
 			}
@@ -544,7 +511,7 @@ func TestParseCommand(t *testing.T) {
 				Lines: lines,
 			}
 
-			_, err := parser.parseCommand(0, tt.input, tt.isDefault)
+			_, err := parser.parseCommand(0, tt.input, tt.isDefault, 1, "")
 			if err != nil {
 				t.Errorf("unexpected error: %v", err)
 			}
@@ -588,7 +555,7 @@ func TestParseUnclosedBrace(t *testing.T) {
 		Lines: lines,
 	}
 
-	_, err := parser.parseCommand(0, input, false)
+	_, err := parser.parseCommand(0, input, false, 1, "")
 	if err == nil {
 		t.Errorf("expected error for unclosed brace, got nil")
 	}
@@ -797,7 +764,7 @@ func TestPrereqWhitespace(t *testing.T) {
 		Lines: lines,
 	}
 
-	_, err := parser.parseCommand(0, input, false)
+	_, err := parser.parseCommand(0, input, false, 1, "")
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}
@@ -861,7 +828,7 @@ func TestArgumentParsing(t *testing.T) {
 		Lines: lines,
 	}
 
-	_, err := parser.parseCommand(0, input, false)
+	_, err := parser.parseCommand(0, input, false, 1, "")
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}
@@ -903,7 +870,7 @@ func TestScopedVariableParsing(t *testing.T) {
 		Lines: lines,
 	}
 
-	_, err := parser.parseCommand(0, input, false)
+	_, err := parser.parseCommand(0, input, false, 1, "")
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}
@@ -927,13 +894,11 @@ func TestScopedVariableParsing(t *testing.T) {
 	}
 }
 
-// TestTryEvalExpression covers the three resolution forms (@env, &ref, and the
-// $ lazy command) plus plain-text passthrough.
 func TestTryEvalExpression(t *testing.T) {
 	t.Run("plain text passes through unchanged", func(t *testing.T) {
 		p := &Parser{Data: &ParsedData{}}
 		name, scope := "x", "global"
-		got := p.tryEvalExpression("hello world", &name, &scope)
+		got := p.tryEvalExpression("hello world", &name, &scope, 1)
 		if got != "hello world" {
 			t.Errorf("got %q, want %q", got, "hello world")
 		}
@@ -943,7 +908,7 @@ func TestTryEvalExpression(t *testing.T) {
 		t.Setenv("CONSTRUCT_TEST_ENV", "envvalue")
 		p := &Parser{Data: &ParsedData{}}
 		name, scope := "x", "global"
-		got := p.tryEvalExpression("v=@CONSTRUCT_TEST_ENV", &name, &scope)
+		got := p.tryEvalExpression("v=@CONSTRUCT_TEST_ENV", &name, &scope, 1)
 		if got != "v=envvalue" {
 			t.Errorf("got %q, want %q", got, "v=envvalue")
 		}
@@ -952,7 +917,7 @@ func TestTryEvalExpression(t *testing.T) {
 	t.Run("@env undefined expands to empty", func(t *testing.T) {
 		p := &Parser{Data: &ParsedData{}}
 		name, scope := "x", "global"
-		got := p.tryEvalExpression("[@CONSTRUCT_NOPE_NOT_SET]", &name, &scope)
+		got := p.tryEvalExpression("[@CONSTRUCT_NOPE_NOT_SET]", &name, &scope, 1)
 		if got != "[]" {
 			t.Errorf("got %q, want %q", got, "[]")
 		}
@@ -962,7 +927,7 @@ func TestTryEvalExpression(t *testing.T) {
 		p := &Parser{Data: &ParsedData{}}
 		p.Data.Variables = append(p.Data.Variables, &Variable{Name: "g", Value: "GVAL", Scope: "global"})
 		name, scope := "x", "global"
-		got := p.tryEvalExpression("&g!", &name, &scope)
+		got := p.tryEvalExpression("&g!", &name, &scope, 1)
 		if got != "GVAL!" {
 			t.Errorf("got %q, want %q", got, "GVAL!")
 		}
@@ -972,7 +937,7 @@ func TestTryEvalExpression(t *testing.T) {
 		p := &Parser{Data: &ParsedData{}}
 		p.Data.Variables = append(p.Data.Variables, &Variable{Name: "loc", Value: "LOCVAL", Scope: "mycmd"})
 		name, scope := "x", "mycmd"
-		got := p.tryEvalExpression("&loc", &name, &scope)
+		got := p.tryEvalExpression("&loc", &name, &scope, 1)
 		if got != "LOCVAL" {
 			t.Errorf("got %q, want %q", got, "LOCVAL")
 		}
@@ -982,7 +947,7 @@ func TestTryEvalExpression(t *testing.T) {
 		p := &Parser{Data: &ParsedData{}}
 		name, scope := "x", "global"
 		// The reference is consumed but resolves to nothing.
-		got := p.tryEvalExpression("a&missing b", &name, &scope)
+		got := p.tryEvalExpression("a&missing b", &name, &scope, 1)
 		if got != "a b" {
 			t.Errorf("got %q, want %q", got, "a b")
 		}
@@ -991,7 +956,7 @@ func TestTryEvalExpression(t *testing.T) {
 	t.Run("$ creates a lazy command and stops evaluation", func(t *testing.T) {
 		p := &Parser{Data: &ParsedData{}}
 		name, scope := "myvar", "global"
-		_ = p.tryEvalExpression("$ echo hi", &name, &scope)
+		_ = p.tryEvalExpression("$ echo hi", &name, &scope, 1)
 		if len(p.Data.Commands) != 1 {
 			t.Fatalf("expected 1 lazy command, got %d", len(p.Data.Commands))
 		}
@@ -1011,7 +976,7 @@ func TestTryEvalExpression(t *testing.T) {
 	t.Run("$ without varName/context is treated as literal", func(t *testing.T) {
 		p := &Parser{Data: &ParsedData{}}
 		// No varName/scope => the $ branch is skipped, $ stays literal.
-		got := p.tryEvalExpression("$5", nil, nil)
+		got := p.tryEvalExpression("$5", nil, nil, 1)
 		if got != "$5" {
 			t.Errorf("got %q, want %q", got, "$5")
 		}
@@ -1022,7 +987,7 @@ func TestTryEvalExpression(t *testing.T) {
 func TestParseVarValidation(t *testing.T) {
 	t.Run("name containing var is extracted correctly", func(t *testing.T) {
 		p := &Parser{Data: &ParsedData{}}
-		if err := p.parseVar("var var_name = x", "global"); err != nil {
+		if err := p.parseVar("var var_name = x", "global", 1); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 		if len(p.Data.Variables) != 1 {
@@ -1035,7 +1000,7 @@ func TestParseVarValidation(t *testing.T) {
 
 	t.Run("empty name returns an error", func(t *testing.T) {
 		p := &Parser{Data: &ParsedData{}}
-		err := p.parseVar("var = x", "global")
+		err := p.parseVar("var = x", "global", 1)
 		if err == nil {
 			t.Fatal("expected error for empty variable name, got nil")
 		}
@@ -1046,7 +1011,7 @@ func TestParseVarValidation(t *testing.T) {
 
 	t.Run("bare var with no equals creates empty-valued variable", func(t *testing.T) {
 		p := &Parser{Data: &ParsedData{}}
-		if err := p.parseVar("var onlyname", "global"); err != nil {
+		if err := p.parseVar("var onlyname", "global", 1); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 		if len(p.Data.Variables) != 1 || p.Data.Variables[0].Name != "onlyname" {
@@ -1070,8 +1035,10 @@ func TestExtractWorkDir(t *testing.T) {
 		{name: "no workdir with prereqs", input: "build < test {", want: ""},
 		{name: "simple workdir", input: "build in subdir {", want: "subdir"},
 		{name: "workdir with args", input: "build (arg1) in subdir {", want: "subdir"},
-		{name: "workdir with prereqs", input: "build < test in subdir {", want: "subdir"},
-		{name: "workdir with args and prereqs", input: "deploy (env) < build in deep/dir {", want: "deep/dir"},
+		// "in <dir>" after "<" belongs to the prerequisites, not the command.
+		{name: "workdir before prereqs", input: "build in subdir < test {", want: "subdir"},
+		{name: "prereq in dir does not set command workdir", input: "build < test in subdir {", want: ""},
+		{name: "workdir with args and prereqs", input: "deploy (env) in dir < build in deep/dir {", want: "dir"},
 		{name: "cloud command with workdir", input: "|deploy| in cloud/dir {", want: "cloud/dir"},
 		{name: "workdir with dot path", input: "build in ./local {", want: "./local"},
 		{name: "workdir with env ref", input: "build in @HOMEDIR/projects {", want: "@HOMEDIR/projects"},
@@ -1092,7 +1059,7 @@ func TestParseCommandWorkDir(t *testing.T) {
 	lines := strings.Split(input, "\n")
 	parser := &Parser{Data: &ParsedData{}, Lines: lines}
 
-	if _, err := parser.parseCommand(0, input, false); err != nil {
+	if _, err := parser.parseCommand(0, input, false, 1, ""); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if len(parser.Data.Commands) != 1 {
@@ -1117,7 +1084,7 @@ func TestParseIfBlock(t *testing.T) {
 	lines := strings.Split(input, "\n")
 	parser := &Parser{Data: &ParsedData{}, Lines: lines}
 
-	if _, err := parser.parseCommand(0, "build {", false); err != nil {
+	if _, err := parser.parseCommand(0, "build {", false, 1, ""); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if len(parser.Data.Commands) != 1 {
@@ -1158,7 +1125,7 @@ func TestParseIfBlockNoElse(t *testing.T) {
 	lines := strings.Split(input, "\n")
 	parser := &Parser{Data: &ParsedData{}, Lines: lines}
 
-	if _, err := parser.parseCommand(0, "build {", false); err != nil {
+	if _, err := parser.parseCommand(0, "build {", false, 1, ""); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	cmd := parser.Data.Commands[0]
@@ -1167,6 +1134,130 @@ func TestParseIfBlockNoElse(t *testing.T) {
 	}
 	if len(cmd.Body[0].ElseBody) != 0 {
 		t.Errorf("expected empty else body, got %#v", cmd.Body[0].ElseBody)
+	}
+}
+
+// TestParseForBlock verifies a basic for loop parses to the right structure.
+func TestParseForBlock(t *testing.T) {
+	input := `build {
+    $ echo before
+    for item in a, b, c {
+        $ echo &item
+    }
+    $ echo after
+}`
+	lines := strings.Split(input, "\n")
+	parser := &Parser{Data: &ParsedData{}, Lines: lines}
+
+	if _, err := parser.parseCommand(0, "build {", false, 1, ""); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(parser.Data.Commands) != 1 {
+		t.Fatalf("expected 1 command, got %d", len(parser.Data.Commands))
+	}
+	cmd := parser.Data.Commands[0]
+	// Expected body: [shell:before, for, shell:after]
+	if len(cmd.Body) != 3 {
+		t.Fatalf("expected 3 body statements, got %d: %#v", len(cmd.Body), cmd.Body)
+	}
+	if cmd.Body[0].Type != "shell" || cmd.Body[0].Shell != "$ echo before" {
+		t.Errorf("stmt[0] = %#v, want shell '$ echo before'", cmd.Body[0])
+	}
+	if cmd.Body[1].Type != "for" {
+		t.Fatalf("stmt[1] type = %q, want 'for'", cmd.Body[1].Type)
+	}
+	if cmd.Body[1].LoopVar != "item" {
+		t.Errorf("loop var = %q, want 'item'", cmd.Body[1].LoopVar)
+	}
+	if cmd.Body[1].LoopItems != "a, b, c" {
+		t.Errorf("loop items = %q, want 'a, b, c'", cmd.Body[1].LoopItems)
+	}
+	if len(cmd.Body[1].LoopBody) != 1 || cmd.Body[1].LoopBody[0].Shell != "$ echo &item" {
+		t.Errorf("loop body = %#v", cmd.Body[1].LoopBody)
+	}
+	if cmd.Body[2].Type != "shell" || cmd.Body[2].Shell != "$ echo after" {
+		t.Errorf("stmt[2] = %#v, want shell '$ echo after'", cmd.Body[2])
+	}
+}
+
+func TestParseForBlockWithIf(t *testing.T) {
+	input := `build {
+    for item in a, b {
+        if "&item" == "a" {
+            $ echo yes
+        } else {
+            $ echo no
+        }
+        $ echo tail
+    }
+    $ echo after
+}`
+	lines := strings.Split(input, "\n")
+	parser := &Parser{Data: &ParsedData{}, Lines: lines}
+
+	if _, err := parser.parseCommand(0, "build {", false, 1, ""); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	cmd := parser.Data.Commands[0]
+	// Expected body: [for, shell:after]
+	if len(cmd.Body) != 2 {
+		t.Fatalf("expected 2 body statements, got %d: %#v", len(cmd.Body), cmd.Body)
+	}
+	if cmd.Body[0].Type != "for" {
+		t.Fatalf("stmt[0] type = %q, want 'for'", cmd.Body[0].Type)
+	}
+
+	loopBody := cmd.Body[0].LoopBody
+
+	if len(loopBody) != 2 {
+		t.Fatalf("expected 2 statements in loop body, got %d: %#v", len(loopBody), loopBody)
+	}
+	if loopBody[0].Type != "if" {
+		t.Errorf("loop body[0] type = %q, want 'if'", loopBody[0].Type)
+	}
+	if len(loopBody[0].ThenBody) != 1 || loopBody[0].ThenBody[0].Shell != "$ echo yes" {
+		t.Errorf("then body = %#v", loopBody[0].ThenBody)
+	}
+	if len(loopBody[0].ElseBody) != 1 || loopBody[0].ElseBody[0].Shell != "$ echo no" {
+		t.Errorf("else body = %#v", loopBody[0].ElseBody)
+	}
+	if loopBody[1].Type != "shell" || loopBody[1].Shell != "$ echo tail" {
+		t.Errorf("loop body[1] = %#v, want shell '$ echo tail'", loopBody[1])
+	}
+	if cmd.Body[1].Type != "shell" || cmd.Body[1].Shell != "$ echo after" {
+		t.Errorf("stmt[1] = %#v, want shell '$ echo after'", cmd.Body[1])
+	}
+}
+
+// TestParseForBlockNestedFor verifies a for loop nests inside another for.
+func TestParseForBlockNestedFor(t *testing.T) {
+	input := `build {
+    for outer in x, y {
+        for inner in 1, 2 {
+            $ echo &outer &inner
+        }
+    }
+    $ echo done
+}`
+	lines := strings.Split(input, "\n")
+	parser := &Parser{Data: &ParsedData{}, Lines: lines}
+
+	if _, err := parser.parseCommand(0, "build {", false, 1, ""); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	cmd := parser.Data.Commands[0]
+	if len(cmd.Body) != 2 || cmd.Body[0].Type != "for" {
+		t.Fatalf("expected [for, shell], got %#v", cmd.Body)
+	}
+	outer := cmd.Body[0].LoopBody
+	if len(outer) != 1 || outer[0].Type != "for" {
+		t.Fatalf("expected nested for in outer loop body, got %#v", outer)
+	}
+	if len(outer[0].LoopBody) != 1 || outer[0].LoopBody[0].Shell != "$ echo &outer &inner" {
+		t.Errorf("inner loop body = %#v", outer[0].LoopBody)
+	}
+	if cmd.Body[1].Shell != "$ echo done" {
+		t.Errorf("stmt after loops = %#v", cmd.Body[1])
 	}
 }
 
@@ -1188,6 +1279,12 @@ func TestEvaluateCondition(t *testing.T) {
 		{name: "numeric lte equal", cond: `"5" <= "5"`, want: true},
 		{name: "lexicographic when non-numeric", cond: `"abc" < "abd"`, want: true},
 		{name: "mixed numeric and string", cond: `"18" > "abc"`, want: false}, // falls back to string
+		{name: "contains true", cond: `"windows/amd64" contains "windows"`, want: true},
+		{name: "contains false", cond: `"darwin/arm64" contains "windows"`, want: false},
+		{name: "contains substring mid", cond: `"darwin-arm64" contains "arm"`, want: true},
+		{name: "contains exact match", cond: `"abc" contains "abc"`, want: true},
+		{name: "contains empty needle", cond: `"abc" contains ""`, want: true},
+		{name: "contains unquoted left operand", cond: `windows/amd64 contains "windows"`, want: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

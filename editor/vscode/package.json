@@ -5,6 +5,10 @@
 	"version": "0.2.0",
 	"publisher": "nicklvsa",
 	"license": "MIT",
+	"repository": {
+		"type": "git",
+		"url": "https://github.com/nicklvsa/construct"
+	},
 	"engines": {
 		"vscode": "^1.75.0"
 	},
@@ -43,8 +47,7 @@
 	"scripts": {
 		"vscode:prepublish": "npm run compile",
 		"compile": "tsc -p ./",
-		"watch": "tsc -watch -p ./",
-		"package": "vsce package"
+		"watch": "tsc -watch -p ./"
 	},
 	"devDependencies": {
 		"@types/vscode": "^1.75.0",

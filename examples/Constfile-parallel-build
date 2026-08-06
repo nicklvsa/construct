@@ -1,0 +1,30 @@
+// Parallel build with per-prereq workdirs
+// Demonstrates: DAG-parallel prerequisites (--concurrent), call-site
+//               "in <dir>" workdir overrides, shared data file
+// Run with: construct --concurrent Constfile-parallel-build all
+//
+// Under --concurrent, the prerequisites of "all" (and the gen -> docs chain)
+// run in parallel: total time is the slowest branch, not the sum.
+
+gen {
+    $ cat VERSION.txt as version
+}
+
+// "in src" overrides where gen runs; the shared data file lives in src/.
+docs < gen in src {
+    $ echo "docs for version &gen.version" as documented
+}
+
+compile {
+    $ sleep 0.4
+    $ echo "compiled" as compiled
+}
+
+lint {
+    $ echo "linted" as linted
+}
+
+// compile (0.4s), lint, and the gen -> docs chain all run concurrently.
+all < compile, lint, docs {
+    $ echo "all done: &compile.compiled / &lint.linted / &docs.documented"
+}

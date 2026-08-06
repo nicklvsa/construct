@@ -1,0 +1,15 @@
+var version = 1.2
+
+# Builds the library.
+build {
+    $ echo "building lib &version"
+}
+
+gen {
+    $ echo line-one
+    $ echo line-two
+}
+
+healthcheck {
+    $ echo "lib healthy"
+}

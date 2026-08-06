@@ -1,0 +1,34 @@
+// Produced artifacts, environment files, and toolchain guards
+// Demonstrates: produces (make-style up-to-date checks), --env-file loading,
+//               require(), --jobs, --watch
+// Run with:
+//   construct Constfile-artifacts build                      # builds; reruns print "up to date"
+//   construct --env-file example.env Constfile-artifacts release
+//   construct --jobs 4 Constfile-artifacts all               # parallel build
+//   construct --watch Constfile-artifacts build              # rebuild when src/VERSION.txt changes
+
+// Make-style up-to-date: skipped when out/build.txt exists and no dependency
+// is newer than it.
+build produces out/build.txt < src/VERSION.txt {
+    $ mkdir -p out
+    $ cp src/VERSION.txt out/build.txt
+}
+
+// require() guards a toolchain step (checks PATH, never the shell).
+toolchain < build {
+    if require("python3") {
+        $ echo "python3 available"
+    } else {
+        $ echo "python3 missing - using fallback"
+    }
+}
+
+// @APP_NAME and @DEPLOY_ENV come from example.env via --env-file.
+release < build {
+    $ echo "releasing @APP_NAME in @DEPLOY_ENV"
+    $ cat out/build.txt
+}
+
+all < build, toolchain {
+    $ echo "all done"
+}

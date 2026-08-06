@@ -1,0 +1,17 @@
+// Shared library for Constfile-imports.
+// Demonstrates: reusable commands and variables via the import keyword.
+
+var app_name = demo-app
+var app_version = 1.2.0
+
+build {
+    $ echo "built &app_name v&app_version" as built
+}
+
+test {
+    $ echo "tested &app_name" as tested
+}
+
+package < build {
+    $ echo "packaged: &build.built" as packaged
+}

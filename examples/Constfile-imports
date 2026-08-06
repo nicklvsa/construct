@@ -1,0 +1,11 @@
+import "lib.constfile"
+
+// Commands and variables below come from lib.constfile:
+//   - build, test, package (commands)
+//   - app_name, app_version (variables)
+
+release (opt tag=latest) < package, test {
+    $ echo "releasing &app_name v&app_version (tag: &tag)"
+    $ echo "package: &package.packaged"
+    $ echo "tests: &test.tested"
+}
