@@ -63,8 +63,9 @@ type markupContent struct {
 }
 
 type completionItem struct {
-	Label string `json:"label"`
-	Kind  int    `json:"kind"`
+	Label      string `json:"label"`
+	Kind       int    `json:"kind"`
+	FilterText string `json:"filterText,omitempty"`
 }
 
 type completionList struct {
@@ -84,10 +85,14 @@ type initializeResult struct {
 }
 
 type serverCapabilities struct {
-	TextDocumentSync   int  `json:"textDocumentSync"`
-	HoverProvider      bool `json:"hoverProvider"`
-	DefinitionProvider bool `json:"definitionProvider"`
-	CompletionProvider bool `json:"completionProvider"`
+	TextDocumentSync   int                `json:"textDocumentSync"`
+	HoverProvider      bool               `json:"hoverProvider"`
+	DefinitionProvider bool               `json:"definitionProvider"`
+	CompletionProvider *completionOptions `json:"completionProvider,omitempty"`
+}
+
+type completionOptions struct {
+	TriggerCharacters []string `json:"triggerCharacters,omitempty"`
 }
 
 type publishDiagnosticsParams struct {
@@ -151,7 +156,7 @@ func (s *server) handleInitialize(_ json.RawMessage) (any, error) {
 			TextDocumentSync:   1, // full document sync
 			HoverProvider:      true,
 			DefinitionProvider: true,
-			CompletionProvider: true,
+			CompletionProvider: &completionOptions{TriggerCharacters: []string{"&"}},
 		},
 	}, nil
 }
@@ -546,6 +551,17 @@ func (s *server) handleHover(params json.RawMessage) (interface{}, error) {
 		}, nil
 	}
 
+	if target, ok := prereqNameAtPosition(line, char); ok {
+		if cmd, err := doc.data.GetCommand(target); err == nil {
+			return hoverResult{
+				Contents: markupContent{
+					Kind:  "markdown",
+					Value: "prerequisite: " + commandHover(cmd),
+				},
+			}, nil
+		}
+	}
+
 	if name, isCmd := commandNameAtLine(line); isCmd {
 		if cmd, err := doc.data.GetCommand(name); err == nil {
 			return hoverResult{
@@ -689,7 +705,8 @@ func varHoverMessage(name string, data *pkg.ParsedData) string {
 		}
 		shellIdx++
 	}
-	return fmt.Sprintf("`%s` → output of `%s`", name, cmdName)
+
+	return ""
 }
 
 func (s *server) handleDefinition(params json.RawMessage) (interface{}, error) {
@@ -743,6 +760,11 @@ func (s *server) handleDefinition(params json.RawMessage) (interface{}, error) {
 				}, nil
 			}
 		}
+
+		// &cmd.out / &cmd.N: jump to the shell statement producing it.
+		if loc, ok := outputStmtLocation(doc, name, p.TextDocument.URI); ok {
+			return loc, nil
+		}
 	}
 
 	if target, ok := prereqNameAtPosition(line, char); ok {
@@ -793,12 +815,6 @@ func (s *server) handleDefinition(params json.RawMessage) (interface{}, error) {
 		}
 	}
 
-	if target, ok := prereqNameAtPosition(line, char); ok {
-		if loc, ok := s.findCommandLocation(doc, target, p.TextDocument.URI); ok {
-			return loc, nil
-		}
-	}
-
 	if hdr, isHdr := commandNameAtLine(line); isHdr {
 		if _, err := doc.data.GetCommand(hdr); err == nil {
 			if dir, startCol, endCol, ok := workDirAtPosition(line, char); ok {
@@ -831,7 +847,7 @@ func (s *server) handleDefinition(params json.RawMessage) (interface{}, error) {
 	return nil, nil
 }
 
-func (s *server) handleCompletion(params json.RawMessage) (interface{}, error) {
+func (s *server) handleCompletion(params json.RawMessage) (any, error) {
 	var p textDocumentPositionParams
 	if err := json.Unmarshal(params, &p); err != nil {
 		return nil, err
@@ -852,16 +868,8 @@ func (s *server) handleCompletion(params json.RawMessage) (interface{}, error) {
 	line := lines[p.Position.Line]
 	items := []completionItem{}
 
-	if trigger := completionTriggerVar(line, p.Position.Character); trigger {
-		for _, v := range doc.data.Variables {
-			items = append(items, completionItem{Label: v.Name, Kind: 6}) // Variable
-		}
-		if cmd := enclosingCommand(lines, p.Position.Line, doc.data); cmd != nil {
-			for _, a := range cmd.Arguments {
-				items = append(items, completionItem{Label: a.Name, Kind: 14}) // Parameter
-			}
-		}
-		return completionList{Items: items}, nil
+	if prefix, ok := completionVarPrefix(line, p.Position.Character); ok {
+		return completionList{Items: completionVarItems(doc.data, lines, p.Position.Line, prefix)}, nil
 	}
 
 	// In a prereq list we complete command names.
@@ -976,6 +984,76 @@ func (s *server) findCommandLocation(doc *docState, name, docURI string) (locati
 		path = cmd.SourceFile
 	}
 	return readLoc(path, false)
+}
+
+func outputStmtLocation(doc *docState, ref, docURI string) (location, bool) {
+	cmdName, suffix, ok := splitCommandRef(doc.data, ref)
+	if !ok {
+		return location{}, false
+	}
+	cmd, err := doc.data.GetCommand(cmdName)
+	if err != nil || cmd == nil {
+		return location{}, false
+	}
+
+	shellIdx := 0
+	var hit *pkg.BodyStatement
+	for i := range cmd.Body {
+		stmt := &cmd.Body[i]
+		if stmt.Type != pkg.StmtShell {
+			continue
+		}
+		match := false
+		if idx, err := strconv.Atoi(suffix); err == nil {
+			match = shellIdx == idx
+		} else if stmt.OutputName == suffix {
+			match = true
+		}
+		if match {
+			hit = stmt
+			break
+		}
+		shellIdx++
+	}
+	if hit == nil || hit.SourceLine <= 0 {
+		return location{}, false
+	}
+
+	isDoc := strings.TrimPrefix(cmd.SourceFile, "file://") == strings.TrimPrefix(docURI, "file://")
+	uri := docURI
+	var content []byte
+	if isDoc {
+		content = []byte(doc.text)
+	} else {
+		path := uriToPath(cmd.SourceFile)
+		if path == "" {
+			path = cmd.SourceFile
+		}
+		content, err = os.ReadFile(path)
+		if err != nil {
+			return location{}, false
+		}
+		uri = pathToURI(path)
+	}
+
+	lines := strings.Split(string(content), "\n")
+	if hit.SourceLine-1 >= len(lines) {
+		return location{}, false
+	}
+	line := lines[hit.SourceLine-1]
+	col := len(line) - len(strings.TrimLeft(line, " \t"))
+	trimmed := strings.TrimSpace(line)
+	if strings.HasPrefix(trimmed, "$") {
+		col++ // skip the leading $
+		trimmed = strings.TrimSpace(trimmed[1:])
+	}
+	return location{
+		URI: uri,
+		Range: range_{
+			Start: position{Line: hit.SourceLine - 1, Character: col},
+			End:   position{Line: hit.SourceLine - 1, Character: col + len(trimmed)},
+		},
+	}, true
 }
 
 func invokeNameAtPosition(line string, char int) (string, int, int, bool) {
@@ -1311,16 +1389,100 @@ func resolveEnvRefsInString(s string) string {
 	return result.String()
 }
 
-func completionTriggerVar(line string, char int) bool {
+func completionVarPrefix(line string, char int) (string, bool) {
 	runes := []rune(line)
-	if char == 0 || char > len(runes) {
-		return false
+	if char > len(runes) {
+		char = len(runes)
 	}
-	return runes[char-1] == '&'
+	j := char
+	for j > 0 && isVarIdentRune(runes[j-1]) {
+		j--
+	}
+	if j == 0 || runes[j-1] != '&' {
+		return "", false
+	}
+	return string(runes[j:char]), true
+}
+
+func isVarIdentRune(r rune) bool {
+	return isIdentRune(r) || (r >= '0' && r <= '9') || r == '.' || r == '-'
+}
+
+func completionVarItems(data *pkg.ParsedData, lines []string, lineIdx int, prefix string) []completionItem {
+	items := []completionItem{}
+	seen := map[string]bool{}
+
+	add := func(label, filter string, kind int) {
+		if seen[label] {
+			return
+		}
+		seen[label] = true
+		items = append(items, completionItem{Label: label, FilterText: filter, Kind: kind})
+	}
+
+	if dot := strings.LastIndexByte(prefix, '.'); dot >= 0 {
+		if c := resolveCommandRef(data, prefix[:dot]); c != nil {
+			named := 0
+			shellIdx := 0
+			for _, stmt := range c.Body {
+				if stmt.Type != pkg.StmtShell {
+					continue
+				}
+				if stmt.OutputName != "" {
+					add(c.Name+"."+stmt.OutputName, stmt.OutputName, 6) // Variable
+					named++
+				}
+				shellIdx++
+			}
+			if named == 0 {
+				for i := 0; i < shellIdx; i++ {
+					label := c.Name + "." + strconv.Itoa(i)
+					add(label, strconv.Itoa(i), 6)
+				}
+			}
+		}
+	}
+
+	for _, v := range data.Variables {
+		if strings.HasPrefix(v.Name, prefix) {
+			add(v.Name, v.Name, 6) // Variable
+		}
+	}
+	if cmd := enclosingCommand(lines, lineIdx, data); cmd != nil {
+		for _, a := range cmd.Arguments {
+			if strings.HasPrefix(a.Name, prefix) {
+				add(a.Name, a.Name, 14) // Parameter
+			}
+		}
+	}
+	return items
+}
+
+// resolveCommandRef finds the longest command that is a prefix of name
+// (handles namespaced commands like "lib.gen").
+func resolveCommandRef(data *pkg.ParsedData, name string) *pkg.Command {
+	for i := len(name); i > 0; i = strings.LastIndexByte(name[:i], '.') {
+		if cmd, err := data.GetCommand(name[:i]); err == nil {
+			return cmd
+		}
+	}
+	return nil
 }
 
 func isPrereqListLine(line string) bool {
-	return strings.Contains(line, "<") && !strings.Contains(line, "{")
+	trimmed := strings.TrimSpace(line)
+	if trimmed == "" || line != strings.TrimLeft(line, " \t") {
+		return false // body lines are indented; headers start at column 0
+	}
+	if strings.HasPrefix(trimmed, "$") {
+		return false
+	}
+	for _, kw := range []string{"if ", "for ", "matrix ", "env ", "invoke ", "else", "continue", "break"} {
+		if strings.HasPrefix(trimmed, kw) {
+			return false
+		}
+	}
+	return strings.Contains(line, "<")
 }
 
 func enclosingCommand(lines []string, lineIdx int, data *pkg.ParsedData) *pkg.Command {
