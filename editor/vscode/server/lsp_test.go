@@ -219,6 +219,47 @@ func TestDefinitionFileDepStillOpens(t *testing.T) {
 	}
 }
 
+// TestHoverPlainNamedOutput verifies hover on a plain "&cmd.output" ref
+// (non-namespaced command) resolves to the referenced command's output.
+func TestHoverPlainNamedOutput(t *testing.T) {
+	text := `log {
+    $ echo hi as out
+}
+ls in examples {
+    $ ls -l as out
+}
+_ < log, ls {
+    echo "&log.out"
+    echo "&ls.out"
+}
+`
+	uri := "file:///x/main.constfile"
+	s := newServer()
+	s.updateDoc(uri, text, 1)
+
+	lines := strings.Split(text, "\n")
+	for i := 7; i <= 8; i++ {
+		amp := strings.Index(lines[i], "&")
+		end := amp + strings.Index(lines[i][amp:], `"`)
+		sub := lines[i][amp+1 : end]
+		params, _ := json.Marshal(map[string]interface{}{
+			"textDocument": map[string]string{"uri": uri},
+			"position":     map[string]int{"line": i, "character": amp + 2},
+		})
+		res, err := s.handleHover(params)
+		if err != nil {
+			t.Fatalf("hover %s: %v", sub, err)
+		}
+		hr, ok := res.(hoverResult)
+		if !ok {
+			t.Fatalf("hover %s: expected hoverResult, got %T", sub, res)
+		}
+		if !strings.Contains(hr.Contents.Value, "output of") {
+			t.Errorf("hover %s should mention the output, got %q", sub, hr.Contents.Value)
+		}
+	}
+}
+
 // TestHoverNamespacedOutput verifies hover on "&lib.gen.0" resolves against
 // the namespaced command.
 func TestHoverNamespacedOutput(t *testing.T) {

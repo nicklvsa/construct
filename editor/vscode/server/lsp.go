@@ -623,11 +623,16 @@ func commandHover(c *pkg.Command) string {
 
 func splitCommandRef(data *pkg.ParsedData, name string) (cmdName, suffix string, ok bool) {
 	parts := strings.Split(name, ".")
-	for i := len(parts); i > 1; i-- {
+	for i := len(parts); i >= 1; i-- {
 		candidate := strings.Join(parts[:i], ".")
-		if _, err := data.GetCommand(candidate); err == nil {
-			return candidate, strings.Join(parts[i:], "."), true
+		if _, err := data.GetCommand(candidate); err != nil {
+			continue
 		}
+		suffix := strings.Join(parts[i:], ".")
+		if suffix == "" {
+			continue // whole-output ref (&cmd) is not a command+suffix ref
+		}
+		return candidate, suffix, true
 	}
 	return "", "", false
 }
