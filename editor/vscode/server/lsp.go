@@ -1349,7 +1349,11 @@ func pathToURI(p string) string {
 	if err != nil {
 		abs = p
 	}
-	u := &url.URL{Scheme: "file", Path: filepath.ToSlash(abs)}
+	slashed := filepath.ToSlash(abs)
+	if !strings.HasPrefix(slashed, "/") {
+		slashed = "/" + slashed
+	}
+	u := &url.URL{Scheme: "file", Path: slashed}
 	return u.String()
 }
 
