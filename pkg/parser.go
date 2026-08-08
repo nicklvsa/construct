@@ -3,6 +3,7 @@ package pkg
 import (
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
@@ -1552,8 +1553,7 @@ func (p *Parser) processImport(line string) error {
 
 	path := spec
 	if !filepath.IsAbs(path) {
-		dir := filepath.Dir(strings.TrimPrefix(p.InputFile, "file://"))
-		path = filepath.Join(dir, spec)
+		path = filepath.Join(importBaseDir(p.InputFile), spec)
 	}
 
 	cleanPath := filepath.Clean(path)
@@ -1609,6 +1609,18 @@ func (p *Parser) processImport(line string) error {
 		p.Data.Commands = append(p.Data.Commands, cmd)
 	}
 	return nil
+}
+
+func importBaseDir(inputFile string) string {
+	u, err := url.Parse(inputFile)
+	if err == nil && u.Scheme == "file" {
+		p := u.Path
+		if len(p) > 2 && p[0] == '/' && p[2] == ':' {
+			p = p[1:] // strip the leading slash before the drive letter: /c:/ -> c:/
+		}
+		return filepath.Dir(filepath.FromSlash(p))
+	}
+	return filepath.Dir(inputFile)
 }
 
 func renameImportNamespace(data *ParsedData, ns string) error {
