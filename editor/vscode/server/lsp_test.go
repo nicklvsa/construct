@@ -219,6 +219,47 @@ func TestDefinitionFileDepStillOpens(t *testing.T) {
 	}
 }
 
+// TestHoverPlainNamedOutput verifies hover on a plain "&cmd.output" ref
+// (non-namespaced command) resolves to the referenced command's output.
+func TestHoverPlainNamedOutput(t *testing.T) {
+	text := `log {
+    $ echo hi as out
+}
+ls in examples {
+    $ ls -l as out
+}
+_ < log, ls {
+    echo "&log.out"
+    echo "&ls.out"
+}
+`
+	uri := "file:///x/main.constfile"
+	s := newServer()
+	s.updateDoc(uri, text, 1)
+
+	lines := strings.Split(text, "\n")
+	for i := 7; i <= 8; i++ {
+		amp := strings.Index(lines[i], "&")
+		end := amp + strings.Index(lines[i][amp:], `"`)
+		sub := lines[i][amp+1 : end]
+		params, _ := json.Marshal(map[string]interface{}{
+			"textDocument": map[string]string{"uri": uri},
+			"position":     map[string]int{"line": i, "character": amp + 2},
+		})
+		res, err := s.handleHover(params)
+		if err != nil {
+			t.Fatalf("hover %s: %v", sub, err)
+		}
+		hr, ok := res.(hoverResult)
+		if !ok {
+			t.Fatalf("hover %s: expected hoverResult, got %T", sub, res)
+		}
+		if !strings.Contains(hr.Contents.Value, "output of") {
+			t.Errorf("hover %s should mention the output, got %q", sub, hr.Contents.Value)
+		}
+	}
+}
+
 // TestHoverNamespacedOutput verifies hover on "&lib.gen.0" resolves against
 // the namespaced command.
 func TestHoverNamespacedOutput(t *testing.T) {
@@ -473,6 +514,217 @@ use {
 	}
 	if !strings.Contains(lines[loc.Range.Start.Line], "as lines") {
 		t.Errorf("definition should point at the invoke statement, line = %q", lines[loc.Range.Start.Line])
+	}
+}
+
+// TestCompletionVarWhileTyping verifies completion fires while typing &lo
+// (cursor after the letters, not right after the &).
+func TestCompletionVarWhileTyping(t *testing.T) {
+	text := `var version = "1.0"
+gen {
+    $ echo hi as out
+}
+use {
+    echo "&ver"
+}
+`
+	uri := "file:///x/main.constfile"
+	s := newServer()
+	s.updateDoc(uri, text, 1)
+
+	lines := strings.Split(text, "\n")
+	params, _ := json.Marshal(map[string]interface{}{
+		"textDocument": map[string]string{"uri": uri},
+		"position":     map[string]int{"line": 5, "character": len(lines[5]) - 1},
+	})
+	res, err := s.handleCompletion(params)
+	if err != nil {
+		t.Fatalf("completion: %v", err)
+	}
+	cl, ok := res.(completionList)
+	if !ok {
+		t.Fatalf("expected completionList, got %T", res)
+	}
+	found := false
+	for _, item := range cl.Items {
+		if item.Label == "version" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("completion should include `version`, got %v", cl.Items)
+	}
+}
+
+// TestCompletionOutputAfterDot verifies &gen. completes the command's outputs.
+func TestCompletionOutputAfterDot(t *testing.T) {
+	text := `gen {
+    $ echo hi as out
+}
+use {
+    echo "&gen."
+}
+`
+	uri := "file:///x/main.constfile"
+	s := newServer()
+	s.updateDoc(uri, text, 1)
+
+	lines := strings.Split(text, "\n")
+	params, _ := json.Marshal(map[string]interface{}{
+		"textDocument": map[string]string{"uri": uri},
+		"position":     map[string]int{"line": 4, "character": len(lines[4]) - 1},
+	})
+	res, err := s.handleCompletion(params)
+	if err != nil {
+		t.Fatalf("completion: %v", err)
+	}
+	cl, ok := res.(completionList)
+	if !ok {
+		t.Fatalf("expected completionList, got %T", res)
+	}
+	found := false
+	for _, item := range cl.Items {
+		if item.Label == "gen.out" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("completion should include `gen.out`, got %v", cl.Items)
+	}
+}
+
+// TestCompletionNoPrereqOnShellLine verifies shell lines containing '<'
+// (e.g. cat << EOF) don't trigger command-name completion.
+func TestCompletionNoPrereqOnShellLine(t *testing.T) {
+	text := `gen {
+    $ echo hi
+}
+use {
+    $ cat << EOF
+}
+`
+	uri := "file:///x/main.constfile"
+	s := newServer()
+	s.updateDoc(uri, text, 1)
+
+	lines := strings.Split(text, "\n")
+	params, _ := json.Marshal(map[string]interface{}{
+		"textDocument": map[string]string{"uri": uri},
+		"position":     map[string]int{"line": 4, "character": len(lines[4]) - 1},
+	})
+	res, err := s.handleCompletion(params)
+	if err != nil {
+		t.Fatalf("completion: %v", err)
+	}
+	cl, ok := res.(completionList)
+	if !ok {
+		t.Fatalf("expected completionList, got %T", res)
+	}
+	for _, item := range cl.Items {
+		if item.Label == "gen" {
+			t.Errorf("shell line should not complete command names, got %v", cl.Items)
+		}
+	}
+}
+
+// TestHoverPrereqInHeader verifies hovering a prereq name in `_ < log, ls`
+// shows that prereq's info, not the header command's.
+func TestHoverPrereqInHeader(t *testing.T) {
+	text := `log (thing_to_log) {
+    $ echo "&thing_to_log"
+}
+ls in examples {
+    $ ls -l
+}
+_ < log, ls {
+    echo done
+}
+`
+	uri := "file:///x/main.constfile"
+	s := newServer()
+	s.updateDoc(uri, text, 1)
+
+	lines := strings.Split(text, "\n")
+	params, _ := json.Marshal(map[string]interface{}{
+		"textDocument": map[string]string{"uri": uri},
+		"position":     map[string]int{"line": 6, "character": strings.Index(lines[6], "ls") + 1},
+	})
+	res, err := s.handleHover(params)
+	if err != nil {
+		t.Fatalf("hover: %v", err)
+	}
+	hr, ok := res.(hoverResult)
+	if !ok {
+		t.Fatalf("expected hoverResult, got %T", res)
+	}
+	if !strings.Contains(hr.Contents.Value, "prerequisite") || !strings.Contains(hr.Contents.Value, "ls") {
+		t.Errorf("hover should identify the ls prereq, got %q", hr.Contents.Value)
+	}
+}
+
+// TestHoverUnknownOutputRef verifies an unmatched &cmd.suffix (e.g. a
+// non-existent output) gets no misleading tooltip.
+func TestHoverUnknownOutputRef(t *testing.T) {
+	text := `log {
+    $ echo hi as out
+}
+_ < log {
+    echo "&log.nope"
+}
+`
+	uri := "file:///x/main.constfile"
+	s := newServer()
+	s.updateDoc(uri, text, 1)
+
+	lines := strings.Split(text, "\n")
+	params, _ := json.Marshal(map[string]interface{}{
+		"textDocument": map[string]string{"uri": uri},
+		"position":     map[string]int{"line": 4, "character": strings.Index(lines[4], "&log.nope") + 5},
+	})
+	res, err := s.handleHover(params)
+	if err != nil {
+		t.Fatalf("hover: %v", err)
+	}
+	if res != nil {
+		t.Errorf("expected nil hover for unknown output, got %#v", res)
+	}
+}
+
+// TestDefinitionNamedOutput verifies go-to-definition on &cmd.out jumps to
+// the producing shell statement.
+func TestDefinitionNamedOutput(t *testing.T) {
+	text := `log {
+    $ echo hi as out
+    $ echo bye
+}
+_ < log {
+    echo "&log.out"
+}
+`
+	uri := "file:///x/main.constfile"
+	s := newServer()
+	s.updateDoc(uri, text, 1)
+
+	lines := strings.Split(text, "\n")
+	params, _ := json.Marshal(map[string]interface{}{
+		"textDocument": map[string]string{"uri": uri},
+		"position":     map[string]int{"line": 5, "character": strings.Index(lines[5], "log.out") + 2},
+	})
+	res, err := s.handleDefinition(params)
+	if err != nil {
+		t.Fatalf("definition: %v", err)
+	}
+	loc, ok := res.(location)
+	if !ok {
+		t.Fatalf("expected location, got %T", res)
+	}
+	if loc.Range.Start.Line != 1 {
+		t.Errorf("definition line = %d, want 1 (the `echo hi as out` line)", loc.Range.Start.Line)
+	}
+	if !strings.Contains(lines[loc.Range.Start.Line], "echo hi as out") {
+		t.Errorf("definition should point at the producing statement, got %q", lines[loc.Range.Start.Line])
 	}
 }
 
