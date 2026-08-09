@@ -6,9 +6,9 @@ Syntax highlighting and language intelligence for [Constfiles](https://github.co
 
 - **Syntax highlighting** for all Constfile constructs: variable declarations (`var`), `@env` and `&var` references, command headers with cloud markers (`|cmd|`), default commands (`_`), argument lists, prerequisite lists, strings, numbers, and comments (`//`, `#`).
 - **Diagnostics** — live error squiggles for circular dependencies, missing prerequisites, unclosed command bodies, and empty variable names.
-- **Hover** — hover over a `&varName` reference to see its value and scope; hover over a command header to see its arguments and dependencies.
-- **Go to Definition** — jump from a `&varName` reference to its `var` declaration; jump from a prerequisite name to its command header.
-- **Completion** — variable names after `&`; command names in prerequisite lists.
+- **Hover** — hover over a `&varName` reference to see its value and scope; hover over a command header, prerequisite, or `invoke` target to see its arguments and dependencies.
+- **Go to Definition** — jump from a `&varName` reference to its `var` declaration; jump from a `&cmd.out` reference to the shell statement producing it; jump from a prerequisite or `invoke` target to its command header.
+- **Completion** — variable names after `&` (including a command's named outputs after `&cmd.`); command names in prerequisite lists.
 
 ## Prerequisites
 
@@ -30,31 +30,33 @@ where `<platform>` is one of `darwin-arm64`, `darwin-x64`, `linux-x64`, `linux-a
 
 ### Option B — Package from source
 
-The language server is a native Go binary, so each platform gets its own VSIX. A packaging script cross-compiles the server for the right `GOOS`/`GOARCH` and tags the package with `vsce --target` so VS Code auto-selects the correct one.
+The language server is a native Go binary, so each platform gets its own VSIX. Build the binary, then package with `vsce`:
 
 ```bash
 cd editor/vscode
 npm install
+npm run compile
 
-# Build for every supported platform (produces 6 .vsix files):
-npm run package:all
+# Build the language server binary:
+cd server && go build -o construct-lsp . && cd ..
 
-# Or a single platform:
-./scripts/package.sh darwin-arm64
-
-# Or a universal (untagged) VSIX using the host's native binary,
-# handy for local dev installs:
-npm run package:native
+# Package a VSIX using that binary:
+npx @vscode/vsce package
 ```
 
-Go cross-compiles, so all 6 targets build from a single host (e.g. your Mac) — no target-platform toolchain needed.
+To produce a binary for another platform, cross-compile it (Go supports this from any host):
+
+```bash
+GOOS=linux GOARCH=arm64 go build -o server/construct-lsp .
+npx @vscode/vsce package --target linux-arm64
+```
 
 After installation, open any `Constfile` or `Constfile-*` file. You should see syntax highlighting immediately; the language server starts automatically and provides diagnostics, hover, and go-to-definition.
 
 ## Development
 
 - **Grammar changes** (`syntaxes/constfile.tmLanguage.json`): reload the VSCode window to pick up changes; no compilation needed.
-- **Server changes** (`server/*.go`): rebuild the Go binary, then reload the VSCode window.
+- **Server changes** (`server/*.go`): `cd server && go build -o construct-lsp .`, then reload the VSCode window.
 - **Client changes** (`src/extension.ts`): run `npm run compile`, then reload.
 
 To debug, run the extension in an Extension Development Host via `F5` (requires a `.vscode/launch.json` in this folder, which you can generate with the "Extension Development" template).

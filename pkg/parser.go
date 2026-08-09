@@ -627,13 +627,6 @@ func (p *Parser) parseCommandBody(startIdx int, commandName string) ([]rawLine, 
 		trimmedLine := strings.TrimSpace(line)
 		lineNum := i + 1
 
-		opens := strings.Count(trimmedLine, "{")
-		closes := strings.Count(trimmedLine, "}")
-
-		isIfHeader := strings.HasPrefix(trimmedLine, "if ") && opens > 0
-		isForHeader := strings.HasPrefix(trimmedLine, "for ") && opens > 0
-		isMatrixHeader := strings.HasPrefix(trimmedLine, "matrix ") && opens > 0
-		isEnvHeader := strings.HasPrefix(trimmedLine, "env ") && opens > 0
 		isElseCompound := strings.HasPrefix(trimmedLine, "}") && strings.Contains(trimmedLine, "else")
 
 		if isElseCompound {
@@ -655,8 +648,8 @@ func (p *Parser) parseCommandBody(startIdx int, commandName string) ([]rawLine, 
 			return body, i + 1, nil
 		}
 
-		if isIfHeader || isForHeader || isMatrixHeader || isEnvHeader {
-			depth += opens - closes
+		if isNestedBlockHeader(trimmedLine) {
+			depth += strings.Count(trimmedLine, "{") - strings.Count(trimmedLine, "}")
 		}
 
 		if trimmedLine == "" {
@@ -807,6 +800,8 @@ func extractOutputName(line string) (shell, name string) {
 	return strings.TrimSpace(before), suffix
 }
 
+// isValidIdent reports whether s is a plain word (letters, digits,
+// underscore, no dash) — used for `as <name>` outputs and import namespaces.
 func isValidIdent(s string) bool {
 	if s == "" {
 		return false
@@ -932,12 +927,10 @@ func (p *Parser) parseIfBlock(raw []rawLine, scope string) (BodyStatement, int, 
 		l := raw[consumed]
 		trimmed := strings.TrimSpace(l.text)
 
-		isInnerIf := strings.HasPrefix(trimmed, "if ") && strings.Contains(trimmed, "{")
-		isInnerFor := strings.HasPrefix(trimmed, "for ") && strings.Contains(trimmed, "{")
-		isInnerEnv := strings.HasPrefix(trimmed, "env ") && strings.Contains(trimmed, "{")
+		isNested := isNestedBlockHeader(trimmed)
 		isElseCompound := strings.HasPrefix(trimmed, "}") && strings.Contains(trimmed, "else")
 
-		if isInnerIf || isInnerFor || isInnerEnv {
+		if isNested {
 			depth += strings.Count(trimmed, "{") - strings.Count(trimmed, "}")
 		}
 
@@ -1004,11 +997,7 @@ func (p *Parser) parseIfBlock(raw []rawLine, scope string) (BodyStatement, int, 
 			l := raw[consumed]
 			trimmed := strings.TrimSpace(l.text)
 
-			isInnerIf := strings.HasPrefix(trimmed, "if ") && strings.Contains(trimmed, "{")
-			isInnerFor := strings.HasPrefix(trimmed, "for ") && strings.Contains(trimmed, "{")
-			isInnerEnv := strings.HasPrefix(trimmed, "env ") && strings.Contains(trimmed, "{")
-
-			if isInnerIf || isInnerFor || isInnerEnv {
+			if isNestedBlockHeader(trimmed) {
 				depth += strings.Count(trimmed, "{") - strings.Count(trimmed, "}")
 			}
 
@@ -1494,20 +1483,10 @@ func (p *Parser) parseLines() error {
 			continue
 		}
 
-		if len(line) > 0 && line[0] == '_' && (len(line) == 1 || line[1] == ' ' || line[1] == '(' || line[1] == '<' || line[1] == '{') {
-			consumed, err := p.parseCommand(idx, line, true, lineNum, strings.Join(pendingComment, "\n"))
-			if err != nil {
-				return p.parseErr(lineNum, err, line)
-			}
-			pendingComment = nil
-			idx += consumed
-			if consumed == 0 {
-				idx++
-			}
-			continue
-		}
+		isDefault := len(line) > 0 && line[0] == '_' &&
+			(len(line) == 1 || line[1] == ' ' || line[1] == '(' || line[1] == '<' || line[1] == '{')
 
-		consumed, err := p.parseCommand(idx, line, false, lineNum, strings.Join(pendingComment, "\n"))
+		consumed, err := p.parseCommand(idx, line, isDefault, lineNum, strings.Join(pendingComment, "\n"))
 		if err != nil {
 			return p.parseErr(lineNum, err, line)
 		}
@@ -1776,7 +1755,7 @@ func renameBodyRefs(stmts []BodyStatement, rename func(string) (string, bool)) {
 
 func firstIdent(name string) string {
 	for i := 0; i < len(name); i++ {
-		if !isVarIdentByte(name[i]) && name[i] != '-' {
+		if !isVarIdentByte(name[i]) {
 			return name[:i]
 		}
 	}

@@ -66,6 +66,12 @@ type Executor struct {
 	timing          bool           // print per-command elapsed time
 }
 
+func (e *Executor) debugf(format string, args ...any) {
+	if e.debug {
+		fmt.Printf("[DEBUG] "+format, args...)
+	}
+}
+
 type commandRun struct {
 	done chan struct{}
 	err  error
@@ -453,9 +459,7 @@ func (e *Executor) cleanShellLine(cmd *Command, line string, argFlags map[string
 		if !strings.Contains(line, "&"+arg.Name) {
 			continue
 		}
-		if e.debug {
-			fmt.Printf("[DEBUG] Handling argument --%s for command %s\n", arg.Name, cmd.Name)
-		}
+		e.debugf("Handling argument --%s for command %s\n", arg.Name, cmd.Name)
 		fs := e.flagSet
 		if fs == nil {
 			fs = pflag.CommandLine
@@ -512,6 +516,8 @@ func (e *Executor) expandOutputRefs(items, scope string) string {
 	return result.String()
 }
 
+// isVarIdentByte reports identifier characters, including '-' (refs like
+// &my-var and namespaced prereqs like lib.gen).
 func isVarIdentByte(c byte) bool {
 	return c == '_' || c == '-' ||
 		(c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
@@ -556,6 +562,8 @@ func escapeShellValue(s string) string {
 	return b.String()
 }
 
+// isPlainIdentByte is like isVarIdentByte but without '-': it's used for
+// ref segments after a dot (e.g. the "out" in &lib.gen.out).
 func isPlainIdentByte(c byte) bool {
 	return c == '_' ||
 		(c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
@@ -1028,10 +1036,7 @@ func (e *Executor) execBody(ctx *execContext, body []BodyStatement) error {
 				resolved := e.resolveBodyEnvRef(ctx, value)
 				*ctx.env = setEnvVar(*ctx.env, key, resolved)
 				e.StructuredParse.SetVariable(key, ctx.target.Name, resolved)
-
-				if e.debug {
-					fmt.Printf("[DEBUG] env %s=%s\n", key, resolved)
-				}
+				e.debugf("env %s=%s\n", key, resolved)
 			}
 
 			rest := e.cleanStatements(body[i+1:], ctx.target, e.argFlags(ctx.target))
@@ -1039,9 +1044,7 @@ func (e *Executor) execBody(ctx *execContext, body []BodyStatement) error {
 
 		case StmtIf:
 			cond := e.resolveBodyValue(ctx, stmt.Cond, ctx.target.Name)
-			if e.debug {
-				fmt.Printf("[DEBUG] Evaluating condition: %s\n", cond)
-			}
+			e.debugf("Evaluating condition: %s\n", cond)
 			if evaluateConditionWithBase(cond, condBase) {
 				if err := e.execBody(ctx, stmt.ThenBody); err != nil {
 					return err
@@ -1077,9 +1080,7 @@ func (e *Executor) execBody(ctx *execContext, body []BodyStatement) error {
 				if stmt.LoopIndex != "" {
 					e.StructuredParse.SetVariable(stmt.LoopIndex, ctx.target.Name, strconv.Itoa(idx))
 				}
-				if e.debug {
-					fmt.Printf("[DEBUG] For loop %s = %s\n", stmt.LoopVar, item)
-				}
+				e.debugf("For loop %s = %s\n", stmt.LoopVar, item)
 				cleaned := e.cleanStatements(stmt.LoopBody, ctx.target, argFlags)
 				err := e.execBody(ctx, cleaned)
 				switch {
@@ -1134,9 +1135,7 @@ func (e *Executor) invokeCommand(ctx *execContext, stmt BodyStatement) error {
 		invokeErr = e.execBody(&sub, cleaned)
 		if invokeErr == nil {
 			e.StructuredParse.SetVariable(stmt.OutputName, ctx.target.Name, strings.TrimSpace(buf.String()))
-			if e.debug {
-				fmt.Printf("[DEBUG] invoke %s captured %d bytes\n", invoked.Name, buf.Len())
-			}
+			e.debugf("invoke %s captured %d bytes\n", invoked.Name, buf.Len())
 		}
 	} else {
 		invokeErr = e.execBody(&sub, cleaned)
@@ -1204,11 +1203,11 @@ func (e *Executor) runShell(ctx *execContext, stmt BodyStatement) error {
 		fullCommand = e.shellName + " " + strings.Join(args, " ")
 		switch {
 		case ctx.isPrereq:
-			fmt.Printf("[DEBUG] Running prerequisite %s: %s\n", ctx.target.Name, fullCommand)
+			e.debugf("Running prerequisite %s: %s\n", ctx.target.Name, fullCommand)
 		case ctx.target.LazyEval != nil:
-			fmt.Printf("[DEBUG] Running lazy command for variable %s: %s\n", ctx.target.LazyEval.VarName, fullCommand)
+			e.debugf("Running lazy command for variable %s: %s\n", ctx.target.LazyEval.VarName, fullCommand)
 		default:
-			fmt.Printf("[DEBUG] Running command %s: %s\n", ctx.target.Name, fullCommand)
+			e.debugf("Running command %s: %s\n", ctx.target.Name, fullCommand)
 		}
 	}
 
@@ -1248,11 +1247,9 @@ func (e *Executor) runShell(ctx *execContext, stmt BodyStatement) error {
 	}
 
 	if err != nil {
-		if e.debug {
-			fmt.Printf("[DEBUG] Command failed: %v\n", err)
-			if len(stderr) > 0 {
-				fmt.Printf("[DEBUG] Error output: %s\n", string(stderr))
-			}
+		e.debugf("Command failed: %v\n", err)
+		if len(stderr) > 0 {
+			e.debugf("Error output: %s\n", string(stderr))
 		}
 		if fullCommand == "" {
 			fullCommand = e.shellName + " " + strings.Join(args, " ")
@@ -1266,9 +1263,7 @@ func (e *Executor) runShell(ctx *execContext, stmt BodyStatement) error {
 				Line:     stmt.SourceLine,
 			}
 		}
-		if e.debug {
-			fmt.Printf("[DEBUG] Ignoring failure (error-tolerant statement)\n")
-		}
+		e.debugf("Ignoring failure (error-tolerant statement)\n")
 	}
 
 	strOutput := strings.TrimSpace(string(output))
@@ -1291,17 +1286,13 @@ func (e *Executor) runShell(ctx *execContext, stmt BodyStatement) error {
 			ctx.target.NamedOutput[stmt.OutputName] = strOutput
 		}
 		e.mu.Unlock()
-		if e.debug {
-			fmt.Printf("[DEBUG] Prereq output: %s\n", strOutput)
-			if stmt.OutputName != "" {
-				fmt.Printf("[DEBUG] Named output %s.%s = %s\n", ctx.target.Name, stmt.OutputName, strOutput)
-			}
+		e.debugf("Prereq output: %s\n", strOutput)
+		if stmt.OutputName != "" {
+			e.debugf("Named output %s.%s = %s\n", ctx.target.Name, stmt.OutputName, strOutput)
 		}
 	case ctx.target.LazyEval != nil:
 		e.StructuredParse.SetVariable(ctx.target.LazyEval.VarName, ctx.target.LazyEval.Scope, strOutput)
-		if e.debug {
-			fmt.Printf("[DEBUG] Set variable %s.%s = %s\n", ctx.target.LazyEval.Scope, ctx.target.LazyEval.VarName, strOutput)
-		}
+		e.debugf("Set variable %s.%s = %s\n", ctx.target.LazyEval.Scope, ctx.target.LazyEval.VarName, strOutput)
 	default:
 		fmt.Println(strOutput)
 	}
@@ -1603,9 +1594,7 @@ func (e *Executor) shouldSkip(cmd *Command, resolve func(string, string) string,
 	hashes := parallelHash(files)
 	for i, f := range files {
 		if cached[f] != hashes[i] {
-			if e.debug {
-				fmt.Printf("[DEBUG] %s: file changed: %s\n", cmd.Name, f)
-			}
+			e.debugf("%s: file changed: %s\n", cmd.Name, f)
 			return false
 		}
 	}

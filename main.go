@@ -17,6 +17,12 @@ import (
 
 const version = "0.1.0"
 
+func debugf(on bool, format string, args ...interface{}) {
+	if on {
+		fmt.Printf("[DEBUG] "+format, args...)
+	}
+}
+
 type ConstructInput struct {
 	FileName string
 	Commands []string
@@ -282,12 +288,13 @@ func executeBuild(inputs *ConstructInput, o *options) ([]string, error) {
 	executor.SetBaseDir(filepath.Dir(inputs.FileName))
 	executor.SetJobs(o.jobs)
 	executor.SetTiming(o.timing)
+	// Re-parse to register and validate the per-command argument flags
+	// (--cmd:arg). The positional targets were already resolved in main().
 	executor.RegisterArgumentFlags(flagSet)
 	flagSet.ParseErrorsWhitelist.UnknownFlags = false
 	if err := flagSet.Parse(os.Args[1:]); err != nil {
 		return nil, err
 	}
-	inputs = determineInputs(flagSet.Args())
 
 	for _, ov := range o.overrides {
 		eq := strings.IndexByte(ov, '=')
@@ -301,17 +308,13 @@ func executeBuild(inputs *ConstructInput, o *options) ([]string, error) {
 			if v.Name == key {
 				v.Value = val
 				overridden = true
-				if o.debug {
-					fmt.Printf("[DEBUG] Override: %s = %s\n", key, val)
-				}
+				debugf(o.debug, "Override: %s = %s\n", key, val)
 				break
 			}
 		}
 		if !overridden {
 			data.Variables = append(data.Variables, &pkg.Variable{Name: key, Value: val, Scope: "global"})
-			if o.debug {
-				fmt.Printf("[DEBUG] Override (new): %s = %s\n", key, val)
-			}
+			debugf(o.debug, "Override (new): %s = %s\n", key, val)
 		}
 	}
 

@@ -712,6 +712,35 @@ func TestMatrixMalformed(t *testing.T) {
 	}
 }
 
+func TestMatrixInsideIf(t *testing.T) {
+	in := `build {
+    if 1 == 1 {
+        matrix os in linux, windows {
+            echo &os
+        }
+    }
+    echo done
+}`
+	p := NewParserFromContent("t.constfile", in)
+	data, err := p.Parse()
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	build, err := data.GetCommand("build")
+	if err != nil {
+		t.Fatalf("build missing: %v", err)
+	}
+	if len(build.Body) != 2 {
+		t.Fatalf("build body = %d statements, want 2 (if + echo)", len(build.Body))
+	}
+	if build.Body[0].Type != "if" || build.Body[1].Type != "shell" {
+		t.Errorf("unexpected body layout: %+v", build.Body)
+	}
+	if len(build.Body[0].ThenBody) != 1 || build.Body[0].ThenBody[0].Type != "for" {
+		t.Errorf("matrix should parse as a for block inside the if, got %+v", build.Body[0].ThenBody)
+	}
+}
+
 func TestLoopContinueBreak(t *testing.T) {
 	data := &ParsedData{
 		Commands: []*Command{{
