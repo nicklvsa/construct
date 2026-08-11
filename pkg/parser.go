@@ -503,7 +503,7 @@ func extractPrerequisites(line string) ([]string, map[string]string, error) {
 		}
 		dir := ""
 		if inIdx := strings.Index(part, " in "); inIdx >= 0 {
-			dir = strings.TrimSpace(part[inIdx+4:])
+			dir = strings.TrimSpace(part[inIdx+len(" in "):])
 			part = strings.TrimSpace(part[:inIdx])
 		}
 		if part == "" {
@@ -537,7 +537,7 @@ func extractWorkDir(line string) string {
 		return ""
 	}
 
-	dir := strings.TrimSpace(segment[idx+4:])
+	dir := strings.TrimSpace(segment[idx+len(" in "):])
 	if comma := strings.IndexByte(dir, ','); comma >= 0 {
 		dir = strings.TrimSpace(dir[:comma])
 	}
@@ -739,7 +739,7 @@ func (p *Parser) parseBodyStatements(raw []rawLine, scope string) ([]BodyStateme
 		if strings.HasPrefix(line, "continue if ") {
 			cond := strings.TrimSpace(line[len("continue if "):])
 			stmts = append(stmts, BodyStatement{
-				Type:       "if",
+				Type:       StmtIf,
 				Cond:       cond,
 				ThenBody:   []BodyStatement{{Type: StmtContinue, SourceLine: lineNum}},
 				SourceLine: lineNum,
@@ -751,7 +751,7 @@ func (p *Parser) parseBodyStatements(raw []rawLine, scope string) ([]BodyStateme
 		if strings.HasPrefix(line, "break if ") {
 			cond := strings.TrimSpace(line[len("break if "):])
 			stmts = append(stmts, BodyStatement{
-				Type:       "if",
+				Type:       StmtIf,
 				Cond:       cond,
 				ThenBody:   []BodyStatement{{Type: StmtBreak, SourceLine: lineNum}},
 				SourceLine: lineNum,
@@ -788,7 +788,7 @@ func extractOutputName(line string) (shell, name string) {
 		return line, ""
 	}
 
-	suffix := strings.TrimSpace(line[idx+4:])
+	suffix := strings.TrimSpace(line[idx+len(" as "):])
 	if suffix == "" || !isValidIdent(suffix) {
 		return line, ""
 	}
@@ -966,7 +966,7 @@ func (p *Parser) parseIfBlock(raw []rawLine, scope string) (BodyStatement, int, 
 	}
 
 	stmt := BodyStatement{
-		Type:       "if",
+		Type:       StmtIf,
 		Cond:       cond,
 		ThenBody:   thenStmts,
 		SourceLine: headerNum,
@@ -1114,7 +1114,7 @@ func (p *Parser) parseForBlock(raw []rawLine, scope string) (BodyStatement, int,
 	}
 
 	loopVar := strings.TrimSpace(headerPart[:inIdx])
-	loopItems := strings.TrimSpace(headerPart[inIdx+4:])
+	loopItems := strings.TrimSpace(headerPart[inIdx+len(" in "):])
 
 	// "for i, f in ..." binds an index variable in addition to the value.
 	loopIndex := ""
@@ -1133,7 +1133,7 @@ func (p *Parser) parseForBlock(raw []rawLine, scope string) (BodyStatement, int,
 			return BodyStatement{}, 0, err
 		}
 		return BodyStatement{
-			Type:       "for",
+			Type:       StmtFor,
 			LoopVar:    loopVar,
 			LoopIndex:  loopIndex,
 			LoopItems:  loopItems,
@@ -1153,7 +1153,7 @@ func (p *Parser) parseForBlock(raw []rawLine, scope string) (BodyStatement, int,
 	}
 
 	stmt := BodyStatement{
-		Type:       "for",
+		Type:       StmtFor,
 		LoopVar:    loopVar,
 		LoopIndex:  loopIndex,
 		LoopItems:  loopItems,
@@ -1182,7 +1182,7 @@ func (p *Parser) parseMatrixBlock(raw []rawLine, scope string) (BodyStatement, i
 			return BodyStatement{}, 0, fmt.Errorf("malformed matrix clause %q: missing 'in'", clause)
 		}
 		v := strings.TrimSpace(clause[:inIdx])
-		it := strings.TrimSpace(clause[inIdx+4:])
+		it := strings.TrimSpace(clause[inIdx+len(" in "):])
 		if v == "" || it == "" {
 			return BodyStatement{}, 0, fmt.Errorf("malformed matrix clause %q", clause)
 		}
@@ -1196,7 +1196,7 @@ func (p *Parser) parseMatrixBlock(raw []rawLine, scope string) (BodyStatement, i
 			return BodyStatement{}, 0, err
 		}
 		stmt := BodyStatement{
-			Type:       "for",
+			Type:       StmtFor,
 			LoopVar:    vars[len(vars)-1],
 			LoopItems:  items[len(items)-1],
 			LoopBody:   bodyStmts,
@@ -1204,7 +1204,7 @@ func (p *Parser) parseMatrixBlock(raw []rawLine, scope string) (BodyStatement, i
 		}
 		for i := len(vars) - 2; i >= 0; i-- {
 			stmt = BodyStatement{
-				Type:       "for",
+				Type:       StmtFor,
 				LoopVar:    vars[i],
 				LoopItems:  items[i],
 				LoopBody:   []BodyStatement{stmt},
@@ -1225,7 +1225,7 @@ func (p *Parser) parseMatrixBlock(raw []rawLine, scope string) (BodyStatement, i
 	}
 
 	stmt := BodyStatement{
-		Type:       "for",
+		Type:       StmtFor,
 		LoopVar:    vars[len(vars)-1],
 		LoopItems:  items[len(items)-1],
 		LoopBody:   bodyStmts,
@@ -1234,7 +1234,7 @@ func (p *Parser) parseMatrixBlock(raw []rawLine, scope string) (BodyStatement, i
 
 	for i := len(vars) - 2; i >= 0; i-- {
 		stmt = BodyStatement{
-			Type:       "for",
+			Type:       StmtFor,
 			LoopVar:    vars[i],
 			LoopItems:  items[i],
 			LoopBody:   []BodyStatement{stmt},
@@ -1510,7 +1510,7 @@ func parseImportSpec(line string) (path, ns string, err error) {
 	spec := strings.TrimSpace(strings.TrimPrefix(line, "import"))
 
 	if asIdx := strings.LastIndex(spec, " as "); asIdx >= 0 {
-		ns = strings.TrimSpace(spec[asIdx+4:])
+		ns = strings.TrimSpace(spec[asIdx+len(" as "):])
 		spec = strings.TrimSpace(spec[:asIdx])
 		if !isValidIdent(ns) {
 			return "", "", fmt.Errorf("invalid import namespace %q (expected an identifier)", ns)
@@ -1717,13 +1717,13 @@ func renameImportNamespace(data *ParsedData, ns string) error {
 func collectLoopVars(stmts []BodyStatement, out map[string]bool) {
 	for _, stmt := range stmts {
 		switch stmt.Type {
-		case "for":
+		case StmtFor:
 			out[stmt.LoopVar] = true
 			if stmt.LoopIndex != "" {
 				out[stmt.LoopIndex] = true
 			}
 			collectLoopVars(stmt.LoopBody, out)
-		case "if":
+		case StmtIf:
 			collectLoopVars(stmt.ThenBody, out)
 			collectLoopVars(stmt.ElseBody, out)
 		}
@@ -1733,14 +1733,14 @@ func collectLoopVars(stmts []BodyStatement, out map[string]bool) {
 func renameBodyRefs(stmts []BodyStatement, rename func(string) (string, bool)) {
 	for i := range stmts {
 		switch stmts[i].Type {
-		case "if":
+		case StmtIf:
 			stmts[i].Cond = renameVarRefs(stmts[i].Cond, rename)
 			renameBodyRefs(stmts[i].ThenBody, rename)
 			renameBodyRefs(stmts[i].ElseBody, rename)
-		case "for":
+		case StmtFor:
 			stmts[i].LoopItems = renameVarRefs(stmts[i].LoopItems, rename)
 			renameBodyRefs(stmts[i].LoopBody, rename)
-		case "invoke":
+		case StmtInvoke:
 			if s := stmts[i].Shell; s != "" {
 				rewritten := renameVarRefs("&"+s, rename)
 				if rewritten != "&"+s {

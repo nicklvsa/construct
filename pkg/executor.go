@@ -84,16 +84,19 @@ var (
 
 func defaultShell() (string, []string) {
 	if runtime.GOOS == "windows" {
-		gitBashPaths := []string{
-			os.Getenv("ProgramFiles") + `\Git\usr\bin\bash.exe`,
-			os.Getenv("ProgramFiles(x86)") + `\Git\usr\bin\bash.exe`,
-			os.Getenv("LOCALAPPDATA") + `\Programs\Git\usr\bin\bash.exe`,
+		var gitBashPaths []string
+		if dir := os.Getenv("ProgramFiles"); dir != "" {
+			gitBashPaths = append(gitBashPaths, filepath.Join(dir, `Git\usr\bin\bash.exe`))
+		}
+		if dir := os.Getenv("ProgramFiles(x86)"); dir != "" {
+			gitBashPaths = append(gitBashPaths, filepath.Join(dir, `Git\usr\bin\bash.exe`))
+		}
+		if dir := os.Getenv("LOCALAPPDATA"); dir != "" {
+			gitBashPaths = append(gitBashPaths, filepath.Join(dir, `Programs\Git\usr\bin\bash.exe`))
 		}
 		for _, p := range gitBashPaths {
-			if p != `\Git\usr\bin\bash.exe` {
-				if _, err := os.Stat(p); err == nil {
-					return p, []string{"-c"}
-				}
+			if _, err := os.Stat(p); err == nil {
+				return p, []string{"-c"}
 			}
 		}
 		// Fall back to cmd.exe if Git Bash isn't installed.
@@ -406,7 +409,7 @@ func (e *Executor) cleanStatements(stmts []BodyStatement, cmd *Command, argFlags
 		switch stmt.Type {
 		case StmtIf:
 			out[i] = BodyStatement{
-				Type:       "if",
+				Type:       StmtIf,
 				Cond:       stmt.Cond,
 				ThenBody:   e.cleanStatements(stmt.ThenBody, cmd, argFlags),
 				ElseBody:   e.cleanStatements(stmt.ElseBody, cmd, argFlags),
@@ -414,7 +417,7 @@ func (e *Executor) cleanStatements(stmts []BodyStatement, cmd *Command, argFlags
 			}
 		case StmtFor:
 			out[i] = BodyStatement{
-				Type:       "for",
+				Type:       StmtFor,
 				LoopVar:    stmt.LoopVar,
 				LoopIndex:  stmt.LoopIndex,
 				LoopItems:  e.cleanShellLine(cmd, stmt.LoopItems, argFlags),
@@ -423,7 +426,7 @@ func (e *Executor) cleanStatements(stmts []BodyStatement, cmd *Command, argFlags
 			}
 		case StmtContinue, StmtBreak:
 			out[i] = stmt
-		case StmtInvoke, "env":
+		case StmtInvoke, StmtEnv:
 			out[i] = stmt
 		default:
 			out[i] = BodyStatement{Type: StmtShell, Shell: e.cleanShellLine(cmd, stmt.Shell, argFlags), OutputName: stmt.OutputName, SourceLine: stmt.SourceLine}
@@ -470,7 +473,7 @@ func (e *Executor) cleanShellLine(cmd *Command, line string, argFlags map[string
 	}
 
 	// @ENV references resolve in shell lines too; unset ones stay literal.
-	return resolveEnvRefsSet(line)
+	return resolveEnvRefsKeepUnset(line)
 }
 
 func (e *Executor) expandOutputRefs(items, scope string) string {
@@ -516,8 +519,6 @@ func (e *Executor) expandOutputRefs(items, scope string) string {
 	return result.String()
 }
 
-// isVarIdentByte reports identifier characters, including '-' (refs like
-// &my-var and namespaced prereqs like lib.gen).
 func isVarIdentByte(c byte) bool {
 	return c == '_' || c == '-' ||
 		(c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
@@ -562,8 +563,6 @@ func escapeShellValue(s string) string {
 	return b.String()
 }
 
-// isPlainIdentByte is like isVarIdentByte but without '-': it's used for
-// ref segments after a dot (e.g. the "out" in &lib.gen.out).
 func isPlainIdentByte(c byte) bool {
 	return c == '_' ||
 		(c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
@@ -714,14 +713,14 @@ func resolveEnvRefsWith(s string, lookup func(string) string) string {
 	return result.String()
 }
 
-func resolveEnvRefsSet(s string) string {
-	return resolveEnvRefsSetWith(s, func(name string) (string, bool) {
+func resolveEnvRefsKeepUnset(s string) string {
+	return resolveEnvRefsKeepUnsetWith(s, func(name string) (string, bool) {
 		val, ok := os.LookupEnv(name)
 		return val, ok
 	})
 }
 
-func resolveEnvRefsSetWith(s string, lookup func(string) (string, bool)) string {
+func resolveEnvRefsKeepUnsetWith(s string, lookup func(string) (string, bool)) string {
 	if strings.IndexByte(s, '@') < 0 {
 		return s
 	}
@@ -931,31 +930,15 @@ func LoadEnvFile(path string) error {
 func compareValues(left, right, op string) bool {
 	if li, err := strconv.Atoi(left); err == nil {
 		if ri, err := strconv.Atoi(right); err == nil {
-			return compareInt(li, ri, op)
+			return compare(li, ri, op)
 		}
 	}
-	return compareString(left, right, op)
+	return compare(left, right, op)
 }
 
-func compareInt(l, r int, op string) bool {
-	switch op {
-	case "==":
-		return l == r
-	case "!=":
-		return l != r
-	case "<":
-		return l < r
-	case ">":
-		return l > r
-	case "<=":
-		return l <= r
-	case ">=":
-		return l >= r
-	}
-	return false
-}
-
-func compareString(l, r, op string) bool {
+// compare applies a comparison operator to two values of the same type
+// (numeric comparison when both are ints, otherwise lexicographic strings).
+func compare[T ~int | ~string](l, r T, op string) bool {
 	switch op {
 	case "==":
 		return l == r
@@ -1010,7 +993,7 @@ func (e *Executor) resolveBodyValue(ctx *execContext, s, scope string) string {
 }
 
 func (e *Executor) resolveBodyEnvRef(ctx *execContext, s string) string {
-	return resolveEnvRefsSetWith(s, func(name string) (string, bool) {
+	return resolveEnvRefsKeepUnsetWith(s, func(name string) (string, bool) {
 		if v, ok := envLookupValue(*ctx.env, name); ok {
 			return v, true
 		}
@@ -1198,9 +1181,9 @@ func (e *Executor) runShell(ctx *execContext, stmt BodyStatement) error {
 	}
 	cmd.Env = *ctx.env
 
-	fullCommand := ""
+	// A single string form is used for debug output and error messages.
+	fullCommand := e.shellName + " " + strings.Join(args, " ")
 	if e.debug {
-		fullCommand = e.shellName + " " + strings.Join(args, " ")
 		switch {
 		case ctx.isPrereq:
 			e.debugf("Running prerequisite %s: %s\n", ctx.target.Name, fullCommand)
@@ -1220,7 +1203,7 @@ func (e *Executor) runShell(ctx *execContext, stmt BodyStatement) error {
 		release()
 		if err != nil && !ignoreErr {
 			return &CommandError{
-				Cmd:      e.shellName + " " + strings.Join(args, " "),
+				Cmd:      fullCommand,
 				ExitCode: exitCodeOf(err),
 				File:     ctx.srcFile,
 				Line:     stmt.SourceLine,
@@ -1250,9 +1233,6 @@ func (e *Executor) runShell(ctx *execContext, stmt BodyStatement) error {
 		e.debugf("Command failed: %v\n", err)
 		if len(stderr) > 0 {
 			e.debugf("Error output: %s\n", string(stderr))
-		}
-		if fullCommand == "" {
-			fullCommand = e.shellName + " " + strings.Join(args, " ")
 		}
 		if !ignoreErr {
 			return &CommandError{
@@ -1550,15 +1530,21 @@ func expandFileDeps(patterns []string, workDir string) []string {
 	return files
 }
 
-func (e *Executor) cacheManifest() fileCache {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-
+// loadedCacheLocked returns the file cache, loading it on first use.
+// Callers must hold e.mu.
+func (e *Executor) loadedCacheLocked() fileCache {
 	if !e.cacheLoaded {
 		e.cache = loadFileCache(e.cacheDirFor())
 		e.cacheLoaded = true
 	}
 	return e.cache
+}
+
+// cacheManifest returns the file cache, loading it on first use.
+func (e *Executor) cacheManifest() fileCache {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.loadedCacheLocked()
 }
 
 func (e *Executor) cacheKey(cmd *Command) string {
@@ -1574,12 +1560,17 @@ func (e *Executor) cacheKey(cmd *Command) string {
 	return strings.Join(parts, "|")
 }
 
-func (e *Executor) shouldSkip(cmd *Command, resolve func(string, string) string, workDir string) bool {
+// workDirFor resolves a command's working directory, falling back to baseDir.
+func (e *Executor) workDirFor(cmd *Command, resolve func(string, string) string, workDir string) string {
 	wd := e.resolveWorkDir(resolve(workDir, cmd.Name))
 	if wd == "" {
 		wd = e.baseDir
 	}
-	files := expandFileDeps(cmd.FileDeps, wd)
+	return wd
+}
+
+func (e *Executor) shouldSkip(cmd *Command, resolve func(string, string) string, workDir string) bool {
+	files := expandFileDeps(cmd.FileDeps, e.workDirFor(cmd, resolve, workDir))
 	if len(files) == 0 {
 		return false
 	}
@@ -1624,11 +1615,7 @@ func parallelHash(files []string) []string {
 }
 
 func (e *Executor) shouldSkipProduced(cmd *Command, resolve func(string, string) string, workDir string) bool {
-	wd := e.resolveWorkDir(resolve(workDir, cmd.Name))
-	if wd == "" {
-		wd = e.baseDir
-	}
-	artifacts := expandFileDeps(cmd.Produces, wd)
+	artifacts := expandFileDeps(cmd.Produces, e.workDirFor(cmd, resolve, workDir))
 	if len(artifacts) == 0 {
 		return false
 	}
@@ -1642,7 +1629,7 @@ func (e *Executor) shouldSkipProduced(cmd *Command, resolve func(string, string)
 			newest = info.ModTime()
 		}
 	}
-	for _, d := range expandFileDeps(cmd.FileDeps, wd) {
+	for _, d := range expandFileDeps(cmd.FileDeps, e.workDirFor(cmd, resolve, workDir)) {
 		info, err := os.Stat(d)
 		if err != nil {
 			return false
@@ -1655,20 +1642,12 @@ func (e *Executor) shouldSkipProduced(cmd *Command, resolve func(string, string)
 }
 
 func (e *Executor) updateCache(cmd *Command, resolve func(string, string) string, workDir string) {
-	wd := e.resolveWorkDir(resolve(workDir, cmd.Name))
-	if wd == "" {
-		wd = e.baseDir
-	}
-	files := expandFileDeps(cmd.FileDeps, wd)
+	files := expandFileDeps(cmd.FileDeps, e.workDirFor(cmd, resolve, workDir))
 
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
-	if !e.cacheLoaded {
-		e.cache = loadFileCache(e.cacheDirFor())
-		e.cacheLoaded = true
-	}
-	fc := e.cache
+	fc := e.loadedCacheLocked()
 	key := e.cacheKey(cmd)
 	if fc[key] == nil {
 		fc[key] = make(map[string]string)

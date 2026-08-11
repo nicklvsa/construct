@@ -1080,20 +1080,18 @@ func TestEnvRefsInShellLines(t *testing.T) {
 	}
 }
 
-// TestEnvRefsInShellLinesUnsetLiteral verifies unset @ENV refs stay literal in
-// shell lines, so scoped package names (@vscode/vsce) and typos survive.
 func TestEnvRefsInShellLinesUnsetLiteral(t *testing.T) {
-	if got := resolveEnvRefsSet(`npx @vscode/vsce@latest`); got != `npx @vscode/vsce@latest` {
+	if got := resolveEnvRefsKeepUnset(`npx @vscode/vsce@latest`); got != `npx @vscode/vsce@latest` {
 		t.Errorf("npm scoped package mangled: %q", got)
 	}
-	if got := resolveEnvRefsSet(`echo @CONSTRUCT_DEFINITELY_UNSET`); got != `echo @CONSTRUCT_DEFINITELY_UNSET` {
+	if got := resolveEnvRefsKeepUnset(`echo @CONSTRUCT_DEFINITELY_UNSET`); got != `echo @CONSTRUCT_DEFINITELY_UNSET` {
 		t.Errorf("unset ref should stay literal, got %q", got)
 	}
 	t.Setenv("CONSTRUCT_TEST_SHELL_ENV2", "v")
-	if got := resolveEnvRefsSet(`echo @CONSTRUCT_TEST_SHELL_ENV2 and @NOPE`); got != `echo v and @NOPE` {
+	if got := resolveEnvRefsKeepUnset(`echo @CONSTRUCT_TEST_SHELL_ENV2 and @NOPE`); got != `echo v and @NOPE` {
 		t.Errorf("set/unset mix = %q", got)
 	}
-	if got := resolveEnvRefsSet(`echo \@CONSTRUCT_TEST_SHELL_ENV2`); got != `echo @CONSTRUCT_TEST_SHELL_ENV2` {
+	if got := resolveEnvRefsKeepUnset(`echo \@CONSTRUCT_TEST_SHELL_ENV2`); got != `echo @CONSTRUCT_TEST_SHELL_ENV2` {
 		t.Errorf("escaped ref should stay literal, got %q", got)
 	}
 }
@@ -1131,8 +1129,6 @@ func TestBuiltinConditionFunctions(t *testing.T) {
 	}
 }
 
-// TestBuiltinConditionFunctionsNotShell verifies the function form never leaks
-// into shell execution — a "$ exists(...)" line stays a shell command.
 func TestBuiltinConditionFunctionsNotShell(t *testing.T) {
 	in := `build {
     if exists("nonexistent-file-xyz") {
@@ -1150,8 +1146,6 @@ func TestBuiltinConditionFunctionsNotShell(t *testing.T) {
 	if cmd.Body[0].Type != "if" {
 		t.Fatalf("expected if statement, got %#v", cmd.Body[0])
 	}
-	// The condition itself is evaluated by construct; the shell lines inside
-	// are untouched plain commands.
 	if cmd.Body[0].Cond != `exists("nonexistent-file-xyz")` {
 		t.Errorf("cond = %q", cmd.Body[0].Cond)
 	}
@@ -1182,8 +1176,6 @@ func TestLoopIndex(t *testing.T) {
 	}
 }
 
-// TestWorkDirBaseDir verifies relative workdirs anchor to the Constfile's
-// directory rather than the process cwd.
 func TestWorkDirBaseDir(t *testing.T) {
 	base := t.TempDir()
 	sub := filepath.Join(base, "src")
@@ -1215,8 +1207,6 @@ func TestWorkDirBaseDir(t *testing.T) {
 	}
 }
 
-// TestBuiltinConditionFunctionsBase verifies exists() anchors relative paths
-// to the command's working directory (itself anchored to the base dir).
 func TestBuiltinConditionFunctionsBase(t *testing.T) {
 	base := t.TempDir()
 	os.Mkdir(filepath.Join(base, "src"), 0755)
