@@ -630,38 +630,51 @@ func TestResolveVarRefs(t *testing.T) {
 	}
 }
 
-func TestResolveRefsByteRuneParity(t *testing.T) {
+// TestResolveRefsBehavior pins the &ref / @ENV scanner semantics: unicode
+// identifiers, dot-segment fallback, escapes, and literal unset env refs.
+func TestResolveRefsBehavior(t *testing.T) {
 	lookup := func(name string) (string, bool) {
 		vals := map[string]string{"g": "GV", "name": "nick", "build-lsp.0": "output1", "café": "nonascii"}
 		v, ok := vals[name]
 		return v, ok
 	}
 
-	t.Setenv("CONSTRUCT_PARITY_ENV", "envval")
+	t.Setenv("CONSTRUCT_TEST_ENV", "envval")
 
-	cases := []string{
-		"echo hi",
-		"echo &g and &name",
-		"echo &build-lsp.0",
-		"x &nope y",
-		"a & b",
-		"& at start &name at end",
-		"tail &g&name",
-		"&g.5",
-		"echo @CONSTRUCT_PARITY_ENV",
-		"@ & @CONSTRUCT_PARITY_ENV x",
-		"mix &g and @CONSTRUCT_PARITY_ENV",
-		"café &café café",
-		"日本語 &name テスト",
-		"line with trailing &",
+	varRefs := []struct{ in, want string }{
+		{"echo hi", "echo hi"},
+		{"echo &g and &name", "echo GV and nick"},
+		{"echo &build-lsp.0", "echo output1"},
+		{"x &nope y", "x &nope y"}, // unknown stays literal
+		{"a & b", "a & b"},
+		{"& at start &name at end", "& at start nick at end"},
+		{"tail &g&name", "tail GVnick"},
+		{"&g.5", "GV.5"},               // full name misses, first segment resolves
+		{"echo \\&name", "echo &name"}, // escaped stays literal
+		{"café &café café", "café nonascii café"},
+		{"日本語 &name テスト", "日本語 nick テスト"},
+		{"line with trailing &", "line with trailing &"},
 	}
-	for _, tc := range cases {
-		if got, want := resolveVarRefs(tc, lookup), resolveVarRefsRunes(tc, lookup); got != want {
-			t.Errorf("resolveVarRefs(%q): byte=%q rune=%q", tc, got, want)
+	for _, tc := range varRefs {
+		if got := resolveVarRefs(tc.in, lookup); got != tc.want {
+			t.Errorf("resolveVarRefs(%q) = %q, want %q", tc.in, got, tc.want)
 		}
-		if got, want := resolveEnvRefs(tc), resolveEnvRefsRunes(tc); got != want {
-			t.Errorf("resolveEnvRefs(%q): byte=%q rune=%q", tc, got, want)
+	}
+
+	envCases := []struct{ in, want string }{
+		{"echo @CONSTRUCT_TEST_ENV", "echo envval"},
+		{"echo @NOPE", "echo "}, // unset => empty
+		{"@ & @CONSTRUCT_TEST_ENV x", "@ & envval x"},
+		{"echo \\@CONSTRUCT_TEST_ENV", "echo @CONSTRUCT_TEST_ENV"}, // escaped stays literal
+	}
+	for _, tc := range envCases {
+		if got := resolveEnvRefs(tc.in); got != tc.want {
+			t.Errorf("resolveEnvRefs(%q) = %q, want %q", tc.in, got, tc.want)
 		}
+	}
+
+	if got := resolveEnvRefsKeepUnset("echo @NOPE and @CONSTRUCT_TEST_ENV"); got != "echo @NOPE and envval" {
+		t.Errorf("resolveEnvRefsKeepUnset = %q", got)
 	}
 }
 

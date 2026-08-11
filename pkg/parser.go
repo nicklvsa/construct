@@ -1566,9 +1566,7 @@ func (p *Parser) processImport(line string) error {
 	}
 
 	if ns != "" {
-		if err := renameImportNamespace(imported.Data, ns); err != nil {
-			return err
-		}
+		renameImportNamespace(imported.Data, ns)
 	}
 
 	if !slices.Contains(p.Data.SourceFiles, cleanPath) {
@@ -1602,27 +1600,44 @@ func importBaseDir(inputFile string) string {
 	return filepath.Dir(inputFile)
 }
 
-func renameImportNamespace(data *ParsedData, ns string) error {
-	prefix := ns + "."
+func renameImportNamespace(data *ParsedData, ns string) {
+	commandNew, globalNew := importRenameMaps(data, ns)
+	shadows := commandShadowSets(data)
 
-	commandNew := make(map[string]string)
+	for _, c := range data.Commands {
+		oldName := c.Name
+		c.Name = commandNew[oldName]
+		renameCommandRefs(c, commandNew, globalNew, shadows[oldName])
+	}
+
+	for _, v := range data.Variables {
+		if v.Scope == "global" {
+			if n, ok := globalNew[v.Name]; ok {
+				v.Name = n
+			}
+		} else if n, ok := commandNew[v.Scope]; ok {
+			v.Scope = n
+		}
+	}
+}
+
+// importRenameMaps builds the old->new name tables for commands and globals.
+func importRenameMaps(data *ParsedData, ns string) (commandNew, globalNew map[string]string) {
+	prefix := ns + "."
+	commandNew = make(map[string]string, len(data.Commands))
 	for _, c := range data.Commands {
 		commandNew[c.Name] = prefix + c.Name
 	}
-	globalNew := make(map[string]string)
+	globalNew = make(map[string]string)
 	for _, v := range data.Variables {
 		if v.Scope == "global" {
 			globalNew[v.Name] = prefix + v.Name
 		}
 	}
+	return commandNew, globalNew
+}
 
-	scopeNew := func(scope string) string {
-		if n, ok := commandNew[scope]; ok {
-			return n
-		}
-		return scope
-	}
-
+func commandShadowSets(data *ParsedData) map[string]map[string]bool {
 	shadows := make(map[string]map[string]bool, len(data.Commands))
 	for _, c := range data.Commands {
 		shadow := make(map[string]bool)
@@ -1650,68 +1665,52 @@ func renameImportNamespace(data *ParsedData, ns string) error {
 		collectLoopVars(c.Body, shadow)
 		shadows[c.Name] = shadow
 	}
+	return shadows
+}
 
-	for _, c := range data.Commands {
-		oldName := c.Name
-		shadow := shadows[oldName]
-		c.Name = commandNew[oldName]
-
-		for i, prereq := range c.Prereqs {
-			if n, ok := commandNew[strings.TrimSpace(prereq)]; ok {
-				c.Prereqs[i] = n
-			}
+func renameCommandRefs(c *Command, commandNew, globalNew map[string]string, shadow map[string]bool) {
+	for i, prereq := range c.Prereqs {
+		if n, ok := commandNew[strings.TrimSpace(prereq)]; ok {
+			c.Prereqs[i] = n
 		}
+	}
 
-		if len(c.PrereqDirs) > 0 {
-			newDirs := make(map[string]string, len(c.PrereqDirs))
-			for prereq, dir := range c.PrereqDirs {
-				if n, ok := commandNew[prereq]; ok {
-					newDirs[n] = dir
-				} else {
-					newDirs[prereq] = dir
-				}
-			}
-			c.PrereqDirs = newDirs
-		}
-
-		if c.LazyEval != nil {
-			if c.LazyEval.Scope == "global" {
-				if n, ok := globalNew[c.LazyEval.VarName]; ok {
-					c.LazyEval.VarName = n
-				}
+	if len(c.PrereqDirs) > 0 {
+		newDirs := make(map[string]string, len(c.PrereqDirs))
+		for prereq, dir := range c.PrereqDirs {
+			if n, ok := commandNew[prereq]; ok {
+				newDirs[n] = dir
 			} else {
-				c.LazyEval.Scope = scopeNew(c.LazyEval.Scope)
+				newDirs[prereq] = dir
 			}
 		}
+		c.PrereqDirs = newDirs
+	}
 
-		rename := func(full string) (string, bool) {
-			seg := firstIdent(full)
-			if seg == "" || shadow[seg] {
-				return "", false
+	if c.LazyEval != nil {
+		if c.LazyEval.Scope == "global" {
+			if n, ok := globalNew[c.LazyEval.VarName]; ok {
+				c.LazyEval.VarName = n
 			}
-			if n, ok := globalNew[full]; ok {
-				return "&" + n, true
-			}
-			if n, ok := commandNew[seg]; ok {
-				return "&" + n + full[len(seg):], true
-			}
+		} else if n, ok := commandNew[c.LazyEval.Scope]; ok {
+			c.LazyEval.Scope = n
+		}
+	}
+
+	rename := func(full string) (string, bool) {
+		seg := firstIdent(full)
+		if seg == "" || shadow[seg] {
 			return "", false
 		}
-		renameBodyRefs(c.Body, rename)
-	}
-
-	for _, v := range data.Variables {
-		switch v.Scope {
-		case "global":
-			if n, ok := globalNew[v.Name]; ok {
-				v.Name = n
-			}
-		default:
-			v.Scope = scopeNew(v.Scope)
+		if n, ok := globalNew[full]; ok {
+			return "&" + n, true
 		}
+		if n, ok := commandNew[seg]; ok {
+			return "&" + n + full[len(seg):], true
+		}
+		return "", false
 	}
-
-	return nil
+	renameBodyRefs(c.Body, rename)
 }
 
 func collectLoopVars(stmts []BodyStatement, out map[string]bool) {
@@ -1765,84 +1764,7 @@ func renameVarRefs(s string, rename func(string) (string, bool)) string {
 	if strings.IndexByte(s, '&') < 0 {
 		return s
 	}
-	if !isASCII(s) {
-		return renameVarRefsRunes(s, rename)
-	}
-
-	var result strings.Builder
-	result.Grow(len(s))
-	i := 0
-	for i < len(s) {
-		if s[i] == '\\' && i+1 < len(s) && s[i+1] == '&' {
-			result.WriteByte('&')
-			i += 2
-			continue
-		}
-		if s[i] == '&' {
-			j := i + 1
-			start := j
-			for j < len(s) && isVarIdentByte(s[j]) {
-				j++
-			}
-			for j < len(s) && s[j] == '.' {
-				k := j + 1
-				ks := k
-				for k < len(s) && isVarIdentByte(s[k]) {
-					k++
-				}
-				if k == ks {
-					break // trailing '.' with no segment
-				}
-				j = k
-			}
-			if name := s[start:j]; name != "" {
-				if val, ok := rename(name); ok {
-					result.WriteString(val)
-					i = j
-					continue
-				}
-			}
-		}
-		result.WriteByte(s[i])
-		i++
-	}
-	return result.String()
-}
-
-func renameVarRefsRunes(s string, rename func(string) (string, bool)) string {
-	var result strings.Builder
-	runes := []rune(s)
-	i := 0
-	for i < len(runes) {
-		if runes[i] == '&' {
-			start := i + 1
-			j := start
-			for j < len(runes) && isVarIdentByte(byte(runes[j])) {
-				j++
-			}
-			for j < len(runes) && runes[j] == '.' {
-				k := j + 1
-				ks := k
-				for k < len(runes) && isVarIdentByte(byte(runes[k])) {
-					k++
-				}
-				if k == ks {
-					break
-				}
-				j = k
-			}
-			if j > start {
-				if val, ok := rename(string(runes[start:j])); ok {
-					result.WriteString(val)
-					i = j
-					continue
-				}
-			}
-		}
-		result.WriteRune(runes[i])
-		i++
-	}
-	return result.String()
+	return scanRefs(s, '&', isVarIdentRune, isVarIdentRune, rename, false)
 }
 
 func (p *Parser) classifyPrereqs() error {

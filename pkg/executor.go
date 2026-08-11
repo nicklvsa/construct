@@ -20,7 +20,6 @@ import (
 	"sync"
 	"time"
 	"unicode"
-	"unicode/utf8"
 
 	"github.com/spf13/pflag"
 )
@@ -563,221 +562,96 @@ func escapeShellValue(s string) string {
 	return b.String()
 }
 
-func isPlainIdentByte(c byte) bool {
-	return c == '_' ||
-		(c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
+func isVarIdentRune(r rune) bool {
+	return unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_' || r == '-'
 }
 
-func isASCII(s string) bool {
-	for i := 0; i < len(s); i++ {
-		if s[i] >= utf8.RuneSelf {
-			return false
+func isPlainRune(r rune) bool {
+	return unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_'
+}
+
+func scanRefs(s string, marker byte, firstSeg, dotSeg func(rune) bool, lookup func(string) (string, bool), fallbackFirst bool) string {
+	var result strings.Builder
+	result.Grow(len(s) + 16)
+	runes := []rune(s)
+	i := 0
+	for i < len(runes) {
+		if runes[i] == '\\' && i+1 < len(runes) && runes[i+1] == rune(marker) {
+			result.WriteRune(runes[i+1])
+			i += 2
+			continue
 		}
+		if runes[i] == rune(marker) {
+			j := i + 1
+			firstStart := j
+			for j < len(runes) && firstSeg(runes[j]) {
+				j++
+			}
+			if j > firstStart {
+				firstEnd := j // first segment ends here, before any dots
+				if dotSeg != nil {
+					for j < len(runes) && runes[j] == '.' && j+1 < len(runes) && dotSeg(runes[j+1]) {
+						j++
+						for j < len(runes) && dotSeg(runes[j]) {
+							j++
+						}
+					}
+				}
+				if val, ok := lookup(string(runes[firstStart:j])); ok {
+					result.WriteString(val)
+					i = j
+					continue
+				}
+				if fallbackFirst && j > firstEnd {
+					if val, ok := lookup(string(runes[firstStart:firstEnd])); ok {
+						result.WriteString(val)
+						i = firstEnd
+						continue
+					}
+				}
+			}
+		}
+		result.WriteRune(runes[i])
+		i++
 	}
-	return true
+	return result.String()
 }
 
 func resolveVarRefs(line string, lookup func(string) (string, bool)) string {
 	if strings.IndexByte(line, '&') < 0 {
 		return line
 	}
-	if !isASCII(line) {
-		return resolveVarRefsRunes(line, lookup)
-	}
-
-	var result strings.Builder
-	result.Grow(len(line))
-	i := 0
-	for i < len(line) {
-		if line[i] == '\\' && i+1 < len(line) && line[i+1] == '&' {
-			result.WriteByte('&')
-			i += 2
-			continue
-		}
-		if line[i] == '&' {
-			j := i + 1
-			start := j
-			for j < len(line) && isVarIdentByte(line[j]) {
-				j++
-			}
-
-			for j < len(line) && line[j] == '.' && j+1 < len(line) && isPlainIdentByte(line[j+1]) {
-				j++
-				for j < len(line) && isPlainIdentByte(line[j]) {
-					j++
-				}
-			}
-			if name := line[start:j]; name != "" {
-				if val, ok := lookup(name); ok {
-					result.WriteString(val)
-					i = j
-					continue
-				}
-
-				if dot := strings.IndexByte(name, '.'); dot > 0 {
-					if val, ok := lookup(name[:dot]); ok {
-						result.WriteString(val)
-						i = start + dot
-						continue
-					}
-				}
-			}
-		}
-		result.WriteByte(line[i])
-		i++
-	}
-	return result.String()
-}
-
-func resolveVarRefsRunes(line string, lookup func(string) (string, bool)) string {
-	var result strings.Builder
-	runes := []rune(line)
-	i := 0
-	for i < len(runes) {
-		if runes[i] == '&' {
-			var name strings.Builder
-			j := i + 1
-			for j < len(runes) && (unicode.IsLetter(runes[j]) || unicode.IsDigit(runes[j]) || runes[j] == '_' || runes[j] == '-') {
-				name.WriteRune(runes[j])
-				j++
-			}
-
-			for j < len(runes) && runes[j] == '.' && j+1 < len(runes) && (unicode.IsLetter(runes[j+1]) || unicode.IsDigit(runes[j+1]) || runes[j+1] == '_') {
-				name.WriteRune('.')
-				j++
-				for j < len(runes) && (unicode.IsLetter(runes[j]) || unicode.IsDigit(runes[j]) || runes[j] == '_') {
-					name.WriteRune(runes[j])
-					j++
-				}
-			}
-			if name.Len() > 0 {
-				full := name.String()
-				if val, ok := lookup(full); ok {
-					result.WriteString(val)
-					i = j
-					continue
-				}
-
-				dot := strings.IndexByte(full, '.')
-				if dot > 0 {
-					if val, ok := lookup(full[:dot]); ok {
-						result.WriteString(val)
-						i = i + 1 + dot
-						continue
-					}
-				}
-			}
-		}
-		result.WriteRune(runes[i])
-		i++
-	}
-	return result.String()
+	return scanRefs(line, '&', isVarIdentRune, isPlainRune, lookup, true)
 }
 
 // resolveEnvRefs replaces @ENVNAME references with the corresponding env var.
 func resolveEnvRefs(s string) string {
-	return resolveEnvRefsWith(s, os.Getenv)
+	if strings.IndexByte(s, '@') < 0 {
+		return s
+	}
+	return scanRefs(s, '@', isPlainRune, nil, func(name string) (string, bool) {
+		return os.Getenv(name), true
+	}, false)
 }
 
 func resolveEnvRefsWith(s string, lookup func(string) string) string {
 	if strings.IndexByte(s, '@') < 0 {
 		return s
 	}
-	if !isASCII(s) {
-		return resolveEnvRefsRunesWith(s, lookup)
-	}
-
-	var result strings.Builder
-	result.Grow(len(s))
-	for i := 0; i < len(s); {
-		if s[i] == '\\' && i+1 < len(s) && s[i+1] == '@' {
-			result.WriteByte('@')
-			i += 2
-			continue
-		}
-		if s[i] == '@' {
-			j := i + 1
-			start := j
-			for j < len(s) && isPlainIdentByte(s[j]) {
-				j++
-			}
-			if j > start {
-				result.WriteString(lookup(s[start:j]))
-				i = j
-				continue
-			}
-		}
-		result.WriteByte(s[i])
-		i++
-	}
-	return result.String()
+	return scanRefs(s, '@', isPlainRune, nil, func(name string) (string, bool) {
+		return lookup(name), true
+	}, false)
 }
 
 func resolveEnvRefsKeepUnset(s string) string {
-	return resolveEnvRefsKeepUnsetWith(s, func(name string) (string, bool) {
-		val, ok := os.LookupEnv(name)
-		return val, ok
-	})
+	return resolveEnvRefsKeepUnsetWith(s, os.LookupEnv)
 }
 
 func resolveEnvRefsKeepUnsetWith(s string, lookup func(string) (string, bool)) string {
 	if strings.IndexByte(s, '@') < 0 {
 		return s
 	}
-
-	var result strings.Builder
-	result.Grow(len(s))
-	for i := 0; i < len(s); {
-		if s[i] == '\\' && i+1 < len(s) && s[i+1] == '@' {
-			result.WriteByte('@')
-			i += 2
-			continue
-		}
-		if s[i] == '@' {
-			j := i + 1
-			start := j
-			for j < len(s) && isPlainIdentByte(s[j]) {
-				j++
-			}
-			if j > start {
-				if val, ok := lookup(s[start:j]); ok {
-					result.WriteString(val)
-					i = j
-					continue
-				}
-			}
-		}
-		result.WriteByte(s[i])
-		i++
-	}
-	return result.String()
-}
-
-func resolveEnvRefsRunes(s string) string {
-	return resolveEnvRefsRunesWith(s, os.Getenv)
-}
-
-func resolveEnvRefsRunesWith(s string, lookup func(string) string) string {
-	var result strings.Builder
-	runes := []rune(s)
-	for i := 0; i < len(runes); {
-		if runes[i] == '@' {
-			var name strings.Builder
-			j := i + 1
-			for j < len(runes) && (unicode.IsLetter(runes[j]) || unicode.IsDigit(runes[j]) || runes[j] == '_') {
-				name.WriteRune(runes[j])
-				j++
-			}
-			if name.Len() > 0 {
-				result.WriteString(lookup(name.String()))
-				i = j
-				continue
-			}
-		}
-		result.WriteRune(runes[i])
-		i++
-	}
-	return result.String()
+	return scanRefs(s, '@', isPlainRune, nil, lookup, false)
 }
 
 func findTopLevelOp(s, op string) int {
