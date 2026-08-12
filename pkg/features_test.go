@@ -1467,6 +1467,14 @@ func TestLoadEnvFile(t *testing.T) {
 	path := filepath.Join(dir, ".env")
 	os.WriteFile(path, []byte("# comment\nFOO=bar\nQUOTED=\"hi there\"\nPRECEDENCE_TEST=ignored\nUNQUOTED_SPACES=a b c\n"), 0644)
 
+	for _, key := range []string{"FOO", "QUOTED", "UNQUOTED_SPACES"} {
+		if prev, ok := os.LookupEnv(key); ok {
+			t.Cleanup(func() { os.Setenv(key, prev) })
+		} else {
+			t.Cleanup(func() { os.Unsetenv(key) })
+		}
+	}
+
 	if err := LoadEnvFile(path); err != nil {
 		t.Fatalf("LoadEnvFile: %v", err)
 	}
@@ -1620,4 +1628,112 @@ func TestDagSharedPrereqOnce(t *testing.T) {
 	if len(gen.PrereqOutput) != 1 {
 		t.Errorf("shared prereq ran %d times, want 1", len(gen.PrereqOutput))
 	}
+}
+
+func TestShellBatchingOrder(t *testing.T) {
+	data := &ParsedData{
+		Commands: []*Command{
+			{Name: "multi", Body: shellBody("echo one", "echo two", "echo three")},
+		},
+	}
+	data.buildIndexMaps()
+	out := runAndCapture(t, data, "multi")
+	if out != "one\ntwo\nthree" {
+		t.Errorf("batched output = %q, want %q", out, "one\ntwo\nthree")
+	}
+}
+
+func TestShellBatchingIsolation(t *testing.T) {
+	data := &ParsedData{
+		Commands: []*Command{
+			{Name: "iso", Body: shellBody(
+				"cd /tmp && pwd",
+				"pwd",
+				"export CONSTRUCT_TEST_LEAK=bar",
+				"echo LEAK=$CONSTRUCT_TEST_LEAK",
+			)},
+		},
+	}
+	data.buildIndexMaps()
+	out := runAndCapture(t, data, "iso")
+	lines := strings.Split(out, "\n")
+	if len(lines) != 3 {
+		t.Fatalf("output = %q", out)
+	}
+	if lines[0] != "/tmp" {
+		t.Errorf("first statement should run in /tmp, got %q", lines[0])
+	}
+	if lines[1] == "/tmp" {
+		t.Errorf("cd leaked to the next statement: pwd = %q", lines[1])
+	}
+	if lines[2] != "LEAK=" {
+		t.Errorf("export leaked across statements: %q", lines[2])
+	}
+}
+
+func TestShellBatchingTolerance(t *testing.T) {
+	data := &ParsedData{
+		Commands: []*Command{
+			{Name: "tolerant", Body: shellBody("!"+exitNonZero(), "echo after")},
+			{Name: "strict", Body: shellBody(exitNonZero(), "echo never")},
+		},
+	}
+	data.buildIndexMaps()
+	if out := runAndCapture(t, data, "tolerant"); out != "after" {
+		t.Errorf("tolerant batch = %q, want %q", out, "after")
+	}
+	if err := runErr(data, "strict"); err == nil {
+		t.Error("strict batch should fail when a statement fails")
+	}
+}
+
+func TestShellBatchingMixedTolerance(t *testing.T) {
+	data := &ParsedData{
+		Commands: []*Command{
+			{Name: "mix", Body: shellBody("echo first", "!"+exitNonZero(), "echo last")},
+		},
+	}
+	data.buildIndexMaps()
+	if out := runAndCapture(t, data, "mix"); out != "first\nlast" {
+		t.Errorf("mixed batch = %q, want %q", out, "first\nlast")
+	}
+}
+
+func TestShellBatchingInLoop(t *testing.T) {
+	data := &ParsedData{
+		Commands: []*Command{
+			{Name: "loopy", Body: []BodyStatement{
+				{Type: "for", LoopVar: "i", LoopItems: "1, 2", LoopBody: shellBody("echo a&i", "echo b&i")},
+			}},
+		},
+	}
+	data.buildIndexMaps()
+	if out := runAndCapture(t, data, "loopy"); out != "a1\nb1\na2\nb2" {
+		t.Errorf("loop batch = %q", out)
+	}
+}
+
+func runAndCapture(t *testing.T, data *ParsedData, target string) string {
+	t.Helper()
+	so, sw, _ := os.Pipe()
+	oldOut := os.Stdout
+	os.Stdout = sw
+	err := NewExecutor(data, false, false).Execute([]string{target})
+	os.Stdout = oldOut
+	sw.Close()
+	out, _ := io.ReadAll(so)
+	if err != nil {
+		t.Fatalf("exec: %v", err)
+	}
+	return strings.TrimSpace(string(out))
+}
+
+func runErr(data *ParsedData, target string) error {
+	oldOut := os.Stdout
+	devNull, _ := os.Open(os.DevNull)
+	os.Stdout = devNull
+	err := NewExecutor(data, false, false).Execute([]string{target})
+	os.Stdout = oldOut
+	devNull.Close()
+	return err
 }

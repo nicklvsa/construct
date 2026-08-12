@@ -956,6 +956,17 @@ func (e *Executor) execBody(ctx *execContext, body []BodyStatement) error {
 			return errLoopBreak
 
 		default:
+			if e.streaming(ctx) {
+				end := i
+				for end < len(body) && body[end].Type == StmtShell {
+					end++
+				}
+				if err := e.runShellBatch(ctx, body[i:end]); err != nil {
+					return err
+				}
+				i = end - 1
+				continue
+			}
 			if err := e.runShell(ctx, stmt); err != nil {
 				return err
 			}
@@ -1032,6 +1043,78 @@ func (e *Executor) expandLoopItems(ctx *execContext, items string) []string {
 		expanded = append(expanded, strings.TrimSpace(item))
 	}
 	return expanded
+}
+
+func (e *Executor) streaming(ctx *execContext) bool {
+	return !e.debug && !ctx.isPrereq && ctx.target.LazyEval == nil && ctx.out == nil
+}
+
+func (e *Executor) runShellBatch(ctx *execContext, stmts []BodyStatement) error {
+	type group struct {
+		lines    []string
+		strict   bool
+		sourceLn int
+	}
+	var groups []*group
+	cur := &group{strict: !strings.HasPrefix(stmts[0].Shell, "!"), sourceLn: stmts[0].SourceLine}
+
+	for _, stmt := range stmts {
+		cmdLine := stmt.Shell
+		if cmdLine == "" {
+			continue
+		}
+		tolerant := strings.HasPrefix(cmdLine, "!")
+		if tolerant {
+			cmdLine = strings.TrimSpace(cmdLine[1:])
+		}
+		cmdLine = e.resolveBodyEnvRef(ctx, cmdLine)
+		if tolerant {
+			cmdLine = "( " + cmdLine + " ) || true"
+		} else {
+			cmdLine = "( " + cmdLine + " )"
+		}
+		if cur.strict == tolerant { // tolerance changed: start a new group
+			groups = append(groups, cur)
+			cur = &group{strict: !tolerant, sourceLn: stmt.SourceLine}
+		}
+		cur.lines = append(cur.lines, cmdLine)
+	}
+	groups = append(groups, cur)
+
+	for _, g := range groups {
+		if len(g.lines) == 0 {
+			continue
+		}
+		script := strings.Join(g.lines, "\n")
+		if g.strict {
+			script = "set -e\n" + script
+		}
+		args := append(e.shellArgs, script)
+		cmd := exec.Command(e.shellName, args...)
+		if ctx.workDir != "" {
+			cmd.Dir = e.resolveWorkDir(e.resolveBodyValue(ctx, ctx.workDir, ctx.target.Name))
+		} else if e.baseDir != "" {
+			cmd.Dir = e.baseDir
+		}
+		cmd.Env = *ctx.env
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+
+		e.debugf("Running command %s (batched): %s\n", ctx.target.Name, e.shellName+" "+strings.Join(args, " "))
+
+		release := e.acquire()
+		err := cmd.Run()
+		release()
+		if err != nil {
+			return &CommandError{
+				Cmd:      e.shellName + " " + strings.Join(args, " "),
+				ExitCode: exitCodeOf(err),
+				File:     ctx.srcFile,
+				Line:     g.sourceLn,
+			}
+		}
+	}
+	return nil
 }
 
 func (e *Executor) runShell(ctx *execContext, stmt BodyStatement) error {
