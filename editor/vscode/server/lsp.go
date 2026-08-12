@@ -395,15 +395,20 @@ func namedOutputHints(text string, data *pkg.ParsedData) []diagnostic {
 						Message:  fmt.Sprintf("💡 named output available: use &%s instead of &%s", hint, name),
 					})
 				}
-			} else {
-				if !hasNamedOutput(cmd.Body, suffix) {
-					diags = append(diags, diagnostic{
-						Range:    refRange(lineIdx, absIdx, refLen),
-						Severity: sevError,
-						Source:   "constfile",
-						Message:  fmt.Sprintf("unknown named output `%s` on command `%s`", suffix, cmdName),
-					})
-				}
+			} else if hasInvokeCapture(cmd.Body, suffix) {
+				diags = append(diags, diagnostic{
+					Range:    refRange(lineIdx, absIdx, refLen),
+					Severity: sevWarning,
+					Source:   "constfile",
+					Message:  fmt.Sprintf("`%s` is captured by `invoke ... as %s` — visible only inside `%s`", suffix, suffix, cmdName),
+				})
+			} else if !hasNamedOutput(cmd.Body, suffix) {
+				diags = append(diags, diagnostic{
+					Range:    refRange(lineIdx, absIdx, refLen),
+					Severity: sevError,
+					Source:   "constfile",
+					Message:  fmt.Sprintf("unknown named output `%s` on command `%s`", suffix, cmdName),
+				})
 			}
 		}
 	}
@@ -417,18 +422,24 @@ func refRange(line, col, length int) range_ {
 	}
 }
 
-func countShellLines(body []pkg.BodyStatement) int {
-	count := 0
+func shellStatements(body []pkg.BodyStatement) []pkg.BodyStatement {
+	var out []pkg.BodyStatement
 	for _, stmt := range body {
 		switch stmt.Type {
 		case pkg.StmtShell:
-			count++
+			out = append(out, stmt)
 		case pkg.StmtIf:
-			count += countShellLines(stmt.ThenBody)
-			count += countShellLines(stmt.ElseBody)
+			out = append(out, shellStatements(stmt.ThenBody)...)
+			out = append(out, shellStatements(stmt.ElseBody)...)
+		case pkg.StmtFor:
+			out = append(out, shellStatements(stmt.LoopBody)...)
 		}
 	}
-	return count
+	return out
+}
+
+func countShellLines(body []pkg.BodyStatement) int {
+	return len(shellStatements(body))
 }
 
 func hasNamedOutput(body []pkg.BodyStatement, name string) bool {
@@ -438,6 +449,30 @@ func hasNamedOutput(body []pkg.BodyStatement, name string) bool {
 		}
 		if stmt.Type == pkg.StmtIf {
 			if hasNamedOutput(stmt.ThenBody, name) || hasNamedOutput(stmt.ElseBody, name) {
+				return true
+			}
+		}
+		if stmt.Type == pkg.StmtFor && hasNamedOutput(stmt.LoopBody, name) {
+			return true
+		}
+	}
+	return false
+}
+
+// hasInvokeCapture reports whether body has `invoke <cmd> as name`.
+func hasInvokeCapture(body []pkg.BodyStatement, name string) bool {
+	for _, stmt := range body {
+		switch stmt.Type {
+		case pkg.StmtInvoke:
+			if stmt.OutputName == name {
+				return true
+			}
+		case pkg.StmtIf:
+			if hasInvokeCapture(stmt.ThenBody, name) || hasInvokeCapture(stmt.ElseBody, name) {
+				return true
+			}
+		case pkg.StmtFor:
+			if hasInvokeCapture(stmt.LoopBody, name) {
 				return true
 			}
 		}
@@ -451,15 +486,10 @@ func namedOutputAt(data *pkg.ParsedData, cmdName string, idx int) string {
 	if err != nil || cmd == nil {
 		return ""
 	}
-	shellIdx := 0
-	for _, stmt := range cmd.Body {
-		if stmt.Type != pkg.StmtShell {
-			continue
-		}
+	for shellIdx, stmt := range shellStatements(cmd.Body) {
 		if stmt.OutputName != "" && shellIdx == idx {
 			return cmdName + "." + stmt.OutputName
 		}
-		shellIdx++
 	}
 	return ""
 }
@@ -677,11 +707,7 @@ func varHoverMessage(name string, data *pkg.ParsedData) string {
 		return ""
 	}
 
-	shellIdx := 0
-	for _, stmt := range cmd.Body {
-		if stmt.Type != pkg.StmtShell {
-			continue
-		}
+	for shellIdx, stmt := range shellStatements(cmd.Body) {
 		matches := false
 		var namedHint string
 		if idx, err := strconv.Atoi(suffix); err == nil {
@@ -703,7 +729,6 @@ func varHoverMessage(name string, data *pkg.ParsedData) string {
 			}
 			return msg
 		}
-		shellIdx++
 	}
 
 	return ""

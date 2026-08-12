@@ -692,8 +692,72 @@ _ < log {
 	}
 }
 
-// TestDefinitionNamedOutput verifies go-to-definition on &cmd.out jumps to
-// the producing shell statement.
+func TestNamedOutputHintsForLoop(t *testing.T) {
+	text := `gen {
+    $ echo one
+    for i in 1, 2 {
+        $ echo hi as out
+    }
+}
+_ < gen {
+    echo "&gen.out"
+}
+`
+	data := parseForTest(t, text)
+	gen, err := data.GetCommand("gen")
+	if err != nil {
+		t.Fatalf("gen missing: %v", err)
+	}
+	if countShellLines(gen.Body) != 2 {
+		t.Errorf("countShellLines = %d, want 2", countShellLines(gen.Body))
+	}
+	if !hasNamedOutput(gen.Body, "out") {
+		t.Error("hasNamedOutput should find `out` inside the for loop")
+	}
+	if hint := namedOutputAt(data, "gen", 1); hint != "gen.out" {
+		t.Errorf("namedOutputAt(gen, 1) = %q, want gen.out", hint)
+	}
+
+	diags := namedOutputHints(text, data)
+	for _, d := range diags {
+		if d.Severity == sevError {
+			t.Errorf("unexpected error diagnostic: %q", d.Message)
+		}
+	}
+}
+
+func TestNamedOutputHintsInvokeCapture(t *testing.T) {
+	text := `log {
+    $ echo hi
+}
+ls {
+    $ ls -l as out
+    invoke log as result
+}
+_ < log, ls {
+    echo "&ls.result"
+}
+`
+	data := parseForTest(t, text)
+	diags := namedOutputHints(text, data)
+	found := false
+	for _, d := range diags {
+		if strings.Contains(d.Message, "result") {
+			found = true
+			if d.Severity != sevWarning {
+				t.Errorf("invoke capture should warn (local), got severity %d: %q", d.Severity, d.Message)
+			}
+			if !strings.Contains(d.Message, "only inside") {
+				t.Errorf("warning should mention locality: %q", d.Message)
+			}
+		}
+	}
+	if !found {
+		t.Errorf("expected a warning for &ls.result, got %v", diags)
+	}
+}
+
+// TestDefinitionNamedOutput verifies go-to-definition on &cmd.out jumps to// the producing shell statement.
 func TestDefinitionNamedOutput(t *testing.T) {
 	text := `log {
     $ echo hi as out
