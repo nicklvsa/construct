@@ -710,7 +710,7 @@ func evaluateConditionWithBase(cond, base string) bool {
 		return result
 	}
 
-	if idx := strings.Index(cond, " contains "); idx > 0 {
+	if idx := findTopLevelOp(cond, " contains "); idx > 0 {
 		left := strings.TrimSpace(cond[:idx])
 		right := strings.TrimSpace(cond[idx+len(" contains "):])
 		left = strings.Trim(left, "\"")
@@ -731,7 +731,7 @@ func evaluateConditionWithBase(cond, base string) bool {
 
 	ops := conditionOps
 	for _, op := range ops {
-		if idx := strings.Index(cond, op); idx > 0 {
+		if idx := findTopLevelOp(cond, op); idx > 0 {
 			left := strings.TrimSpace(cond[:idx])
 			right := strings.TrimSpace(cond[idx+len(op):])
 			left = strings.Trim(left, "\"")
@@ -1052,6 +1052,8 @@ func (e *Executor) runShell(ctx *execContext, stmt BodyStatement) error {
 
 	if ctx.workDir != "" {
 		cmd.Dir = e.resolveWorkDir(e.resolveBodyValue(ctx, ctx.workDir, ctx.target.Name))
+	} else if e.baseDir != "" {
+		cmd.Dir = e.baseDir
 	}
 	cmd.Env = *ctx.env
 

@@ -99,6 +99,11 @@ func TestEvaluateConditionLogical(t *testing.T) {
 		{`"a||b" == "a||b"`, true}, // operator inside quotes is not split
 		{`"a&&b" == "a&&b"`, true},
 		{`"3" > "2" && "3" < "4"`, true},
+		{`"1 > 0" == "1 > 0"`, true}, // comparison ops inside quotes are not split
+		{`"x > y" > "a"`, true},
+		{`"a < b" < "c"`, true},
+		{`"2 <= 3" contains "2"`, true},
+		{`"a contains b" == "a contains b"`, true},
 	}
 	for _, tt := range tests {
 		if got := evaluateCondition(tt.cond); got != tt.want {
@@ -1204,6 +1209,40 @@ func TestWorkDirBaseDir(t *testing.T) {
 	gen, _ := data.GetCommand("gen")
 	if len(gen.PrereqOutput) != 1 || gen.PrereqOutput[0] != "from-base" {
 		t.Errorf("prereq output = %#v, want [from-base] (workdir must anchor to base dir)", gen.PrereqOutput)
+	}
+}
+
+func TestDefaultWorkDirAnchorsToBase(t *testing.T) {
+	base := t.TempDir()
+	os.WriteFile(filepath.Join(base, "data.txt"), []byte("base-data"), 0644)
+
+	// Run from a different directory to prove the base dir is used.
+	other := t.TempDir()
+	if err := os.Chdir(other); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+
+	data := &ParsedData{
+		Commands: []*Command{
+			{Name: "show", Body: []BodyStatement{{Type: "shell", Shell: "cat data.txt"}}},
+		},
+	}
+	data.buildIndexMaps()
+	executor := NewExecutor(data, false, false)
+	executor.SetBaseDir(base)
+
+	so, sw, _ := os.Pipe()
+	oldOut := os.Stdout
+	os.Stdout = sw
+	err := executor.Execute([]string{"show"})
+	os.Stdout = oldOut
+	sw.Close()
+	out, _ := io.ReadAll(so)
+	if err != nil {
+		t.Fatalf("exec: %v", err)
+	}
+	if strings.TrimSpace(string(out)) != "base-data" {
+		t.Errorf("output = %q, want %q (no workdir must anchor to base dir)", strings.TrimSpace(string(out)), "base-data")
 	}
 }
 
