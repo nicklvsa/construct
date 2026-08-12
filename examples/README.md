@@ -24,6 +24,7 @@ construct Constfile-<name> <command>    # run a command
 | `Constfile-parallel-build` | Any | DAG-parallel prerequisites (`--concurrent`), call-site `in <dir>` workdir overrides |
 | `Constfile-artifacts` (+ `example.env`) | Any | `produces` (make-style up-to-date checks), `--env-file` loading, `require()`, `--jobs`, `--watch` |
 | `Constfile-modern-features` (+ `Constfile-shared-lib`, `Constfile-shared-other`) | Multi-file | Namespaced imports (`import ... as ns`), doc comments (`--list`), per-command `env { }` blocks, `invoke` with output capture |
+| `Constfile-robustness` | Any | `@ENV:-default` env defaults, `fail "message"` guards, `onfail { }` cleanup blocks, `invoke` with arguments, `-k/--keep-going`, `--no-cache`, `--shell` |
 
 ## Feature Coverage
 

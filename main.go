@@ -174,6 +174,12 @@ func printDryRunBody(body []pkg.BodyStatement, indent int) {
 			fmt.Printf("%sinvoke %s\n", prefix, stmt.Shell)
 		case pkg.StmtEnv:
 			fmt.Printf("%senv { %s }\n", prefix, strings.Join(stmt.Env, ", "))
+		case pkg.StmtFail:
+			fmt.Printf("%sfail %q\n", prefix, stmt.Message)
+		case pkg.StmtOnFail:
+			fmt.Printf("%sonfail {\n", prefix)
+			printDryRunBody(stmt.OnFailBody, indent+1)
+			fmt.Printf("%s}\n", prefix)
 		default:
 			fmt.Printf("%s%s\n", prefix, stmt.Shell)
 		}

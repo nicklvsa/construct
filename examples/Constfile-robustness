@@ -1,0 +1,62 @@
+// Failure handling, config guards, and cleanup
+// Demonstrates: @ENV:-default env defaults, fail "message" guards,
+//               onfail { } cleanup blocks, invoke with arguments,
+//               -k/--keep-going, --no-cache, and --shell
+// Run with:
+//   construct Constfile-robustness --list
+//   construct Constfile-robustness deploy -e env=prod      # triggers the guard + onfail
+//   construct Constfile-robustness deploy -e env=staging   # proceeds
+//   construct Constfile-robustness notify                  # invoke with args + defaults
+//   construct Constfile-robustness stage_build stage_test -k   # keep going past failures
+//   construct Constfile-robustness lint --shell /bin/bash  # pick a shell
+//   construct Constfile-robustness gen --no-cache          # ignore the dep cache
+
+// Env defaults: @REGION falls back to us-east-1 when unset.
+var region = @REGION:-us-east-1
+
+// A guard: prod deploys are refused unless an explicit override says otherwise.
+deploy {
+    // Runs once if any later statement fails.
+    onfail {
+        $ echo "!! rolling back deploy in &env"
+        ! echo "kubectl rollout undo deployment/web"
+    }
+
+    if &env == "prod" {
+        fail "refusing to deploy to prod; use -e env=staging"
+    }
+
+    $ echo "deploying web to &env/@region"
+    $ echo "kubectl apply -f deploy.yaml"
+}
+
+// invoke with arguments: the arg becomes a variable in the caller's scope.
+log (message=hello) {
+    $ echo "log: &message"
+}
+
+notify {
+    invoke log message="build finished"
+    invoke log                    // declared default applies
+}
+
+// Env defaults also work directly in shell lines.
+lint {
+    $ echo "running @LINTER:-golangci-lint"
+}
+
+// With -k/--keep-going both targets run; stage_test still fails at the end.
+stage_build {
+    $ echo "compiling..."
+}
+
+stage_test {
+    fail "tests found 2 failures"
+}
+
+// File-dep caching: gen re-runs when src/VERSION.txt changes; use
+// --no-cache to force a run regardless.
+gen in examples < src/VERSION.txt {
+    $ echo "generating from src/VERSION.txt"
+    $ cat src/VERSION.txt
+}

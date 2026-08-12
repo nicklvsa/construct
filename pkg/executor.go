@@ -1427,17 +1427,19 @@ func (e *Executor) Execute(commands []string) error {
 		return e.execConcurrent(targets)
 	}
 
-	var firstErr error
+	var errs []error
 	for _, cmdName := range targets {
 		if err := e.processCommand(cmdName); err != nil {
 			if !e.keepGoing {
 				return err
 			}
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			firstErr = err
+			errs = append(errs, err)
 		}
 	}
-	return firstErr
+	if len(errs) > 0 {
+		return errors.Join(errs...)
+	}
+	return nil
 }
 
 func (e *Executor) execConcurrent(targets []string) error {
@@ -1457,17 +1459,19 @@ func (e *Executor) execConcurrent(targets []string) error {
 		close(errCh)
 	}()
 
-	var firstErr error
+	var errs []error
 	for err := range errCh {
 		if err != nil {
-			if firstErr == nil {
-				firstErr = err
-			} else if e.keepGoing {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			}
+			errs = append(errs, err)
 		}
 	}
-	return firstErr
+	if len(errs) > 0 {
+		if e.keepGoing {
+			return errors.Join(errs...)
+		}
+		return errs[0]
+	}
+	return nil
 }
 
 func (e *Executor) processCommand(name string) error {
