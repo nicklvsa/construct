@@ -32,7 +32,7 @@ construct [options] [Constfile] [commands...]
 | `--concurrent` | Execute commands and their prerequisites concurrently (DAG-parallel) |
 | `--jobs N` | Cap parallel commands (implies `--concurrent`) |
 | `--watch` | Rerun when the Constfile, its imports, or its dependencies change |
-| `--choose` | Interactively select targets to run |
+| `--choose` | Interactively select targets (arrow-key menu; type to filter) |
 | `--timing` | Print per-command elapsed time |
 | `--dry-run` | Show commands without executing them |
 | `--list` | List all available commands |
