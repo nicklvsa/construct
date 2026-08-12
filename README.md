@@ -31,6 +31,9 @@ construct [options] [Constfile] [commands...]
 | `--debug` | Enable debug mode for verbose output |
 | `--concurrent` | Execute commands and their prerequisites concurrently (DAG-parallel) |
 | `--jobs N` | Cap parallel commands (implies `--concurrent`) |
+| `-k, --keep-going` | Continue other targets when one fails; report all failures |
+| `--no-cache` | Ignore the file-dep cache and run everything |
+| `--shell PATH` | Shell to run statements with (default: `$SHELL`) |
 | `--watch` | Rerun when the Constfile, its imports, or its dependencies change |
 | `--choose` | Interactively select targets (arrow-key menu; type to filter) |
 | `--timing` | Print per-command elapsed time |
@@ -57,8 +60,12 @@ construct --jobs 16 build    # Parallel build (independent commands run concurre
 ```
 var name = value
 var envVar = @ENVIRONMENT_VAR    # Environment variable
+var envOr = @PORT:-8080          # Env var, with a default when unset
 var ref = &otherVar              # Reference another variable
 ```
+
+`@ENV:-default` also works in shell lines and conditions: an unset variable
+expands to the default instead of staying literal or becoming empty.
 
 ### Commands
 
@@ -204,15 +211,38 @@ gen {
 use {
     invoke gen                    # streams to stdout
     invoke gen as lines           # captures output into &lines
+    invoke gen arg="value"        # passes args as variables in the caller's scope
     for l in &lines {
         $ echo "captured: &l"
     }
 }
 ```
 
+`invoke <cmd> key=value, key2="value 2"` passes arguments to the invoked body;
+declared arguments (`arg="default"`) use their default when not passed.
+
 `invoke` only runs the body; prerequisites, file deps, and up-to-date checks
 of the invoked command are ignored. Self-referential or circular invokes are
 rejected.
+
+### Failing and Cleaning Up
+
+```
+deploy {
+    onfail {
+        $ echo "rolling back"
+    }
+    if &env == "prod" {
+        fail "refusing to deploy to prod"
+    }
+    $ echo "deploying"
+}
+```
+
+- `fail "message"` aborts the command with a readable error (`fail: message (file:line)`).
+- `onfail { ... }` registers a block that runs once if any later statement in
+  the command fails — handy for cleanup and rollback. It runs after the
+  failure; the original error is still reported.
 
 ### Variable Scopes
 

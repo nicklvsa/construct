@@ -209,6 +209,8 @@ const (
 	StmtEnv      = "env"
 	StmtContinue = "continue"
 	StmtBreak    = "break"
+	StmtFail     = "fail"
+	StmtOnFail   = "onfail"
 )
 
 type BodyStatement struct {
@@ -223,6 +225,9 @@ type BodyStatement struct {
 	LoopItems  string          `json:"loop_items,omitempty"`
 	LoopBody   []BodyStatement `json:"loop_body,omitempty"`
 	Env        []string        `json:"env,omitempty"`
+	Message    string          `json:"message,omitempty"`
+	OnFailBody []BodyStatement `json:"onfail,omitempty"`
+	InvokeArgs []string        `json:"invoke_args,omitempty"`
 	SourceLine int             `json:"source_line,omitempty"`
 }
 
@@ -309,7 +314,24 @@ func (p *Parser) tryEvalExpression(expression string, varName *string, varScope 
 				j++
 			}
 			if envName.Len() > 0 {
-				result.WriteString(os.Getenv(envName.String()))
+				name := envName.String()
+				def := ""
+				hasDefault := false
+				// @ENV:-default expands to default when the variable is unset.
+				if j+1 < len(runes) && runes[j] == ':' && runes[j+1] == '-' {
+					j += 2
+					defStart := j
+					for j < len(runes) && !isEnvDefaultEnd(runes[j]) {
+						j++
+					}
+					def = string(runes[defStart:j])
+					hasDefault = true
+				}
+				if val, ok := os.LookupEnv(name); ok {
+					result.WriteString(val)
+				} else if hasDefault {
+					result.WriteString(def)
+				}
 				i = j
 				continue
 			}
@@ -727,12 +749,36 @@ func (p *Parser) parseBodyStatements(raw []rawLine, scope string) ([]BodyStateme
 		if strings.HasPrefix(line, "invoke ") {
 			rest := strings.TrimSpace(line[len("invoke "):])
 			name, outputName := extractOutputName(rest)
-			name = strings.TrimSpace(name)
+			name, invokeArgs := parseInvokeArgs(name)
 			if name == "" {
 				return nil, fmt.Errorf("invoke requires a command name")
 			}
-			stmts = append(stmts, BodyStatement{Type: StmtInvoke, Shell: name, OutputName: outputName, SourceLine: lineNum})
+			stmts = append(stmts, BodyStatement{Type: StmtInvoke, Shell: name, OutputName: outputName, InvokeArgs: invokeArgs, SourceLine: lineNum})
 			i++
+			continue
+		}
+
+		if line == "fail" || strings.HasPrefix(line, "fail ") {
+			msg := strings.TrimSpace(strings.TrimPrefix(line, "fail"))
+			if len(msg) >= 2 && msg[0] == '"' && msg[len(msg)-1] == '"' {
+				msg = msg[1 : len(msg)-1]
+			}
+			stmts = append(stmts, BodyStatement{
+				Type:       StmtFail,
+				Message:    msg,
+				SourceLine: lineNum,
+			})
+			i++
+			continue
+		}
+
+		if strings.HasPrefix(line, "onfail ") || line == "onfail{" {
+			stmt, consumed, err := p.parseOnFailBlock(raw[i:], scope)
+			if err != nil {
+				return nil, err
+			}
+			stmts = append(stmts, stmt)
+			i += consumed
 			continue
 		}
 
@@ -1097,6 +1143,75 @@ func (p *Parser) parseEnvBlock(raw []rawLine) (BodyStatement, int, error) {
 	return stmt, endIdx, nil
 }
 
+func (p *Parser) parseOnFailBlock(raw []rawLine, scope string) (BodyStatement, int, error) {
+	headerLine := raw[0]
+	stmt := BodyStatement{Type: StmtOnFail, SourceLine: headerLine.num}
+
+	if body, ok := singleLineBody(headerLine.text); ok {
+		bodyStmts, err := p.parseBodyStatements(atLine(splitStatements(body), headerLine.num), scope)
+		if err != nil {
+			return BodyStatement{}, 0, err
+		}
+		stmt.OnFailBody = bodyStmts
+		return stmt, 1, nil
+	}
+
+	lines, endIdx, err := collectBodyLines(raw, 1)
+	if err != nil {
+		return BodyStatement{}, 0, fmt.Errorf("unclosed onfail block (missing '}')")
+	}
+	bodyStmts, err := p.parseBodyStatements(lines, scope)
+	if err != nil {
+		return BodyStatement{}, 0, err
+	}
+	stmt.OnFailBody = bodyStmts
+	return stmt, endIdx, nil
+}
+
+func parseInvokeArgs(s string) (name string, args []string) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return "", nil
+	}
+	// The command name is the first whitespace-delimited token.
+	name = s
+	if idx := strings.IndexAny(s, " \t"); idx >= 0 {
+		name, s = s[:idx], strings.TrimSpace(s[idx:])
+	}
+	if s == "" {
+		return name, nil
+	}
+
+	var pairs []string
+	var cur strings.Builder
+	inQuote := false
+	flush := func() {
+		if p := strings.TrimSpace(cur.String()); p != "" {
+			if strings.Contains(p, "=") {
+				pairs = append(pairs, p)
+			}
+		}
+		cur.Reset()
+	}
+	for _, r := range s {
+		switch r {
+		case '"':
+			inQuote = !inQuote
+			cur.WriteRune(r)
+		case ',':
+			if !inQuote {
+				flush()
+			} else {
+				cur.WriteRune(r)
+			}
+		default:
+			cur.WriteRune(r)
+		}
+	}
+	flush()
+	return name, pairs
+}
+
 func (p *Parser) parseForBlock(raw []rawLine, scope string) (BodyStatement, int, error) {
 	headerLine := raw[0]
 	header := strings.TrimSpace(headerLine.text)
@@ -1275,7 +1390,8 @@ func collectBodyLines(raw []rawLine, start int) ([]rawLine, int, error) {
 }
 
 func isNestedBlockHeader(t string) bool {
-	return (strings.HasPrefix(t, "if ") || strings.HasPrefix(t, "for ") || strings.HasPrefix(t, "matrix ") || strings.HasPrefix(t, "env ")) && strings.Contains(t, "{")
+	return (strings.HasPrefix(t, "if ") || strings.HasPrefix(t, "for ") || strings.HasPrefix(t, "matrix ") ||
+		strings.HasPrefix(t, "env ") || strings.HasPrefix(t, "onfail ")) && strings.Contains(t, "{")
 }
 
 func extractIfCondition(line string) string {

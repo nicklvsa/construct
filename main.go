@@ -41,8 +41,11 @@ type options struct {
 	watch       bool
 	choose      bool
 	timing      bool
+	keepGoing   bool
+	noCache     bool
 	jobs        int
 	envFile     string
+	shell       string
 	overrides   []string
 }
 
@@ -61,6 +64,9 @@ Options:
   --debug           Enable debug mode for verbose output
   --concurrent      Execute commands and their prerequisites concurrently
   --jobs N          Max parallel commands (implies --concurrent)
+  -k, --keep-going  Continue other targets when one fails
+  --no-cache        Ignore the file-dep cache and run everything
+  --shell PATH      Shell to run statements with
   --watch           Rerun when the Constfile or dependencies change
   --choose          Interactively select targets to run
   --timing          Print per-command elapsed time
@@ -209,8 +215,11 @@ func defineFlags(fs *flag.FlagSet, o *options) {
 	fs.BoolVar(&o.watch, "watch", false, "Rerun when files change")
 	fs.BoolVar(&o.choose, "choose", false, "Interactively select targets")
 	fs.BoolVar(&o.timing, "timing", false, "Print per-command elapsed time")
+	fs.BoolVarP(&o.keepGoing, "keep-going", "k", false, "Continue other targets when one fails")
+	fs.BoolVar(&o.noCache, "no-cache", false, "Ignore the file-dep cache and run everything")
 	fs.IntVar(&o.jobs, "jobs", 0, "Max parallel commands (0 = unlimited)")
 	fs.StringVar(&o.envFile, "env-file", "", "Load environment from file")
+	fs.StringVar(&o.shell, "shell", "", "Shell to run statements with (default: $SHELL)")
 	fs.StringArrayVarP(&o.overrides, "env", "e", []string{}, "Override variable (key=value)")
 }
 
@@ -590,6 +599,9 @@ func executeBuild(inputs *ConstructInput, o *options) ([]string, error) {
 	executor.SetBaseDir(filepath.Dir(inputs.FileName))
 	executor.SetJobs(o.jobs)
 	executor.SetTiming(o.timing)
+	executor.SetNoCache(o.noCache)
+	executor.SetKeepGoing(o.keepGoing)
+	executor.SetShell(o.shell)
 	executor.RegisterArgumentFlags(flagSet)
 
 	flagSet.ParseErrorsWhitelist.UnknownFlags = false
@@ -607,15 +619,18 @@ func executeBuild(inputs *ConstructInput, o *options) ([]string, error) {
 		overridden := false
 		for _, v := range data.Variables {
 			if v.Name == key {
-				v.Value = val
 				overridden = true
-				debugf(o.debug, "Override: %s = %s\n", key, val)
 				break
 			}
 		}
-		if !overridden {
-			data.Variables = append(data.Variables, &pkg.Variable{Name: key, Value: val, Scope: "global"})
-			debugf(o.debug, "Override (new): %s = %s\n", key, val)
+
+		data.SetVariable(key, "global", val)
+		if o.debug {
+			if overridden {
+				debugf(o.debug, "Override: %s = %s\n", key, val)
+			} else {
+				debugf(o.debug, "Override (new): %s = %s\n", key, val)
+			}
 		}
 	}
 

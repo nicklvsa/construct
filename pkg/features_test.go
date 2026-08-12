@@ -1,6 +1,7 @@
 package pkg
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -1736,4 +1737,292 @@ func runErr(data *ParsedData, target string) error {
 	os.Stdout = oldOut
 	devNull.Close()
 	return err
+}
+
+func runAndCaptureErr(t *testing.T, data *ParsedData, target string) (string, error) {
+	t.Helper()
+	so, sw, _ := os.Pipe()
+	oldOut := os.Stdout
+	os.Stdout = sw
+	err := NewExecutor(data, false, false).Execute([]string{target})
+	os.Stdout = oldOut
+	sw.Close()
+	out, _ := io.ReadAll(so)
+	return strings.TrimSpace(string(out)), err
+}
+
+func TestFailStatementParsingAndError(t *testing.T) {
+	in := `build {
+    fail "deploy requires --env"
+}`
+	p := NewParserFromContent("t.constfile", in)
+	data, err := p.Parse()
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	build, err := data.GetCommand("build")
+	if err != nil {
+		t.Fatalf("build missing: %v", err)
+	}
+	if len(build.Body) != 1 || build.Body[0].Type != StmtFail || build.Body[0].Message != "deploy requires --env" {
+		t.Fatalf("body = %+v", build.Body)
+	}
+	if err := executorEval(data, build); err == nil || !strings.Contains(err.Error(), "deploy requires --env") {
+		t.Errorf("expected fail error, got %v", err)
+	}
+}
+
+func TestFailIsNotPrefix(t *testing.T) {
+	in := `build {
+    failure-check-command
+}`
+	p := NewParserFromContent("t.constfile", in)
+	data, err := p.Parse()
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	build, _ := data.GetCommand("build")
+	if build.Body[0].Type != StmtShell {
+		t.Errorf("'failure-...' shell line misparsed as fail: %+v", build.Body[0])
+	}
+}
+
+func TestOnFailRunsOnFailure(t *testing.T) {
+	data := &ParsedData{
+		Commands: []*Command{{Name: "build", Body: []BodyStatement{
+			{Type: StmtOnFail, OnFailBody: shellBody("echo cleaning-up"), SourceLine: 1},
+			{Type: StmtShell, Shell: exitNonZero(), SourceLine: 2},
+		}}},
+	}
+	data.buildIndexMaps()
+	out, err := runAndCaptureErr(t, data, "build")
+	if err == nil {
+		t.Fatal("expected failure")
+	}
+	if !strings.Contains(out, "cleaning-up") {
+		t.Errorf("onfail did not run: %q", out)
+	}
+}
+
+func TestOnFailNotOnSuccess(t *testing.T) {
+	data := &ParsedData{
+		Commands: []*Command{{Name: "build", Body: []BodyStatement{
+			{Type: StmtOnFail, OnFailBody: shellBody("echo cleaning-up"), SourceLine: 1},
+			{Type: StmtShell, Shell: "echo done", SourceLine: 2},
+		}}},
+	}
+	data.buildIndexMaps()
+	out, err := runAndCaptureErr(t, data, "build")
+	if err != nil {
+		t.Fatalf("exec: %v", err)
+	}
+	if strings.Contains(out, "cleaning-up") {
+		t.Errorf("onfail ran on success: %q", out)
+	}
+}
+
+func TestOnFailFailuresDoNotMaskOriginal(t *testing.T) {
+	data := &ParsedData{
+		Commands: []*Command{{Name: "build", Body: []BodyStatement{
+			{Type: StmtOnFail, OnFailBody: shellBody(exitNonZero()), SourceLine: 1},
+			{Type: StmtShell, Shell: exitNonZero(), SourceLine: 2},
+		}}},
+	}
+	data.buildIndexMaps()
+
+	so, sw, _ := os.Pipe()
+	oldOut := os.Stdout
+	os.Stdout = sw
+	devNull, _ := os.Open(os.DevNull)
+	oldErr := os.Stderr
+	os.Stderr = devNull
+	err := NewExecutor(data, false, false).Execute([]string{"build"})
+	os.Stdout = oldOut
+	os.Stderr = oldErr
+	devNull.Close()
+	sw.Close()
+	io.ReadAll(so)
+	var cmdErr *CommandError
+	if !errors.As(err, &cmdErr) {
+		t.Errorf("expected the original CommandError, got %v", err)
+	}
+}
+
+func TestInvokeWithArguments(t *testing.T) {
+	in := `log (thing_to_log) {
+    $ echo "Thing to log: &thing_to_log"
+}
+use {
+    invoke log thing_to_log="hello world"
+}
+`
+	p := NewParserFromContent("t.constfile", in)
+	data, err := p.Parse()
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	use, _ := data.GetCommand("use")
+	if use.Body[0].Type != StmtInvoke || len(use.Body[0].InvokeArgs) != 1 || use.Body[0].InvokeArgs[0] != `thing_to_log="hello world"` {
+		t.Fatalf("invoke stmt = %+v", use.Body[0])
+	}
+	if out, err := runAndCaptureErr(t, data, "use"); err != nil {
+		t.Fatalf("exec: %v", err)
+	} else if !strings.Contains(out, "Thing to log: hello world") {
+		t.Errorf("invoke arg not applied: %q", out)
+	}
+}
+
+func TestInvokeUsesDeclaredDefaults(t *testing.T) {
+	in := `log (thing_to_log="fallback") {
+    $ echo "Thing to log: &thing_to_log"
+}
+use {
+    invoke log
+}
+`
+	p := NewParserFromContent("t.constfile", in)
+	data, err := p.Parse()
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if out, err := runAndCaptureErr(t, data, "use"); err != nil {
+		t.Fatalf("exec: %v", err)
+	} else if !strings.Contains(out, "Thing to log: fallback") {
+		t.Errorf("declared default not applied: %q", out)
+	}
+}
+
+func TestEnvRefDefault(t *testing.T) {
+	const name = "CONSTRUCT_TEST_DEF_X"
+	os.Unsetenv(name)
+	defer os.Unsetenv(name)
+
+	if got := resolveEnvRefs("echo @CONSTRUCT_TEST_DEF_X:-hello"); got != "echo hello" {
+		t.Errorf("unset with default = %q", got)
+	}
+	if got := resolveEnvRefsKeepUnset("echo @CONSTRUCT_TEST_DEF_X:-hello"); got != "echo hello" {
+		t.Errorf("keep-unset with default = %q", got)
+	}
+	os.Setenv(name, "real")
+	defer os.Unsetenv(name)
+	if got := resolveEnvRefs("echo @CONSTRUCT_TEST_DEF_X:-hello"); got != "echo real" {
+		t.Errorf("set env should win: %q", got)
+	}
+	// No default: unset stays literal for keep-unset, empty otherwise.
+	os.Unsetenv(name)
+	if got := resolveEnvRefsKeepUnset("echo @CONSTRUCT_TEST_DEF_X"); got != "echo @CONSTRUCT_TEST_DEF_X" {
+		t.Errorf("unset without default should stay literal: %q", got)
+	}
+}
+
+func TestEnvRefDefaultInVarAndShell(t *testing.T) {
+	const name = "CONSTRUCT_TEST_DEF_Y"
+	os.Unsetenv(name)
+	defer os.Unsetenv(name)
+
+	in := `var v = @CONSTRUCT_TEST_DEF_Y:-parse-time
+build {
+    $ echo @CONSTRUCT_TEST_DEF_Y:-shell-time and &v
+}`
+	p := NewParserFromContent("t.constfile", in)
+	data, err := p.Parse()
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if v, ok := data.LookupVariable("v", "global"); !ok || v != "parse-time" {
+		t.Errorf("var default = %q, %v", v, ok)
+	}
+	if out, err := runAndCaptureErr(t, data, "build"); err != nil {
+		t.Fatalf("exec: %v", err)
+	} else if out != "shell-time and parse-time" {
+		t.Errorf("output = %q", out)
+	}
+}
+
+func TestKeepGoingRunsOtherTargets(t *testing.T) {
+	data := &ParsedData{
+		Commands: []*Command{
+			{Name: "bad", Body: shellBody(exitNonZero())},
+			{Name: "good", Body: shellBody("echo good-ran")},
+		},
+	}
+	data.buildIndexMaps()
+
+	executor := NewExecutor(data, false, false)
+	executor.SetKeepGoing(true)
+	so, sw, _ := os.Pipe()
+	oldOut := os.Stdout
+	os.Stdout = sw
+	err := executor.Execute([]string{"bad", "good"})
+	os.Stdout = oldOut
+	sw.Close()
+	out, _ := io.ReadAll(so)
+	if err == nil {
+		t.Error("keep-going should still report the failure")
+	}
+	if !strings.Contains(string(out), "good-ran") {
+		t.Errorf("good target should have run with keep-going: %q", out)
+	}
+}
+
+func TestNoCacheReruns(t *testing.T) {
+	dir := t.TempDir()
+	dep := filepath.Join(dir, "data.txt")
+	os.WriteFile(dep, []byte("x"), 0644)
+
+	// Unique command name so the shared cache dir (keyed by command name)
+	// can't collide with other tests' temp dirs.
+	data := &ParsedData{
+		Commands: []*Command{
+			{Name: "gen-nocache", WorkDir: dir, FileDeps: []string{"data.txt"}, Body: shellBody("echo gen-ran")},
+		},
+	}
+	data.buildIndexMaps()
+
+	run := func() (string, error) {
+		so, sw, _ := os.Pipe()
+		oldOut := os.Stdout
+		os.Stdout = sw
+		exec := NewExecutor(data, false, false)
+		exec.SetBaseDir(dir) // cache lives in the test's temp dir
+		err := exec.Execute([]string{"gen-nocache"})
+		os.Stdout = oldOut
+		sw.Close()
+		out, _ := io.ReadAll(so)
+		return string(out), err
+	}
+	if out, err := run(); err != nil || !strings.Contains(out, "gen-ran") {
+		t.Fatalf("first run: %q, %v", out, err)
+	}
+	if out, err := run(); err != nil || !strings.Contains(out, "cached") {
+		t.Fatalf("second run should be cached: %q, %v", out, err)
+	}
+	executor := NewExecutor(data, false, false)
+	executor.SetNoCache(true)
+	executor.SetBaseDir(dir)
+	so, sw, _ := os.Pipe()
+	oldOut := os.Stdout
+	os.Stdout = sw
+	err := executor.Execute([]string{"gen-nocache"})
+	os.Stdout = oldOut
+	sw.Close()
+	out, _ := io.ReadAll(so)
+	if err != nil || !strings.Contains(string(out), "gen-ran") {
+		t.Fatalf("no-cache should rerun: %q, %v", out, err)
+	}
+	if strings.Contains(string(out), "cached") {
+		t.Errorf("no-cache still used cache: %q", out)
+	}
+}
+
+func TestSetShell(t *testing.T) {
+	e := NewExecutor(&ParsedData{}, false, false)
+	e.SetShell("/bin/sh")
+	if e.shellName != "/bin/sh" {
+		t.Errorf("shellName = %q", e.shellName)
+	}
+	e.SetShell("")
+	if e.shellName != "/bin/sh" {
+		t.Errorf("empty SetShell should be a no-op: %q", e.shellName)
+	}
 }

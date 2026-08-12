@@ -801,3 +801,59 @@ func parseForTest(t *testing.T, text string) *pkg.ParsedData {
 	}
 	return data
 }
+
+func TestDocumentSymbol(t *testing.T) {
+	text := `build {
+    $ echo hi
+}
+_ < build {
+    echo done
+}
+`
+	uri := "file:///x/main.constfile"
+	s := newServer()
+	s.updateDoc(uri, text, 1)
+
+	params, _ := json.Marshal(map[string]interface{}{
+		"textDocument": map[string]string{"uri": uri},
+	})
+	res, err := s.handleDocumentSymbol(params)
+	if err != nil {
+		t.Fatalf("documentSymbol: %v", err)
+	}
+	syms, ok := res.([]documentSymbol)
+	if !ok {
+		t.Fatalf("expected []documentSymbol, got %T", res)
+	}
+	if len(syms) != 2 {
+		t.Fatalf("symbols = %+v, want 2", syms)
+	}
+	names := map[string]documentSymbol{}
+	for _, sym := range syms {
+		names[sym.Name] = sym
+	}
+	build, ok := names["build"]
+	if !ok {
+		t.Fatalf("missing build symbol: %v", names)
+	}
+	if build.SelectionRange.Start.Line != 0 {
+		t.Errorf("build selection line = %d", build.SelectionRange.Start.Line)
+	}
+	if build.Range.End.Line != 2 {
+		t.Errorf("build range end = %d, want 2 (closing brace)", build.Range.End.Line)
+	}
+	if _, ok := names["_"]; !ok {
+		t.Errorf("default command symbol missing: %v", names)
+	}
+}
+func TestEnvRefDefaultInWorkdir(t *testing.T) {
+	os.Unsetenv("CONSTRUCT_LSP_DEF_DIR")
+	defer os.Unsetenv("CONSTRUCT_LSP_DEF_DIR")
+	if got := resolveEnvRefsInString("sub/@CONSTRUCT_LSP_DEF_DIR:-src"); got != "sub/src" {
+		t.Errorf("resolveEnvRefsInString default = %q", got)
+	}
+	os.Setenv("CONSTRUCT_LSP_DEF_DIR", "real")
+	if got := resolveEnvRefsInString("sub/@CONSTRUCT_LSP_DEF_DIR:-src"); got != "sub/real" {
+		t.Errorf("resolveEnvRefsInString set = %q", got)
+	}
+}

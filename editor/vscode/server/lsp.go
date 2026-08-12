@@ -85,10 +85,11 @@ type initializeResult struct {
 }
 
 type serverCapabilities struct {
-	TextDocumentSync   int                `json:"textDocumentSync"`
-	HoverProvider      bool               `json:"hoverProvider"`
-	DefinitionProvider bool               `json:"definitionProvider"`
-	CompletionProvider *completionOptions `json:"completionProvider,omitempty"`
+	TextDocumentSync         int                `json:"textDocumentSync"`
+	HoverProvider            bool               `json:"hoverProvider"`
+	DefinitionProvider       bool               `json:"definitionProvider"`
+	DocumentSymbolProvider   bool               `json:"documentSymbolProvider"`
+	CompletionProvider       *completionOptions `json:"completionProvider,omitempty"`
 }
 
 type completionOptions struct {
@@ -145,6 +146,8 @@ func (s *server) dispatch(method string, params json.RawMessage) (interface{}, e
 		return s.handleDefinition(params)
 	case "textDocument/completion":
 		return s.handleCompletion(params)
+	case "textDocument/documentSymbol":
+		return s.handleDocumentSymbol(params)
 	default:
 		return nil, nil
 	}
@@ -153,10 +156,11 @@ func (s *server) dispatch(method string, params json.RawMessage) (interface{}, e
 func (s *server) handleInitialize(_ json.RawMessage) (any, error) {
 	return initializeResult{
 		Capabilities: serverCapabilities{
-			TextDocumentSync:   1, // full document sync
-			HoverProvider:      true,
-			DefinitionProvider: true,
-			CompletionProvider: &completionOptions{TriggerCharacters: []string{"&"}},
+			TextDocumentSync:       1, // full document sync
+			HoverProvider:          true,
+			DefinitionProvider:     true,
+			DocumentSymbolProvider: true,
+			CompletionProvider:     &completionOptions{TriggerCharacters: []string{"&"}},
 		},
 	}, nil
 }
@@ -433,6 +437,8 @@ func shellStatements(body []pkg.BodyStatement) []pkg.BodyStatement {
 			out = append(out, shellStatements(stmt.ElseBody)...)
 		case pkg.StmtFor:
 			out = append(out, shellStatements(stmt.LoopBody)...)
+		case pkg.StmtOnFail:
+			out = append(out, shellStatements(stmt.OnFailBody)...)
 		}
 	}
 	return out
@@ -916,6 +922,70 @@ func (s *server) handleCompletion(params json.RawMessage) (any, error) {
 	return completionList{Items: items}, nil
 }
 
+type documentSymbol struct {
+	Name           string           `json:"name"`
+	Kind           int              `json:"kind"`
+	Detail         string           `json:"detail,omitempty"`
+	Range          range_           `json:"range"`
+	SelectionRange range_           `json:"selectionRange"`
+}
+
+func (s *server) handleDocumentSymbol(params json.RawMessage) (interface{}, error) {
+	var p textDocumentPositionParams
+	if err := json.Unmarshal(params, &p); err != nil {
+		return nil, err
+	}
+
+	s.mu.Lock()
+	doc, ok := s.docs[p.TextDocument.URI]
+	s.mu.Unlock()
+	if !ok || doc.data == nil {
+		return nil, nil
+	}
+
+	lines := strings.Split(doc.text, "\n")
+	var symbols []documentSymbol
+	for _, cmd := range doc.data.Commands {
+		if strings.Contains(cmd.Name, "__lazy_") {
+			continue
+		}
+		if cmd.SourceLine <= 0 || cmd.SourceLine-1 >= len(lines) {
+			continue
+		}
+		headerLine := lines[cmd.SourceLine-1]
+		nameCol := max(strings.Index(headerLine, cmd.Name), 0)
+		selection := range_{
+			Start: position{Line: cmd.SourceLine - 1, Character: nameCol},
+			End:   position{Line: cmd.SourceLine - 1, Character: nameCol + len(cmd.Name)},
+		}
+
+		// Command range: header line through the matching closing brace.
+		endLine := cmd.SourceLine - 1
+		depth := strings.Count(headerLine, "{") - strings.Count(headerLine, "}")
+		for l := cmd.SourceLine; l < len(lines) && depth > 0; l++ {
+			depth += strings.Count(lines[l], "{") - strings.Count(lines[l], "}")
+			endLine = l
+		}
+		detail := ""
+		if cmd.IsDefault {
+			detail = "default command"
+		} else if len(cmd.Prereqs) > 0 {
+			detail = "depends on " + strings.Join(cmd.Prereqs, ", ")
+		}
+		symbols = append(symbols, documentSymbol{
+			Name:           cmd.Name,
+			Kind:           12, // Function
+			Detail:         detail,
+			Range:          range_{Start: position{Line: cmd.SourceLine - 1, Character: 0}, End: position{Line: endLine, Character: len(lines[endLine])}},
+			SelectionRange: selection,
+		})
+	}
+	if symbols == nil {
+		symbols = []documentSymbol{}
+	}
+	return symbols, nil
+}
+
 func commandHeaderCandidates(name string) []string {
 	var out []string
 	cur := name
@@ -1395,6 +1465,15 @@ func uriToPath(uri string) string {
 	return filepath.FromSlash(p)
 }
 
+// isEnvDefaultEnd reports characters that terminate an @ENV:-default value.
+func isEnvDefaultEnd(r rune) bool {
+	switch r {
+	case ' ', '\t', '\r', '\n', '"', '\'', ',', ';', '&', '@', '$':
+		return true
+	}
+	return false
+}
+
 func resolveEnvRefsInString(s string) string {
 	var result strings.Builder
 	runes := []rune(s)
@@ -1407,7 +1486,23 @@ func resolveEnvRefsInString(s string) string {
 				j++
 			}
 			if name.Len() > 0 {
-				result.WriteString(os.Getenv(name.String()))
+				envName := name.String()
+				def := ""
+				hasDefault := false
+				if j+1 < len(runes) && runes[j] == ':' && runes[j+1] == '-' {
+					j += 2
+					defStart := j
+					for j < len(runes) && !isEnvDefaultEnd(runes[j]) {
+						j++
+					}
+					def = string(runes[defStart:j])
+					hasDefault = true
+				}
+				if val, ok := os.LookupEnv(envName); ok {
+					result.WriteString(val)
+				} else if hasDefault {
+					result.WriteString(def)
+				}
 				i = j
 				continue
 			}

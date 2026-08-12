@@ -1,6 +1,7 @@
 package main
 
 import (
+	flag "github.com/spf13/pflag"
 	"strings"
 	"testing"
 )
@@ -148,5 +149,20 @@ func TestRenderChooserNoBareLF(t *testing.T) {
 			prev = out[j]
 		}
 		s.toggle()
+	}
+}
+
+func TestNewFlagsParsing(t *testing.T) {
+	var o options
+	fs := flag.NewFlagSet("construct", flag.ContinueOnError)
+	defineFlags(fs, &o)
+	if err := fs.Parse([]string{"--no-cache", "-k", "--shell", "/bin/bash", "--env", "X=1"}); err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if !o.noCache || !o.keepGoing || o.shell != "/bin/bash" {
+		t.Errorf("flags parsed wrong: %+v", o)
+	}
+	if len(o.overrides) != 1 || o.overrides[0] != "X=1" {
+		t.Errorf("overrides = %v", o.overrides)
 	}
 }

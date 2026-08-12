@@ -24,6 +24,20 @@ import (
 	"github.com/spf13/pflag"
 )
 
+type FailError struct {
+	Message string
+	File    string
+	Line    int
+}
+
+func (e *FailError) Error() string {
+	if e.File != "" {
+		return fmt.Sprintf("fail: %s (%s:%d)", e.Message, e.File, e.Line)
+	}
+	return fmt.Sprintf("fail: %s", e.Message)
+}
+
+// CommandError is returned when a shell statement exits non-zero.
 type CommandError struct {
 	Cmd      string
 	ExitCode int
@@ -46,6 +60,8 @@ func (e *CommandError) Error() string {
 type Executor struct {
 	StructuredParse *ParsedData
 	concurrent      bool
+	keepGoing       bool
+	noCache         bool
 	debug           bool
 	cloudFile       string
 	cloudDefs       map[string]Command
@@ -211,7 +227,6 @@ func (e *Executor) SetBaseDir(dir string) {
 	e.baseDir = dir
 }
 
-// SetJobs caps the number of commands executed in parallel (0 = unlimited).
 func (e *Executor) SetJobs(n int) {
 	e.jobs = n
 	if n > 0 {
@@ -219,9 +234,27 @@ func (e *Executor) SetJobs(n int) {
 	}
 }
 
-// SetTiming enables per-command elapsed-time output.
 func (e *Executor) SetTiming(t bool) {
 	e.timing = t
+}
+
+func (e *Executor) SetNoCache(v bool) {
+	e.noCache = v
+}
+
+func (e *Executor) SetKeepGoing(v bool) {
+	e.keepGoing = v
+}
+
+func (e *Executor) SetShell(name string) {
+	if name == "" {
+		return
+	}
+	if runtime.GOOS == "windows" {
+		e.shellName, e.shellArgs = name, []string{"/c"}
+	} else {
+		e.shellName, e.shellArgs = name, nonInteractiveArgs(name)
+	}
 }
 
 func (e *Executor) acquire() (release func()) {
@@ -276,13 +309,13 @@ func (e *Executor) executeCommand(command *Command) error {
 		return resolveEnvRefs(s)
 	}
 
-	if len(command.FileDeps) > 0 && !isPrereq && len(command.Produces) == 0 {
+	if len(command.FileDeps) > 0 && !isPrereq && len(command.Produces) == 0 && !e.noCache {
 		if e.shouldSkip(command, resolveValue, workDir) {
 			fmt.Printf("(%s cached)\n", command.Name)
 			return nil
 		}
 	}
-	if len(command.Produces) > 0 && !isPrereq {
+	if len(command.Produces) > 0 && !isPrereq && !e.noCache {
 		if e.shouldSkipProduced(command, resolveValue, workDir) {
 			fmt.Printf("(%s up to date)\n", command.Name)
 			return nil
@@ -366,7 +399,7 @@ func (e *Executor) executeCommand(command *Command) error {
 		return err
 	}
 
-	if len(command.FileDeps) > 0 && !isPrereq && len(command.Produces) == 0 {
+	if len(command.FileDeps) > 0 && !isPrereq && len(command.Produces) == 0 && !e.noCache {
 		e.updateCache(command, resolveValue, workDir)
 	}
 
@@ -423,10 +456,16 @@ func (e *Executor) cleanStatements(stmts []BodyStatement, cmd *Command, argFlags
 				LoopBody:   stmt.LoopBody,
 				SourceLine: stmt.SourceLine,
 			}
-		case StmtContinue, StmtBreak:
+		case StmtContinue, StmtBreak, StmtFail:
 			out[i] = stmt
 		case StmtInvoke, StmtEnv:
 			out[i] = stmt
+		case StmtOnFail:
+			out[i] = BodyStatement{
+				Type:       StmtOnFail,
+				OnFailBody: e.cleanStatements(stmt.OnFailBody, cmd, argFlags),
+				SourceLine: stmt.SourceLine,
+			}
 		default:
 			out[i] = BodyStatement{Type: StmtShell, Shell: e.cleanShellLine(cmd, stmt.Shell, argFlags), OutputName: stmt.OutputName, SourceLine: stmt.SourceLine}
 		}
@@ -597,6 +636,13 @@ func scanRefs(s string, marker byte, firstSeg, dotSeg func(rune) bool, lookup fu
 						}
 					}
 				}
+				// @ENV refs support a :-default suffix: @PORT:-8080.
+				if marker == '@' && j+1 < len(runes) && runes[j] == ':' && runes[j+1] == '-' {
+					j += 2
+					for j < len(runes) && !isEnvDefaultEnd(runes[j]) {
+						j++
+					}
+				}
 				if val, ok := lookup(string(runes[firstStart:j])); ok {
 					result.WriteString(val)
 					i = j
@@ -624,13 +670,36 @@ func resolveVarRefs(line string, lookup func(string) (string, bool)) string {
 	return scanRefs(line, '&', isVarIdentRune, isPlainRune, lookup, true)
 }
 
+// isEnvDefaultEnd reports characters that terminate an @ENV:-default value.
+func isEnvDefaultEnd(r rune) bool {
+	switch r {
+	case ' ', '\t', '\r', '\n', '"', '\'', ',', ';', '&', '@', '$':
+		return true
+	}
+	return false
+}
+
+func splitEnvRefToken(token string) (name, def string, hasDefault bool) {
+	if before, after, ok := strings.Cut(token, ":-"); ok {
+		return before, after, true
+	}
+	return token, "", false
+}
+
 // resolveEnvRefs replaces @ENVNAME references with the corresponding env var.
 func resolveEnvRefs(s string) string {
 	if strings.IndexByte(s, '@') < 0 {
 		return s
 	}
-	return scanRefs(s, '@', isPlainRune, nil, func(name string) (string, bool) {
-		return os.Getenv(name), true
+	return scanRefs(s, '@', isPlainRune, nil, func(token string) (string, bool) {
+		name, def, hasDefault := splitEnvRefToken(token)
+		if val, ok := os.LookupEnv(name); ok {
+			return val, true
+		}
+		if hasDefault {
+			return def, true
+		}
+		return "", true
 	}, false)
 }
 
@@ -638,8 +707,15 @@ func resolveEnvRefsWith(s string, lookup func(string) string) string {
 	if strings.IndexByte(s, '@') < 0 {
 		return s
 	}
-	return scanRefs(s, '@', isPlainRune, nil, func(name string) (string, bool) {
-		return lookup(name), true
+	return scanRefs(s, '@', isPlainRune, nil, func(token string) (string, bool) {
+		name, def, hasDefault := splitEnvRefToken(token)
+		if val := lookup(name); val != "" {
+			return val, true
+		}
+		if hasDefault {
+			return def, true
+		}
+		return "", true
 	}, false)
 }
 
@@ -651,7 +727,16 @@ func resolveEnvRefsKeepUnsetWith(s string, lookup func(string) (string, bool)) s
 	if strings.IndexByte(s, '@') < 0 {
 		return s
 	}
-	return scanRefs(s, '@', isPlainRune, nil, lookup, false)
+	return scanRefs(s, '@', isPlainRune, nil, func(token string) (string, bool) {
+		name, def, hasDefault := splitEnvRefToken(token)
+		if val, ok := lookup(name); ok {
+			return val, true
+		}
+		if hasDefault {
+			return def, true
+		}
+		return "", false
+	}, false)
 }
 
 func findTopLevelOp(s, op string) int {
@@ -688,7 +773,6 @@ func evaluateCondition(cond string) bool {
 func evaluateConditionWithBase(cond, base string) bool {
 	cond = strings.TrimSpace(cond)
 
-	// Parenthesized sub-expression: ( expr )
 	if strings.HasPrefix(cond, "(") && strings.HasSuffix(cond, ")") {
 		return evaluateConditionWithBase(strings.TrimSpace(cond[1:len(cond)-1]), base)
 	}
@@ -810,8 +894,6 @@ func compareValues(left, right, op string) bool {
 	return compare(left, right, op)
 }
 
-// compare applies a comparison operator to two values of the same type
-// (numeric comparison when both are ints, otherwise lexicographic strings).
 func compare[T ~int | ~string](l, r T, op string) bool {
 	switch op {
 	case "==":
@@ -846,12 +928,14 @@ func (e *Executor) tryApplyCloudBody(cmd *Command) error {
 }
 
 type execContext struct {
-	target   *Command
-	isPrereq bool
-	workDir  string
-	srcFile  string
-	out      io.Writer
-	env      *[]string
+	target    *Command
+	isPrereq  bool
+	workDir   string
+	srcFile   string
+	out       io.Writer
+	env       *[]string
+	onFails   []BodyStatement
+	onFailRun bool
 }
 
 func (e *Executor) resolveBodyValue(ctx *execContext, s, scope string) string {
@@ -875,7 +959,15 @@ func (e *Executor) resolveBodyEnvRef(ctx *execContext, s string) string {
 	})
 }
 
-func (e *Executor) execBody(ctx *execContext, body []BodyStatement) error {
+func (e *Executor) execBody(ctx *execContext, body []BodyStatement) (err error) {
+	defer func() {
+		if err != nil && !ctx.onFailRun &&
+			!errors.Is(err, errLoopContinue) && !errors.Is(err, errLoopBreak) {
+			ctx.onFailRun = true
+			err = e.runOnFails(ctx, err)
+		}
+	}()
+
 	condBase := e.baseDir
 	if ctx.workDir != "" {
 		condBase = e.resolveWorkDir(e.resolveBodyValue(ctx, ctx.workDir, ctx.target.Name))
@@ -955,6 +1047,12 @@ func (e *Executor) execBody(ctx *execContext, body []BodyStatement) error {
 		case StmtBreak:
 			return errLoopBreak
 
+		case StmtFail:
+			return &FailError{Message: stmt.Message, File: ctx.srcFile, Line: stmt.SourceLine}
+
+		case StmtOnFail:
+			ctx.onFails = append(ctx.onFails, stmt.OnFailBody...)
+
 		default:
 			if e.streaming(ctx) {
 				end := i
@@ -973,6 +1071,17 @@ func (e *Executor) execBody(ctx *execContext, body []BodyStatement) error {
 		}
 	}
 	return nil
+}
+
+func (e *Executor) runOnFails(ctx *execContext, cause error) error {
+	snapshot := ctx.onFails
+	ctx.onFails = nil
+	for _, body := range snapshot {
+		if err := e.execBody(ctx, []BodyStatement{body}); err != nil {
+			fmt.Fprintf(os.Stderr, "onfail error: %v\n", err)
+		}
+	}
+	return cause
 }
 
 func (e *Executor) invokeCommand(ctx *execContext, stmt BodyStatement) error {
@@ -994,6 +1103,24 @@ func (e *Executor) invokeCommand(ctx *execContext, stmt BodyStatement) error {
 	sub := *ctx // invoke bodies run in the caller's context
 	sub.srcFile = invoked.SourceFile
 	sub.out = nil
+
+	passed := make(map[string]bool)
+	for _, pair := range stmt.InvokeArgs {
+		key, val, ok := strings.Cut(pair, "=")
+		if !ok {
+			continue
+		}
+		key = strings.TrimSpace(key)
+		val = strings.Trim(strings.TrimSpace(val), `"`)
+		e.StructuredParse.SetVariable(key, ctx.target.Name, val)
+		passed[key] = true
+	}
+	for _, arg := range invoked.Arguments {
+		if !passed[arg.Name] {
+			e.StructuredParse.SetVariable(arg.Name, ctx.target.Name, strings.Trim(arg.Default, `"`))
+		}
+	}
+
 	cleaned := e.cleanStatements(invoked.Body, ctx.target, e.argFlags(ctx.target))
 
 	var invokeErr error
@@ -1300,13 +1427,17 @@ func (e *Executor) Execute(commands []string) error {
 		return e.execConcurrent(targets)
 	}
 
+	var firstErr error
 	for _, cmdName := range targets {
 		if err := e.processCommand(cmdName); err != nil {
-			return err
+			if !e.keepGoing {
+				return err
+			}
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			firstErr = err
 		}
 	}
-
-	return nil
+	return firstErr
 }
 
 func (e *Executor) execConcurrent(targets []string) error {
@@ -1328,8 +1459,12 @@ func (e *Executor) execConcurrent(targets []string) error {
 
 	var firstErr error
 	for err := range errCh {
-		if err != nil && firstErr == nil {
-			firstErr = err
+		if err != nil {
+			if firstErr == nil {
+				firstErr = err
+			} else if e.keepGoing {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			}
 		}
 	}
 	return firstErr
@@ -1451,9 +1586,8 @@ func (fc fileCache) save(dir string) {
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return
 	}
+
 	data, _ := json.MarshalIndent(fc, "", "  ")
-	// A failed manifest write is not fatal; the build result stands, and the
-	// cache is simply rebuilt on the next run.
 	_ = os.WriteFile(filepath.Join(dir, "manifest.json"), data, 0644)
 }
 
@@ -1489,8 +1623,6 @@ func expandFileDeps(patterns []string, workDir string) []string {
 	return files
 }
 
-// loadedCacheLocked returns the file cache, loading it on first use.
-// Callers must hold e.mu.
 func (e *Executor) loadedCacheLocked() fileCache {
 	if !e.cacheLoaded {
 		e.cache = loadFileCache(e.cacheDirFor())
@@ -1499,7 +1631,6 @@ func (e *Executor) loadedCacheLocked() fileCache {
 	return e.cache
 }
 
-// cacheManifest returns the file cache, loading it on first use.
 func (e *Executor) cacheManifest() fileCache {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -1551,7 +1682,6 @@ func (e *Executor) shouldSkip(cmd *Command, resolve func(string, string) string,
 	return true
 }
 
-// parallelHash computes sha256 hashes of the given files concurrently.
 func parallelHash(files []string) []string {
 	if len(files) < 2 {
 		out := make([]string, len(files))
