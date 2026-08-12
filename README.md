@@ -47,6 +47,7 @@ construct MyFile build       # Run 'build' from MyFile
 construct --list             # List available commands
 construct --dry-run build    # Show what 'build' would execute
 construct --debug build      # Run 'build' with debug output
+construct --jobs 16 build    # Parallel build (independent commands run concurrently)
 ```
 
 ## Constfile Syntax
