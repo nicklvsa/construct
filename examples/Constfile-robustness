@@ -16,9 +16,10 @@ var region = @REGION:-us-east-1
 
 // A guard: prod deploys are refused unless an explicit override says otherwise.
 deploy {
-    // Runs once if any later statement fails.
+    // Runs once if any later statement fails; &fail.message / &fail.line /
+    // &fail.exit carry the failure that triggered it.
     onfail {
-        $ echo "!! rolling back deploy in &env"
+        $ echo "!! &fail.message (line &fail.line) — rolling back deploy in &env"
         ! echo "kubectl rollout undo deployment/web"
     }
 

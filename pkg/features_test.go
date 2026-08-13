@@ -1970,8 +1970,7 @@ func TestNoCacheReruns(t *testing.T) {
 	dep := filepath.Join(dir, "data.txt")
 	os.WriteFile(dep, []byte("x"), 0644)
 
-	// Unique command name so the shared cache dir (keyed by command name)
-	// can't collide with other tests' temp dirs.
+	// Unique name so the shared cache dir (keyed by command name) can't collide.
 	data := &ParsedData{
 		Commands: []*Command{
 			{Name: "gen-nocache", WorkDir: dir, FileDeps: []string{"data.txt"}, Body: shellBody("echo gen-ran")},
@@ -2024,5 +2023,49 @@ func TestSetShell(t *testing.T) {
 	e.SetShell("")
 	if e.shellName != "/bin/sh" {
 		t.Errorf("empty SetShell should be a no-op: %q", e.shellName)
+	}
+}
+
+func TestOnFailSeesFailureContext(t *testing.T) {
+	data := &ParsedData{
+		Commands: []*Command{{Name: "build", Body: []BodyStatement{
+			{Type: StmtOnFail, OnFailBody: shellBody(
+				`echo "failed: &fail.message"`,
+				`echo "line: &fail.line"`,
+				`echo "exit: &fail.exit"`,
+			), SourceLine: 1},
+			{Type: StmtShell, Shell: "echo boom && " + exitNonZero(), SourceLine: 4},
+		}}},
+	}
+	data.buildIndexMaps()
+	out, err := runAndCaptureErr(t, data, "build")
+	if err == nil {
+		t.Fatal("expected failure")
+	}
+	if !strings.Contains(out, `failed: command`) || !strings.Contains(out, `boom`) {
+		t.Errorf("fail.message missing: %q", out)
+	}
+	if !strings.Contains(out, "line: 4") {
+		t.Errorf("fail.line missing: %q", out)
+	}
+	if !strings.Contains(out, "exit: 1") {
+		t.Errorf("fail.exit missing: %q", out)
+	}
+}
+
+func TestOnFailSeesFailMessage(t *testing.T) {
+	data := &ParsedData{
+		Commands: []*Command{{Name: "build", Body: []BodyStatement{
+			{Type: StmtOnFail, OnFailBody: shellBody(`echo "message: &fail.message"`), SourceLine: 1},
+			{Type: StmtFail, Message: "deploy refused", SourceLine: 3},
+		}}},
+	}
+	data.buildIndexMaps()
+	out, err := runAndCaptureErr(t, data, "build")
+	if err == nil {
+		t.Fatal("expected failure")
+	}
+	if !strings.Contains(out, "message: fail: deploy refused") {
+		t.Errorf("fail.message = %q", out)
 	}
 }

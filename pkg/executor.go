@@ -458,14 +458,10 @@ func (e *Executor) cleanStatements(stmts []BodyStatement, cmd *Command, argFlags
 			}
 		case StmtContinue, StmtBreak, StmtFail:
 			out[i] = stmt
-		case StmtInvoke, StmtEnv:
+		case StmtInvoke, StmtEnv, StmtOnFail:
+			// OnFail bodies are cleaned at failure time so &fail.* refs
+			// resolve with the actual failure context.
 			out[i] = stmt
-		case StmtOnFail:
-			out[i] = BodyStatement{
-				Type:       StmtOnFail,
-				OnFailBody: e.cleanStatements(stmt.OnFailBody, cmd, argFlags),
-				SourceLine: stmt.SourceLine,
-			}
 		default:
 			out[i] = BodyStatement{Type: StmtShell, Shell: e.cleanShellLine(cmd, stmt.Shell, argFlags), OutputName: stmt.OutputName, SourceLine: stmt.SourceLine}
 		}
@@ -1073,15 +1069,38 @@ func (e *Executor) execBody(ctx *execContext, body []BodyStatement) (err error) 
 	return nil
 }
 
+// runOnFails executes the registered onfail statements with &fail.* context
+// set, then returns the original failure. Failures inside onfail bodies are
+// printed but do not replace the original error.
 func (e *Executor) runOnFails(ctx *execContext, cause error) error {
 	snapshot := ctx.onFails
 	ctx.onFails = nil
+
+	e.StructuredParse.SetVariable("fail.message", ctx.target.Name, cause.Error())
+	e.StructuredParse.SetVariable("fail.line", ctx.target.Name, strconv.Itoa(failLine(cause)))
+	if cmdErr, ok := cause.(*CommandError); ok {
+		e.StructuredParse.SetVariable("fail.exit", ctx.target.Name, strconv.Itoa(cmdErr.ExitCode))
+	}
+
+	// Onfail bodies are cleaned at failure time so &fail.* refs resolve.
 	for _, body := range snapshot {
-		if err := e.execBody(ctx, []BodyStatement{body}); err != nil {
+		cleaned := e.cleanStatements([]BodyStatement{body}, ctx.target, e.argFlags(ctx.target))
+		if err := e.execBody(ctx, cleaned); err != nil {
 			fmt.Fprintf(os.Stderr, "onfail error: %v\n", err)
 		}
 	}
 	return cause
+}
+
+// failLine extracts the source line from a failure, when known.
+func failLine(err error) int {
+	switch e := err.(type) {
+	case *CommandError:
+		return e.Line
+	case *FailError:
+		return e.Line
+	}
+	return 0
 }
 
 func (e *Executor) invokeCommand(ctx *execContext, stmt BodyStatement) error {

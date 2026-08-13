@@ -857,3 +857,158 @@ func TestEnvRefDefaultInWorkdir(t *testing.T) {
 		t.Errorf("resolveEnvRefsInString set = %q", got)
 	}
 }
+
+// TestDocumentSymbolImportedCommands verifies imported commands don't emit
+// symbols: their SourceLine belongs to the imported file, and a bogus
+// selection range would violate VS Code's containment validation.
+func TestDocumentSymbolImportedCommands(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "lib.constfile"), []byte("gen {\n    echo hi\n}\n"), 0644)
+	text := `import "lib.constfile" as lib
+main < lib.gen {
+    echo done
+}
+`
+	mainPath := filepath.Join(dir, "main.constfile")
+	uri := pathToURI(mainPath)
+	s := newServer()
+	s.updateDoc(uri, text, 1)
+
+	params, _ := json.Marshal(map[string]interface{}{
+		"textDocument": map[string]string{"uri": uri},
+	})
+	res, err := s.handleDocumentSymbol(params)
+	if err != nil {
+		t.Fatalf("documentSymbol: %v", err)
+	}
+	syms, ok := res.([]documentSymbol)
+	if !ok {
+		t.Fatalf("expected []documentSymbol, got %T", res)
+	}
+	for _, sym := range syms {
+		if strings.Contains(sym.Name, "gen") && !strings.Contains(sym.Name, "main") {
+			t.Errorf("imported command leaked into symbols: %+v", sym)
+		}
+		for _, r := range []range_{sym.Range, sym.SelectionRange} {
+			if r.Start.Line > r.End.Line ||
+				(r.Start.Line == r.End.Line && r.Start.Character > r.End.Character) {
+				t.Errorf("inverted range for %s: %+v", sym.Name, r)
+			}
+		}
+	}
+}
+
+// TestHoverFailContext verifies &fail.* refs inside an onfail block get a
+// context hint, and stay quiet outside one.
+func TestHoverFailContext(t *testing.T) {
+	text := `deploy {
+    onfail {
+        $ echo "&fail.message at &fail.line"
+    }
+    $ echo "&fail.message"
+}
+`
+	uri := "file:///x/main.constfile"
+	s := newServer()
+	s.updateDoc(uri, text, 1)
+	lines := strings.Split(text, "\n")
+
+	hover := func(line int, sub string) string {
+		params, _ := json.Marshal(map[string]interface{}{
+			"textDocument": map[string]string{"uri": uri},
+			"position":     map[string]int{"line": line, "character": strings.Index(lines[line], sub) + 2},
+		})
+		res, err := s.handleHover(params)
+		if err != nil {
+			t.Fatalf("hover %s: %v", sub, err)
+		}
+		if res == nil {
+			return ""
+		}
+		return res.(hoverResult).Contents.Value
+	}
+
+	if msg := hover(2, "fail.message"); !strings.Contains(msg, "triggered this") {
+		t.Errorf("inside onfail hover = %q", msg)
+	}
+	if msg := hover(2, "fail.line"); !strings.Contains(msg, "source line") {
+		t.Errorf("fail.line hover = %q", msg)
+	}
+	if msg := hover(4, "fail.message"); msg != "" {
+		t.Errorf("outside onfail should hover nothing, got %q", msg)
+	}
+}
+
+// TestHoverOnFailKeyword verifies the onfail header shows the available
+// failure context.
+func TestHoverOnFailKeyword(t *testing.T) {
+	text := "deploy {\n    onfail {\n        $ echo x\n    }\n}\n"
+	uri := "file:///x/main.constfile"
+	s := newServer()
+	s.updateDoc(uri, text, 1)
+
+	params, _ := json.Marshal(map[string]interface{}{
+		"textDocument": map[string]string{"uri": uri},
+		"position":     map[string]int{"line": 1, "character": 3},
+	})
+	res, err := s.handleHover(params)
+	if err != nil {
+		t.Fatalf("hover: %v", err)
+	}
+	hr, ok := res.(hoverResult)
+	if !ok {
+		t.Fatalf("expected hoverResult, got %T", res)
+	}
+	if !strings.Contains(hr.Contents.Value, "&fail.message") {
+		t.Errorf("onfail hover should list context vars: %q", hr.Contents.Value)
+	}
+}
+
+// TestCompletionFailContext verifies &fail. completes inside onfail blocks
+// only.
+func TestCompletionFailContext(t *testing.T) {
+	text := `deploy {
+    onfail {
+        $ echo "&fail."
+    }
+    $ echo "&fail."
+}
+`
+	uri := "file:///x/main.constfile"
+	s := newServer()
+	s.updateDoc(uri, text, 1)
+	lines := strings.Split(text, "\n")
+
+	complete := func(line int) []string {
+		params, _ := json.Marshal(map[string]interface{}{
+			"textDocument": map[string]string{"uri": uri},
+			"position":     map[string]int{"line": line, "character": len(lines[line]) - 1},
+		})
+		res, err := s.handleCompletion(params)
+		if err != nil {
+			t.Fatalf("completion: %v", err)
+		}
+		cl := res.(completionList)
+		var labels []string
+		for _, it := range cl.Items {
+			labels = append(labels, it.Label)
+		}
+		return labels
+	}
+
+	inside := complete(2)
+	found := false
+	for _, l := range inside {
+		if l == "fail.message" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("inside onfail should suggest fail.message: %v", inside)
+	}
+	for _, l := range complete(4) {
+		if l == "fail.message" {
+			t.Errorf("outside onfail should not suggest fail.*: %v", l)
+		}
+	}
+}

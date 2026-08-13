@@ -242,7 +242,9 @@ deploy {
 - `fail "message"` aborts the command with a readable error (`fail: message (file:line)`).
 - `onfail { ... }` registers a block that runs once if any later statement in
   the command fails — handy for cleanup and rollback. It runs after the
-  failure; the original error is still reported.
+  failure; the original error is still reported. Inside the block,
+  `&fail.message`, `&fail.line`, and `&fail.exit` (when the failure was a
+  non-zero exit) describe what went wrong.
 
 ### Variable Scopes
 

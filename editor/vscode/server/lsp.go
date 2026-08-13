@@ -85,11 +85,11 @@ type initializeResult struct {
 }
 
 type serverCapabilities struct {
-	TextDocumentSync         int                `json:"textDocumentSync"`
-	HoverProvider            bool               `json:"hoverProvider"`
-	DefinitionProvider       bool               `json:"definitionProvider"`
-	DocumentSymbolProvider   bool               `json:"documentSymbolProvider"`
-	CompletionProvider       *completionOptions `json:"completionProvider,omitempty"`
+	TextDocumentSync       int                `json:"textDocumentSync"`
+	HoverProvider          bool               `json:"hoverProvider"`
+	DefinitionProvider     bool               `json:"definitionProvider"`
+	DocumentSymbolProvider bool               `json:"documentSymbolProvider"`
+	CompletionProvider     *completionOptions `json:"completionProvider,omitempty"`
 }
 
 type completionOptions struct {
@@ -571,6 +571,23 @@ func (s *server) handleHover(params json.RawMessage) (interface{}, error) {
 				}, nil
 			}
 		}
+
+		// &fail.* refs are only meaningful inside onfail blocks.
+		if msg, ok := failContextHover(lines, p.Position.Line, name); ok {
+			return hoverResult{
+				Contents: markupContent{Kind: "markdown", Value: msg},
+			}, nil
+		}
+	}
+
+	// Hover over the `onfail` keyword itself.
+	if trimmed := strings.TrimSpace(line); strings.HasPrefix(trimmed, "onfail ") || trimmed == "onfail{" {
+		return hoverResult{
+			Contents: markupContent{
+				Kind:  "markdown",
+				Value: "runs once when any later statement in this command fails\n\nfailure context available: `&fail.message`, `&fail.line`, `&fail.exit`",
+			},
+		}, nil
 	}
 
 	// Hover over an @ENV reference — show the environment variable's value.
@@ -923,11 +940,11 @@ func (s *server) handleCompletion(params json.RawMessage) (any, error) {
 }
 
 type documentSymbol struct {
-	Name           string           `json:"name"`
-	Kind           int              `json:"kind"`
-	Detail         string           `json:"detail,omitempty"`
-	Range          range_           `json:"range"`
-	SelectionRange range_           `json:"selectionRange"`
+	Name           string `json:"name"`
+	Kind           int    `json:"kind"`
+	Detail         string `json:"detail,omitempty"`
+	Range          range_ `json:"range"`
+	SelectionRange range_ `json:"selectionRange"`
 }
 
 func (s *server) handleDocumentSymbol(params json.RawMessage) (interface{}, error) {
@@ -949,11 +966,19 @@ func (s *server) handleDocumentSymbol(params json.RawMessage) (interface{}, erro
 		if strings.Contains(cmd.Name, "__lazy_") {
 			continue
 		}
+		// Imported commands live in other files; their SourceLine is not a
+		// line in this document.
+		if strings.TrimPrefix(cmd.SourceFile, "file://") != strings.TrimPrefix(p.TextDocument.URI, "file://") {
+			continue
+		}
 		if cmd.SourceLine <= 0 || cmd.SourceLine-1 >= len(lines) {
 			continue
 		}
 		headerLine := lines[cmd.SourceLine-1]
-		nameCol := max(strings.Index(headerLine, cmd.Name), 0)
+		nameCol := strings.Index(headerLine, cmd.Name)
+		if nameCol < 0 {
+			continue
+		}
 		selection := range_{
 			Start: position{Line: cmd.SourceLine - 1, Character: nameCol},
 			End:   position{Line: cmd.SourceLine - 1, Character: nameCol + len(cmd.Name)},
@@ -1572,6 +1597,16 @@ func completionVarItems(data *pkg.ParsedData, lines []string, lineIdx int, prefi
 			add(v.Name, v.Name, 6) // Variable
 		}
 	}
+
+	// Inside an onfail block, &fail.* context refs are available.
+	if strings.HasPrefix(prefix, "fail.") && inOnFailBlock(lines, lineIdx) {
+		for _, f := range []string{"fail.message", "fail.line", "fail.exit"} {
+			if strings.HasPrefix(f, prefix) {
+				add(f, strings.TrimPrefix(f, "fail."), 6) // Variable
+			}
+		}
+	}
+
 	if cmd := enclosingCommand(lines, lineIdx, data); cmd != nil {
 		for _, a := range cmd.Arguments {
 			if strings.HasPrefix(a.Name, prefix) {
@@ -1582,8 +1617,7 @@ func completionVarItems(data *pkg.ParsedData, lines []string, lineIdx int, prefi
 	return items
 }
 
-// resolveCommandRef finds the longest command that is a prefix of name
-// (handles namespaced commands like "lib.gen").
+// resolveCommandRef finds the longest command prefixing name (e.g. "lib.gen").
 func resolveCommandRef(data *pkg.ParsedData, name string) *pkg.Command {
 	for i := len(name); i > 0; i = strings.LastIndexByte(name[:i], '.') {
 		if cmd, err := data.GetCommand(name[:i]); err == nil {
@@ -1601,12 +1635,45 @@ func isPrereqListLine(line string) bool {
 	if strings.HasPrefix(trimmed, "$") {
 		return false
 	}
-	for _, kw := range []string{"if ", "for ", "matrix ", "env ", "invoke ", "else", "continue", "break"} {
+	for _, kw := range []string{"if ", "for ", "matrix ", "env ", "invoke ", "onfail ", "fail ", "else", "continue", "break"} {
 		if strings.HasPrefix(trimmed, kw) {
 			return false
 		}
 	}
 	return strings.Contains(line, "<")
+}
+
+// inOnFailBlock reports whether lineIdx is inside an `onfail { ... }` block.
+// Walks up counting braces; when a line's `{` drops the depth below zero,
+// its matching closer lies below the cursor, so the cursor is inside that
+// block.
+func inOnFailBlock(lines []string, lineIdx int) bool {
+	depth := 0
+	for i := lineIdx; i >= 0; i-- {
+		line := lines[i]
+		depth += strings.Count(line, "}") - strings.Count(line, "{")
+		if depth < 0 && (strings.HasPrefix(strings.TrimSpace(line), "onfail ") || strings.TrimSpace(line) == "onfail{") {
+			return true
+		}
+	}
+	return false
+}
+
+// failContextHover describes an &fail.* ref when hovered inside an onfail
+// block.
+func failContextHover(lines []string, lineIdx int, name string) (string, bool) {
+	if !inOnFailBlock(lines, lineIdx) {
+		return "", false
+	}
+	switch name {
+	case "fail.message":
+		return "`&fail.message` — the error message of the failure that triggered this `onfail` block", true
+	case "fail.line":
+		return "`&fail.line` — the source line of the failing statement (empty when unknown)", true
+	case "fail.exit":
+		return "`&fail.exit` — the exit code of the failed command (only set for non-zero exits)", true
+	}
+	return "", false
 }
 
 func enclosingCommand(lines []string, lineIdx int, data *pkg.ParsedData) *pkg.Command {

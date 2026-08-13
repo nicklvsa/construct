@@ -398,8 +398,7 @@ func renderChooser(s *chooseState, width, height int) string {
 	if n == 0 {
 		s.offset = 0
 	} else {
-		// Keep the cursor inside the scroll window, then clamp the window
-		// to the list bounds (0 when the list fits on screen).
+		// Keep the cursor inside the scroll window, clamped to the list bounds.
 		switch {
 		case s.cursor < s.offset:
 			s.offset = s.cursor

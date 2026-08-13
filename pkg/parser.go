@@ -846,8 +846,7 @@ func extractOutputName(line string) (shell, name string) {
 	return strings.TrimSpace(before), suffix
 }
 
-// isValidIdent reports whether s is a plain word (letters, digits,
-// underscore, no dash) — used for `as <name>` outputs and import namespaces.
+// isValidIdent reports a plain word (letters, digits, underscore; no dash).
 func isValidIdent(s string) bool {
 	if s == "" {
 		return false
