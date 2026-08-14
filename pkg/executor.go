@@ -22,7 +22,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -466,12 +465,9 @@ func (e *Executor) saveRunRecords() {
 func (e *Executor) command(ctx *execContext, args []string) *exec.Cmd {
 	runCtx := e.effectiveRunCtx(ctx)
 	cmd := exec.CommandContext(runCtx, e.shellName, args...)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	prepareProcessGroup(cmd)
 	cmd.Cancel = func() error {
-		if cmd.Process != nil {
-			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-		}
-		return nil
+		return killProcessGroup(cmd)
 	}
 	if ctx.workDir != "" {
 		cmd.Dir = e.resolveWorkDir(e.resolveBodyValue(ctx, ctx.workDir, ctx.target.Name))
