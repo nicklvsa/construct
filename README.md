@@ -194,6 +194,8 @@ with `var version = 0.2.0` produces `0.2.0.vsix`.
 - Prerequisites: `cmd1, cmd2`
 - A prerequisite can run in its own directory at the call site: `main < gen in src/`
 - Error tolerance: prefix a body statement with `!` to let it fail without aborting the build
+- A command body may be written on a single line — including an empty one:
+  `|gen| { }` or `clean { rm -rf dist }` (nested single-line blocks work too)
 
 ### Imports
 

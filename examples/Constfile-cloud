@@ -9,10 +9,9 @@
 #   CONSTRUCT_CLOUD_FILE=example-cloud.json construct Constfile-cloud cloud pull
 #   construct Constfile-cloud cloud push --file example-cloud.json
 
-# An empty cloud command runs entirely from the cloud definitions.
-|gen| {
-    # body comes from the cloud definitions file
-}
+# An empty cloud command (`|gen| { }`) runs entirely from the cloud
+# definitions file.
+|gen| { }
 
 # A cloud command with a local body runs the local body first, then the
 # remote body.

@@ -309,6 +309,39 @@ cmd {
 	}
 }
 
+func TestParseSingleLineCommandBodies(t *testing.T) {
+	p := NewParserFromContent("Constfile", `
+|gen| { }
+use {
+    invoke gen
+}
+last { $ echo inline }
+nested { if "&x" == "1" { $ echo one } else { $ echo two } }
+`)
+	data, err := p.Parse()
+	if err != nil {
+		t.Fatal(err)
+	}
+	gen, err := data.GetCommand("gen")
+	if err != nil {
+		t.Fatalf("gen must exist (empty cloud command): %v", err)
+	}
+	if len(gen.Body) != 0 || !gen.CloudAccessible {
+		t.Fatalf("gen = %+v", gen)
+	}
+	if _, err := data.GetCommand("use"); err != nil {
+		t.Fatalf("use swallowed by gen: %v", err)
+	}
+	last, _ := data.GetCommand("last")
+	if len(last.Body) != 1 || last.Body[0].Type != StmtShell {
+		t.Fatalf("last body = %+v", last.Body)
+	}
+	nested, _ := data.GetCommand("nested")
+	if len(nested.Body) != 1 || nested.Body[0].Type != StmtIf {
+		t.Fatalf("nested single-line body = %+v", nested.Body)
+	}
+}
+
 func TestParseStateAndPromptStatements(t *testing.T) {
 	p := NewParserFromContent("Constfile", `
 state last = "0.0.0"

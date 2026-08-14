@@ -1283,21 +1283,30 @@ func isValidIdent(s string) bool {
 	return true
 }
 
-// findBlockBounds finds the quote-aware first '{' and the first '}' after it.
+// findBlockBounds finds the quote-aware '{' ... '}' pair enclosing the first
+// top-level block, tracking nested braces so single-line bodies with nested
+// blocks (e.g. `cmd { if x { } }`) resolve correctly.
 func findBlockBounds(line string) (open, close int, ok bool) {
 	inQuote := false
+	depth := 0
 	open = -1
 	for i := 0; i < len(line); i++ {
 		switch line[i] {
 		case '"':
 			inQuote = !inQuote
 		case '{':
-			if !inQuote && open < 0 {
-				open = i
+			if !inQuote {
+				if open < 0 {
+					open = i
+				}
+				depth++
 			}
 		case '}':
 			if !inQuote && open >= 0 {
-				return open, i, true
+				depth--
+				if depth == 0 {
+					return open, i, true
+				}
 			}
 		}
 	}
@@ -2014,14 +2023,24 @@ func (p *Parser) parseCommand(idx int, line string, isDefault bool, lineNum int,
 	produces := extractProduces(line)
 	onChange := extractOnChange(line)
 
-	rawBody, endIdx, err := p.parseCommandBody(idx+1, commandName)
-	if err != nil {
-		return 0, err
-	}
-
-	commandBody, err := p.parseBodyStatements(rawBody, commandName)
-	if err != nil {
-		return 0, err
+	var commandBody []BodyStatement
+	consumed := 1
+	if body, ok := singleLineBody(trimmedLine); ok {
+		// Self-contained header: `cmd { stmts }` or an empty `cmd { }`.
+		commandBody, err = p.parseBodyStatements(atLine(splitStatements(body), lineNum), commandName)
+		if err != nil {
+			return 0, err
+		}
+	} else {
+		rawBody, endIdx, err := p.parseCommandBody(idx+1, commandName)
+		if err != nil {
+			return 0, err
+		}
+		commandBody, err = p.parseBodyStatements(rawBody, commandName)
+		if err != nil {
+			return 0, err
+		}
+		consumed = endIdx - idx
 	}
 
 	if commandName != "" {
@@ -2043,7 +2062,7 @@ func (p *Parser) parseCommand(idx int, line string, isDefault bool, lineNum int,
 		})
 	}
 
-	return endIdx - idx, nil
+	return consumed, nil
 }
 
 func (p *Parser) detectCircularDependencies() error {

@@ -60,6 +60,7 @@ type options struct {
 	flame       bool
 	ghActions   bool
 	yes         bool
+	doctor      bool
 	force       bool
 	template    string
 	fileName    string
@@ -359,6 +360,7 @@ func defineFlags(fs *flag.FlagSet, o *options) {
 	fs.BoolVar(&o.flame, "flame", false, "Print a per-statement flame graph after the run")
 	fs.BoolVar(&o.ghActions, "github-actions", os.Getenv("GITHUB_ACTIONS") == "true", "GitHub Actions native output (groups, ::error::)")
 	fs.BoolVar(&o.yes, "yes", false, "Auto-approve confirmations")
+	fs.BoolVar(&o.doctor, "doctor", false, "Diagnose the environment, Constfile, tools, and cloud file")
 	fs.BoolVarP(&o.force, "force", "f", false, "Overwrite existing files (init)")
 	fs.StringVar(&o.template, "template", "", "Init template (minimal, go, python, node, rust, monorepo)")
 	fs.StringVar(&o.fileName, "file", "", "Target file (init, cloud push)")
@@ -1341,6 +1343,13 @@ func main() {
 		} else {
 			positionals = append(positionals, a)
 		}
+	}
+
+	// --doctor runs the environment/Constfile diagnosis (same as the
+	// `doctor` subcommand; accepts an optional Constfile path).
+	if o.doctor {
+		runDoctor(&o, determineInputs(positionals))
+		return
 	}
 
 	if len(positionals) > 0 && isSubcommandName(positionals[0]) && !commandExistsInConstfile(positionals[0]) {
