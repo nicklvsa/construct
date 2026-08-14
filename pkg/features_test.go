@@ -1,6 +1,7 @@
 package pkg
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -2067,5 +2068,69 @@ func TestOnFailSeesFailMessage(t *testing.T) {
 	}
 	if !strings.Contains(out, "message: fail: deploy refused") {
 		t.Errorf("fail.message = %q", out)
+	}
+}
+
+// TestOnFailRunsOnCancel verifies canceling the run context (SIGINT) kills
+// the command and still runs onfail cleanup on a fresh context.
+func TestOnFailRunsOnCancel(t *testing.T) {
+	in := `build {
+    onfail {
+        $ echo CLEANUP-RAN
+    }
+    $ sleep 30
+}`
+	p := NewParserFromContent("t.constfile", in)
+	data, err := p.Parse()
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+
+	so, sw, _ := os.Pipe()
+	oldOut := os.Stdout
+	os.Stdout = sw
+	e := NewExecutor(data, false, false)
+	e.SetRunContext(ctx)
+	done := make(chan error, 1)
+	go func() { done <- e.Execute([]string{"build"}) }()
+	time.Sleep(400 * time.Millisecond)
+	cancel()
+	err = <-done
+	os.Stdout = oldOut
+	sw.Close()
+	out, _ := io.ReadAll(so)
+	if err == nil {
+		t.Fatal("expected failure after cancel")
+	}
+	if !strings.Contains(string(out), "CLEANUP-RAN") {
+		t.Errorf("onfail did not run after cancel: %q", out)
+	}
+}
+
+func TestOnChangeHeaderGrammar(t *testing.T) {
+	cases := []struct {
+		header  string
+		workDir string
+	}{
+		{"gen in src produces out.txt onchange src/*.c, src/*.h < dep {", "src"},
+		{"gen < dep onchange src/*.c {", ""},
+		{"gen in src onchange src/*.c {", "src"},
+	}
+	for _, tc := range cases {
+		p := &Parser{Data: &ParsedData{}, Lines: []string{tc.header, "    $ echo x", "}"}}
+		if _, err := p.parseCommand(0, tc.header, false, 1, ""); err != nil {
+			t.Fatalf("%q: %v", tc.header, err)
+		}
+		cmd := p.Data.Commands[0]
+		if cmd.Name != "gen" {
+			t.Errorf("%q: name = %q", tc.header, cmd.Name)
+		}
+		if len(cmd.OnChange) == 0 {
+			t.Errorf("%q: onchange not parsed", tc.header)
+		}
+		if cmd.WorkDir != tc.workDir {
+			t.Errorf("%q: workdir = %q, want %q", tc.header, cmd.WorkDir, tc.workDir)
+		}
 	}
 }

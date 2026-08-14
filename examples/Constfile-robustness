@@ -57,7 +57,7 @@ stage_test {
 
 // File-dep caching: gen re-runs when src/VERSION.txt changes; use
 // --no-cache to force a run regardless.
-gen in examples < src/VERSION.txt {
+gen < src/VERSION.txt {
     $ echo "generating from src/VERSION.txt"
     $ cat src/VERSION.txt
 }

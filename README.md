@@ -33,6 +33,9 @@ construct [options] [Constfile] [commands...]
 | `--jobs N` | Cap parallel commands (implies `--concurrent`) |
 | `-k, --keep-going` | Continue other targets when one fails; report all failures |
 | `--no-cache` | Ignore the file-dep cache and run everything |
+| `--quiet`, `-q` | Suppress command output, keep errors |
+| `--explain` | Print why commands run or are skipped |
+| `--json` | Machine-readable output (with `--list`) |
 | `--shell PATH` | Shell to run statements with (default: `$SHELL`) |
 | `--watch` | Rerun when the Constfile, its imports, or its dependencies change |
 | `--choose` | Interactively select targets (arrow-key menu; type to filter) |
@@ -83,6 +86,7 @@ Arguments are passed as flags and referenced with the same `&` marker as variabl
 
 ```bash
 construct deploy --deploy:env=prod --deploy:region=us-east
+construct deploy env=prod region=us-east      # bare key=value shorthand
 ```
 
 ```
@@ -240,11 +244,15 @@ deploy {
 ```
 
 - `fail "message"` aborts the command with a readable error (`fail: message (file:line)`).
+- `require_env KEY "message"` fails the command when an environment variable is unset.
+- `global name = value` writes a global variable from inside a command body.
+- `retry 3 $ cmd` reruns a statement up to 3 extra times before failing.
 - `onfail { ... }` registers a block that runs once if any later statement in
   the command fails — handy for cleanup and rollback. It runs after the
   failure; the original error is still reported. Inside the block,
   `&fail.message`, `&fail.line`, and `&fail.exit` (when the failure was a
-  non-zero exit) describe what went wrong.
+  non-zero exit) describe what went wrong. `onfail` also runs when the build
+  is interrupted (Ctrl-C) before exiting.
 
 ### Variable Scopes
 
@@ -306,6 +314,15 @@ build < main.go, pkg/*.go {
 
 File patterns (containing `/`, `*`, or `.`) are tracked separately from command prerequisites. A manifest is stored in `.construct-cache/`. Touch a file and re-run to trigger a rebuild.
 
+An `onchange` header modifier adds globs to the `--watch` set without
+participating in the skip-cache:
+
+```
+gen in src onchange src/**.c, src/**.h {
+    $ make generate
+}
+```
+
 ### Produced Artifacts (make-style up-to-date checks)
 
 Instead of hashing dependencies, declare what a command produces — the command
@@ -348,10 +365,11 @@ build {
 
 Conditions support the comparison operators `==`, `!=`, `>`, `>=`, `<`, `<=`
 (numeric when both sides are integers, otherwise lexicographic), plus the
-`contains` operator for substring tests, the logical operators `&&`, `||`,
-`!`, and parentheses. `@ENV` references resolve in shell lines and conditions;
-in shell lines an unset variable stays literal (so scoped package names like
-`@vscode/vsce` survive), while in variable values it resolves to empty.
+string operators `contains`, `starts_with`, `ends_with`, and `matches` (regular
+expression), the logical operators `&&`, `||`, `!`, and parentheses. `@ENV`
+references resolve in shell lines and conditions; in shell lines an unset
+variable stays literal (so scoped package names like `@vscode/vsce` survive),
+while in variable values it resolves to empty.
 
 ```
 deploy {

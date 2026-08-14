@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"unicode"
@@ -202,15 +203,16 @@ type LazyOutput struct {
 
 // BodyStatement statement types.
 const (
-	StmtShell    = "shell"
-	StmtIf       = "if"
-	StmtFor      = "for"
-	StmtInvoke   = "invoke"
-	StmtEnv      = "env"
-	StmtContinue = "continue"
-	StmtBreak    = "break"
-	StmtFail     = "fail"
-	StmtOnFail   = "onfail"
+	StmtShell      = "shell"
+	StmtIf         = "if"
+	StmtFor        = "for"
+	StmtInvoke     = "invoke"
+	StmtEnv        = "env"
+	StmtContinue   = "continue"
+	StmtBreak      = "break"
+	StmtFail       = "fail"
+	StmtOnFail     = "onfail"
+	StmtRequireEnv = "require_env"
 )
 
 type BodyStatement struct {
@@ -228,6 +230,7 @@ type BodyStatement struct {
 	Message    string          `json:"message,omitempty"`
 	OnFailBody []BodyStatement `json:"onfail,omitempty"`
 	InvokeArgs []string        `json:"invoke_args,omitempty"`
+	Retry      int             `json:"retry,omitempty"`
 	SourceLine int             `json:"source_line,omitempty"`
 }
 
@@ -245,6 +248,7 @@ type Command struct {
 	PrereqDirs      map[string]string `json:"prereq_dirs,omitempty"`
 	FileDeps        []string          `json:"file_deps"`
 	Produces        []string          `json:"produces,omitempty"`
+	OnChange        []string          `json:"onchange,omitempty"`
 	PrereqCmds      []*Command        `json:"prereq_cmds"`
 	WorkDir         string            `json:"work_dir"`
 	Body            []BodyStatement   `json:"body"`
@@ -420,6 +424,7 @@ func parseCommandName(line string) string {
 
 	inIdx := strings.Index(line, " in ")
 	prodIdx := findProducesIdx(line)
+	ocIdx := findTopLevelKeyword(line, " onchange ")
 	terminators := []rune{'(', '<', '{'}
 	endIdx := len(line)
 	for i, r := range line {
@@ -435,10 +440,15 @@ func parseCommandName(line string) string {
 	if prodIdx >= 0 && prodIdx < endIdx {
 		endIdx = prodIdx
 	}
+	if ocIdx >= 0 && ocIdx < endIdx {
+		endIdx = ocIdx
+	}
 	return strings.TrimSpace(line[:endIdx])
 }
 
-func findProducesIdx(line string) int {
+// findTopLevelKeyword finds a keyword (e.g. " produces ") outside quotes and
+// parens at brace depth zero.
+func findTopLevelKeyword(line, kw string) int {
 	depth := 0
 	inQuote := false
 	for i := 0; i < len(line); i++ {
@@ -454,11 +464,15 @@ func findProducesIdx(line string) int {
 				depth--
 			}
 		}
-		if depth == 0 && !inQuote && strings.HasPrefix(line[i:], " produces ") {
+		if depth == 0 && !inQuote && strings.HasPrefix(line[i:], kw) {
 			return i
 		}
 	}
 	return -1
+}
+
+func findProducesIdx(line string) int {
+	return findTopLevelKeyword(line, " produces ")
 }
 
 func extractProduces(line string) []string {
@@ -475,6 +489,32 @@ func extractProduces(line string) []string {
 	}
 	if inIdx := strings.Index(segment, " in "); inIdx >= 0 {
 		segment = segment[:inIdx]
+	}
+	if ocIdx := findTopLevelKeyword(segment, " onchange "); ocIdx >= 0 {
+		segment = segment[:ocIdx]
+	}
+	var out []string
+	for _, p := range strings.Split(segment, ",") {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// extractOnChange parses the `onchange <glob>, <glob>` header modifier.
+func extractOnChange(line string) []string {
+	idx := findTopLevelKeyword(line, " onchange ")
+	if idx < 0 {
+		return nil
+	}
+	segment := line[idx+len(" onchange "):]
+	if lt := strings.IndexByte(segment, '<'); lt >= 0 {
+		segment = segment[:lt]
+	}
+	if brace := strings.IndexByte(segment, '{'); brace >= 0 {
+		segment = segment[:brace]
 	}
 	var out []string
 	for _, p := range strings.Split(segment, ",") {
@@ -512,6 +552,9 @@ func extractPrerequisites(line string) ([]string, map[string]string, error) {
 	}
 
 	segment := line[start+1 : start+end]
+	if oc := findTopLevelKeyword(segment, " onchange "); oc >= 0 {
+		segment = segment[:oc]
+	}
 
 	dirs := make(map[string]string)
 	var result []string
@@ -553,13 +596,18 @@ func extractWorkDir(line string) string {
 		before = before[:lt]
 	}
 
-	segment := before
-	idx := strings.LastIndex(segment, " in ")
+	idx := strings.LastIndex(before, " in ")
 	if idx == -1 {
 		return ""
 	}
 
-	dir := strings.TrimSpace(segment[idx+len(" in "):])
+	dir := strings.TrimSpace(before[idx+len(" in "):])
+	if prod := findTopLevelKeyword(dir, " produces "); prod >= 0 {
+		dir = dir[:prod]
+	}
+	if oc := findTopLevelKeyword(dir, " onchange "); oc >= 0 {
+		dir = dir[:oc]
+	}
 	if comma := strings.IndexByte(dir, ','); comma >= 0 {
 		dir = strings.TrimSpace(dir[:comma])
 	}
@@ -770,6 +818,52 @@ func (p *Parser) parseBodyStatements(raw []rawLine, scope string) ([]BodyStateme
 			})
 			i++
 			continue
+		}
+
+		// `global name = value` writes a global from inside a command body.
+		if strings.HasPrefix(line, "global ") || strings.HasPrefix(line, "global\t") {
+			if err := p.parseVar("var "+strings.TrimSpace(strings.TrimPrefix(line, "global")), "global", lineNum); err != nil {
+				return nil, err
+			}
+			i++
+			continue
+		}
+
+		// `require_env KEY` fails the command when the env var is unset.
+		if strings.HasPrefix(line, "require_env ") {
+			rest := strings.TrimSpace(strings.TrimPrefix(line, "require_env"))
+			key, msg := rest, ""
+			if idx := strings.IndexAny(rest, " \t"); idx >= 0 {
+				key, msg = rest[:idx], strings.TrimSpace(rest[idx:])
+			}
+			key = strings.Trim(key, `"`)
+			if len(msg) >= 2 && msg[0] == '"' && msg[len(msg)-1] == '"' {
+				msg = msg[1 : len(msg)-1]
+			}
+			stmts = append(stmts, BodyStatement{Type: StmtRequireEnv, Shell: key, Message: msg, SourceLine: lineNum})
+			i++
+			continue
+		}
+
+		// `retry N $ cmd` reruns a statement up to N extra times on failure.
+		if strings.HasPrefix(line, "retry ") {
+			rest := strings.TrimSpace(strings.TrimPrefix(line, "retry"))
+			space := strings.IndexAny(rest, " \t")
+			if space > 0 {
+				n, err := strconv.Atoi(rest[:space])
+				if err == nil && n > 0 {
+					shell, outputName := extractOutputName(strings.TrimSpace(rest[space:]))
+					stmts = append(stmts, BodyStatement{
+						Type:       StmtShell,
+						Shell:      shell,
+						OutputName: outputName,
+						Retry:      n,
+						SourceLine: lineNum,
+					})
+					i++
+					continue
+				}
+			}
 		}
 
 		if strings.HasPrefix(line, "onfail ") || line == "onfail{" {
@@ -1438,6 +1532,7 @@ func (p *Parser) parseCommand(idx int, line string, isDefault bool, lineNum int,
 
 	workDir := extractWorkDir(line)
 	produces := extractProduces(line)
+	onChange := extractOnChange(line)
 
 	rawBody, endIdx, err := p.parseCommandBody(idx+1, commandName)
 	if err != nil {
@@ -1462,6 +1557,7 @@ func (p *Parser) parseCommand(idx int, line string, isDefault bool, lineNum int,
 			PrereqDirs:      prereqDirs,
 			WorkDir:         workDir,
 			Produces:        produces,
+			OnChange:        onChange,
 			Body:            commandBody,
 		})
 	}

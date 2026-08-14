@@ -2,6 +2,7 @@ package pkg
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -12,12 +13,14 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"slices"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 	"unicode"
 
@@ -62,7 +65,11 @@ type Executor struct {
 	concurrent      bool
 	keepGoing       bool
 	noCache         bool
+	quiet           bool
+	explain         bool
 	debug           bool
+	prefixOutput    bool
+	runCtx          context.Context
 	cloudFile       string
 	cloudDefs       map[string]Command
 	cloudLoaded     bool
@@ -84,6 +91,12 @@ type Executor struct {
 func (e *Executor) debugf(format string, args ...any) {
 	if e.debug {
 		fmt.Printf("[DEBUG] "+format, args...)
+	}
+}
+
+func (e *Executor) explainf(format string, args ...any) {
+	if e.explain {
+		fmt.Printf(format, args...)
 	}
 }
 
@@ -172,6 +185,7 @@ func NewExecutor(data *ParsedData, concurrent bool, debug bool) *Executor {
 
 	executor := &Executor{
 		concurrent:      concurrent,
+		prefixOutput:    concurrent,
 		debug:           debug,
 		cloudFile:       cloudFile,
 		shellName:       shellName,
@@ -246,6 +260,48 @@ func (e *Executor) SetKeepGoing(v bool) {
 	e.keepGoing = v
 }
 
+// SetQuiet suppresses normal command output, keeping errors visible.
+func (e *Executor) SetQuiet(v bool) {
+	e.quiet = v
+}
+
+// SetExplain prints why each command runs or is skipped.
+func (e *Executor) SetExplain(v bool) {
+	e.explain = v
+}
+
+// SetRunContext cancels running statements when the context is canceled
+// (e.g. SIGINT); the command's process group is killed and the failure
+// flows through the normal error path so onfail blocks run.
+func (e *Executor) SetRunContext(ctx context.Context) {
+	e.runCtx = ctx
+}
+
+func (e *Executor) command(ctx *execContext, args []string) *exec.Cmd {
+	runCtx := e.runCtx
+	if ctx.runCtx != nil {
+		runCtx = ctx.runCtx
+	}
+	if runCtx == nil {
+		runCtx = context.Background()
+	}
+	cmd := exec.CommandContext(runCtx, e.shellName, args...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		if cmd.Process != nil {
+			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		}
+		return nil
+	}
+	if ctx.workDir != "" {
+		cmd.Dir = e.resolveWorkDir(e.resolveBodyValue(ctx, ctx.workDir, ctx.target.Name))
+	} else if e.baseDir != "" {
+		cmd.Dir = e.baseDir
+	}
+	cmd.Env = *ctx.env
+	return cmd
+}
+
 func (e *Executor) SetShell(name string) {
 	if name == "" {
 		return
@@ -310,15 +366,25 @@ func (e *Executor) executeCommand(command *Command) error {
 	}
 
 	if len(command.FileDeps) > 0 && !isPrereq && len(command.Produces) == 0 && !e.noCache {
-		if e.shouldSkip(command, resolveValue, workDir) {
-			fmt.Printf("(%s cached)\n", command.Name)
+		if skip, reason := e.shouldSkip(command, resolveValue, workDir); skip {
+			e.explainf("(%s cached: %s)\n", command.Name, reason)
+			if !e.explain {
+				fmt.Printf("(%s cached)\n", command.Name)
+			}
 			return nil
+		} else if e.explain && reason != "" {
+			fmt.Printf("(%s running: %s)\n", command.Name, reason)
 		}
 	}
 	if len(command.Produces) > 0 && !isPrereq && !e.noCache {
-		if e.shouldSkipProduced(command, resolveValue, workDir) {
-			fmt.Printf("(%s up to date)\n", command.Name)
+		if skip, reason := e.shouldSkipProduced(command, resolveValue, workDir); skip {
+			e.explainf("(%s up to date: %s)\n", command.Name, reason)
+			if !e.explain {
+				fmt.Printf("(%s up to date)\n", command.Name)
+			}
 			return nil
+		} else if e.explain && reason != "" {
+			fmt.Printf("(%s running: %s)\n", command.Name, reason)
 		}
 	}
 
@@ -456,14 +522,12 @@ func (e *Executor) cleanStatements(stmts []BodyStatement, cmd *Command, argFlags
 				LoopBody:   stmt.LoopBody,
 				SourceLine: stmt.SourceLine,
 			}
-		case StmtContinue, StmtBreak, StmtFail:
+		case StmtContinue, StmtBreak, StmtFail, StmtRequireEnv:
 			out[i] = stmt
 		case StmtInvoke, StmtEnv, StmtOnFail:
-			// OnFail bodies are cleaned at failure time so &fail.* refs
-			// resolve with the actual failure context.
 			out[i] = stmt
 		default:
-			out[i] = BodyStatement{Type: StmtShell, Shell: e.cleanShellLine(cmd, stmt.Shell, argFlags), OutputName: stmt.OutputName, SourceLine: stmt.SourceLine}
+			out[i] = BodyStatement{Type: StmtShell, Shell: e.cleanShellLine(cmd, stmt.Shell, argFlags), OutputName: stmt.OutputName, Retry: stmt.Retry, SourceLine: stmt.SourceLine}
 		}
 	}
 	return out
@@ -632,7 +696,7 @@ func scanRefs(s string, marker byte, firstSeg, dotSeg func(rune) bool, lookup fu
 						}
 					}
 				}
-				// @ENV refs support a :-default suffix: @PORT:-8080.
+
 				if marker == '@' && j+1 < len(runes) && runes[j] == ':' && runes[j+1] == '-' {
 					j += 2
 					for j < len(runes) && !isEnvDefaultEnd(runes[j]) {
@@ -682,7 +746,6 @@ func splitEnvRefToken(token string) (name, def string, hasDefault bool) {
 	return token, "", false
 }
 
-// resolveEnvRefs replaces @ENVNAME references with the corresponding env var.
 func resolveEnvRefs(s string) string {
 	if strings.IndexByte(s, '@') < 0 {
 		return s
@@ -796,6 +859,25 @@ func evaluateConditionWithBase(cond, base string) bool {
 		left = strings.Trim(left, "\"")
 		right = strings.Trim(right, "\"")
 		return strings.Contains(left, right)
+	}
+
+	if idx := findTopLevelOp(cond, " starts_with "); idx > 0 {
+		left := strings.Trim(strings.TrimSpace(cond[:idx]), "\"")
+		right := strings.Trim(strings.TrimSpace(cond[idx+len(" starts_with "):]), "\"")
+		return strings.HasPrefix(left, right)
+	}
+
+	if idx := findTopLevelOp(cond, " ends_with "); idx > 0 {
+		left := strings.Trim(strings.TrimSpace(cond[:idx]), "\"")
+		right := strings.Trim(strings.TrimSpace(cond[idx+len(" ends_with "):]), "\"")
+		return strings.HasSuffix(left, right)
+	}
+
+	if idx := findTopLevelOp(cond, " matches "); idx > 0 {
+		left := strings.Trim(strings.TrimSpace(cond[:idx]), "\"")
+		pattern := strings.Trim(strings.TrimSpace(cond[idx+len(" matches "):]), "\"")
+		matched, _ := regexp.MatchString(pattern, left)
+		return matched
 	}
 
 	if idx := findTopLevelOp(cond, " in "); idx > 0 {
@@ -924,12 +1006,16 @@ func (e *Executor) tryApplyCloudBody(cmd *Command) error {
 }
 
 type execContext struct {
-	target    *Command
-	isPrereq  bool
-	workDir   string
-	srcFile   string
-	out       io.Writer
-	env       *[]string
+	target   *Command
+	isPrereq bool
+	workDir  string
+	srcFile  string
+	out      io.Writer
+	env      *[]string
+	runCtx   context.Context
+	// onFails holds `onfail` blocks registered so far; they run once if the
+	// command body fails. onFailRun prevents re-running through nested
+	// execBody defers.
 	onFails   []BodyStatement
 	onFailRun bool
 }
@@ -1046,20 +1132,31 @@ func (e *Executor) execBody(ctx *execContext, body []BodyStatement) (err error) 
 		case StmtFail:
 			return &FailError{Message: stmt.Message, File: ctx.srcFile, Line: stmt.SourceLine}
 
+		case StmtRequireEnv:
+			if !envIsSet(ctx, stmt.Shell) {
+				msg := fmt.Sprintf("required environment variable %s is not set", stmt.Shell)
+				if stmt.Message != "" {
+					msg += ": " + stmt.Message
+				}
+				return &FailError{Message: msg, File: ctx.srcFile, Line: stmt.SourceLine}
+			}
+
 		case StmtOnFail:
 			ctx.onFails = append(ctx.onFails, stmt.OnFailBody...)
 
 		default:
 			if e.streaming(ctx) {
 				end := i
-				for end < len(body) && body[end].Type == StmtShell {
+				for end < len(body) && body[end].Type == StmtShell && body[end].Retry == 0 {
 					end++
 				}
-				if err := e.runShellBatch(ctx, body[i:end]); err != nil {
-					return err
+				if end > i {
+					if err := e.runShellBatch(ctx, body[i:end]); err != nil {
+						return err
+					}
+					i = end - 1
+					continue
 				}
-				i = end - 1
-				continue
 			}
 			if err := e.runShell(ctx, stmt); err != nil {
 				return err
@@ -1069,12 +1166,12 @@ func (e *Executor) execBody(ctx *execContext, body []BodyStatement) (err error) 
 	return nil
 }
 
-// runOnFails executes the registered onfail statements with &fail.* context
-// set, then returns the original failure. Failures inside onfail bodies are
-// printed but do not replace the original error.
 func (e *Executor) runOnFails(ctx *execContext, cause error) error {
 	snapshot := ctx.onFails
 	ctx.onFails = nil
+	savedCtx := ctx.runCtx
+	ctx.runCtx = context.Background()
+	defer func() { ctx.runCtx = savedCtx }()
 
 	e.StructuredParse.SetVariable("fail.message", ctx.target.Name, cause.Error())
 	e.StructuredParse.SetVariable("fail.line", ctx.target.Name, strconv.Itoa(failLine(cause)))
@@ -1092,7 +1189,6 @@ func (e *Executor) runOnFails(ctx *execContext, cause error) error {
 	return cause
 }
 
-// failLine extracts the source line from a failure, when known.
 func failLine(err error) int {
 	switch e := err.(type) {
 	case *CommandError:
@@ -1191,6 +1287,14 @@ func (e *Executor) expandLoopItems(ctx *execContext, items string) []string {
 	return expanded
 }
 
+func envIsSet(ctx *execContext, name string) bool {
+	if _, ok := envLookupValue(*ctx.env, name); ok {
+		return true
+	}
+	_, ok := os.LookupEnv(name)
+	return ok
+}
+
 func (e *Executor) streaming(ctx *execContext) bool {
 	return !e.debug && !ctx.isPrereq && ctx.target.LazyEval == nil && ctx.out == nil
 }
@@ -1236,14 +1340,8 @@ func (e *Executor) runShellBatch(ctx *execContext, stmts []BodyStatement) error 
 			script = "set -e\n" + script
 		}
 		args := append(e.shellArgs, script)
-		cmd := exec.Command(e.shellName, args...)
-		if ctx.workDir != "" {
-			cmd.Dir = e.resolveWorkDir(e.resolveBodyValue(ctx, ctx.workDir, ctx.target.Name))
-		} else if e.baseDir != "" {
-			cmd.Dir = e.baseDir
-		}
-		cmd.Env = *ctx.env
-		cmd.Stdout = os.Stdout
+		cmd := e.command(ctx, args)
+		pw, prefixed := e.streamOut(ctx, cmd)
 		cmd.Stderr = os.Stderr
 
 		e.debugf("Running command %s (batched): %s\n", ctx.target.Name, e.shellName+" "+strings.Join(args, " "))
@@ -1251,6 +1349,9 @@ func (e *Executor) runShellBatch(ctx *execContext, stmts []BodyStatement) error 
 		release := e.acquire()
 		err := cmd.Run()
 		release()
+		if prefixed {
+			pw.flush()
+		}
 		if err != nil {
 			return &CommandError{
 				Cmd:      e.shellName + " " + strings.Join(args, " "),
@@ -1263,7 +1364,64 @@ func (e *Executor) runShellBatch(ctx *execContext, stmts []BodyStatement) error 
 	return nil
 }
 
+type linePrefixWriter struct {
+	mu     sync.Mutex
+	w      io.Writer
+	prefix string
+	buf    []byte
+}
+
+func (p *linePrefixWriter) Write(b []byte) (int, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.buf = append(p.buf, b...)
+	for {
+		idx := bytes.IndexByte(p.buf, '\n')
+		if idx < 0 {
+			break
+		}
+		line := p.buf[:idx+1]
+		p.w.Write(append([]byte(p.prefix), line...))
+		p.buf = p.buf[idx+1:]
+	}
+	return len(b), nil
+}
+
+func (p *linePrefixWriter) flush() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if len(p.buf) > 0 {
+		p.w.Write(append([]byte(p.prefix), p.buf...))
+		p.buf = nil
+	}
+}
+
+func (e *Executor) streamOut(ctx *execContext, cmd *exec.Cmd) (*linePrefixWriter, bool) {
+	if e.quiet {
+		cmd.Stdout = io.Discard
+		return nil, false
+	}
+	if e.prefixOutput {
+		pw := &linePrefixWriter{w: os.Stdout, prefix: "[" + ctx.target.Name + "] "}
+		cmd.Stdout = pw
+		return pw, true
+	}
+	cmd.Stdout = os.Stdout
+	return nil, false
+}
+
 func (e *Executor) runShell(ctx *execContext, stmt BodyStatement) error {
+	var lastErr error
+	for attempt := 0; ; attempt++ {
+		lastErr = e.runShellOnce(ctx, stmt)
+		if lastErr == nil || attempt >= stmt.Retry {
+			return lastErr
+		}
+		fmt.Fprintf(os.Stderr, "(!) %s failed, retrying (attempt %d/%d)\n", stmt.Shell, attempt+1, stmt.Retry+1)
+	}
+}
+
+func (e *Executor) runShellOnce(ctx *execContext, stmt BodyStatement) error {
 	cmdLine := stmt.Shell
 	if cmdLine == "" {
 		return nil
@@ -1277,14 +1435,7 @@ func (e *Executor) runShell(ctx *execContext, stmt BodyStatement) error {
 
 	cmdLine = e.resolveBodyEnvRef(ctx, cmdLine)
 	args := append(e.shellArgs, cmdLine)
-	cmd := exec.Command(e.shellName, args...)
-
-	if ctx.workDir != "" {
-		cmd.Dir = e.resolveWorkDir(e.resolveBodyValue(ctx, ctx.workDir, ctx.target.Name))
-	} else if e.baseDir != "" {
-		cmd.Dir = e.baseDir
-	}
-	cmd.Env = *ctx.env
+	cmd := e.command(ctx, args)
 
 	// A single string form is used for debug output and error messages.
 	fullCommand := e.shellName + " " + strings.Join(args, " ")
@@ -1302,10 +1453,13 @@ func (e *Executor) runShell(ctx *execContext, stmt BodyStatement) error {
 	release := e.acquire()
 	stream := !e.debug && !ctx.isPrereq && ctx.target.LazyEval == nil && ctx.out == nil
 	if stream {
-		cmd.Stdout = os.Stdout
+		pw, prefixed := e.streamOut(ctx, cmd)
 		cmd.Stderr = os.Stderr
 		err := cmd.Run()
 		release()
+		if prefixed {
+			pw.flush()
+		}
 		if err != nil && !ignoreErr {
 			return &CommandError{
 				Cmd:      fullCommand,
@@ -1379,12 +1533,13 @@ func (e *Executor) runShell(ctx *execContext, stmt BodyStatement) error {
 		e.StructuredParse.SetVariable(ctx.target.LazyEval.VarName, ctx.target.LazyEval.Scope, strOutput)
 		e.debugf("Set variable %s.%s = %s\n", ctx.target.LazyEval.Scope, ctx.target.LazyEval.VarName, strOutput)
 	default:
-		fmt.Println(strOutput)
+		if !e.quiet {
+			fmt.Println(strOutput)
+		}
 	}
 	return nil
 }
 
-// exitCodeOf extracts the process exit code from an exec error (default 1).
 func exitCodeOf(err error) int {
 	if ee, ok := err.(*exec.ExitError); ok {
 		return ee.ExitCode()
@@ -1456,9 +1611,27 @@ func (e *Executor) Execute(commands []string) error {
 		}
 	}
 	if len(errs) > 0 {
-		return errors.Join(errs...)
+		return &KeepGoingError{Errs: errs}
 	}
 	return nil
+}
+
+// KeepGoingError aggregates failures from --keep-going runs.
+type KeepGoingError struct {
+	Errs []error
+}
+
+func (e *KeepGoingError) Error() string {
+	return errors.Join(e.Errs...).Error()
+}
+
+func (e *KeepGoingError) ExitCode() int {
+	for _, err := range e.Errs {
+		if ce, ok := err.(*CommandError); ok {
+			return ce.ExitCode
+		}
+	}
+	return 1
 }
 
 func (e *Executor) execConcurrent(targets []string) error {
@@ -1486,7 +1659,7 @@ func (e *Executor) execConcurrent(targets []string) error {
 	}
 	if len(errs) > 0 {
 		if e.keepGoing {
-			return errors.Join(errs...)
+			return &KeepGoingError{Errs: errs}
 		}
 		return errs[0]
 	}
@@ -1673,7 +1846,6 @@ func (e *Executor) cacheKey(cmd *Command) string {
 	return strings.Join(parts, "|")
 }
 
-// workDirFor resolves a command's working directory, falling back to baseDir.
 func (e *Executor) workDirFor(cmd *Command, resolve func(string, string) string, workDir string) string {
 	wd := e.resolveWorkDir(resolve(workDir, cmd.Name))
 	if wd == "" {
@@ -1682,27 +1854,27 @@ func (e *Executor) workDirFor(cmd *Command, resolve func(string, string) string,
 	return wd
 }
 
-func (e *Executor) shouldSkip(cmd *Command, resolve func(string, string) string, workDir string) bool {
+func (e *Executor) shouldSkip(cmd *Command, resolve func(string, string) string, workDir string) (bool, string) {
 	files := expandFileDeps(cmd.FileDeps, e.workDirFor(cmd, resolve, workDir))
 	if len(files) == 0 {
-		return false
+		return false, ""
 	}
 
 	fc := e.cacheManifest()
 	key := e.cacheKey(cmd)
 	cached, exists := fc[key]
 	if !exists {
-		return false
+		return false, "no cached result"
 	}
 
 	hashes := parallelHash(files)
 	for i, f := range files {
 		if cached[f] != hashes[i] {
 			e.debugf("%s: file changed: %s\n", cmd.Name, f)
-			return false
+			return false, fmt.Sprintf("%s changed", f)
 		}
 	}
-	return true
+	return true, fmt.Sprintf("%d dep(s) unchanged", len(files))
 }
 
 func parallelHash(files []string) []string {
@@ -1726,16 +1898,16 @@ func parallelHash(files []string) []string {
 	return out
 }
 
-func (e *Executor) shouldSkipProduced(cmd *Command, resolve func(string, string) string, workDir string) bool {
+func (e *Executor) shouldSkipProduced(cmd *Command, resolve func(string, string) string, workDir string) (bool, string) {
 	artifacts := expandFileDeps(cmd.Produces, e.workDirFor(cmd, resolve, workDir))
 	if len(artifacts) == 0 {
-		return false
+		return false, ""
 	}
 	var newest time.Time
 	for _, a := range artifacts {
 		info, err := os.Stat(a)
 		if err != nil || info.IsDir() {
-			return false // missing artifact => must build
+			return false, fmt.Sprintf("missing artifact %s", a) // must build
 		}
 		if info.ModTime().After(newest) {
 			newest = info.ModTime()
@@ -1744,13 +1916,13 @@ func (e *Executor) shouldSkipProduced(cmd *Command, resolve func(string, string)
 	for _, d := range expandFileDeps(cmd.FileDeps, e.workDirFor(cmd, resolve, workDir)) {
 		info, err := os.Stat(d)
 		if err != nil {
-			return false
+			return false, fmt.Sprintf("missing dep %s", d)
 		}
 		if info.ModTime().After(newest) {
-			return false
+			return false, fmt.Sprintf("%s is newer than the artifacts", d)
 		}
 	}
-	return true
+	return true, "artifacts up to date"
 }
 
 func (e *Executor) updateCache(cmd *Command, resolve func(string, string) string, workDir string) {

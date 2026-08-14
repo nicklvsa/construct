@@ -25,6 +25,7 @@ construct Constfile-<name> <command>    # run a command
 | `Constfile-artifacts` (+ `example.env`) | Any | `produces` (make-style up-to-date checks), `--env-file` loading, `require()`, `--jobs`, `--watch` |
 | `Constfile-modern-features` (+ `Constfile-shared-lib`, `Constfile-shared-other`) | Multi-file | Namespaced imports (`import ... as ns`), doc comments (`--list`), per-command `env { }` blocks, `invoke` with output capture |
 | `Constfile-robustness` | Any | `@ENV:-default` env defaults, `fail "message"` guards, `onfail { }` cleanup blocks, `invoke` with arguments, `-k/--keep-going`, `--no-cache`, `--shell` |
+| `Constfile-modern-flags` | Any | `require_env`, `global` writes, `retry N`, `starts_with`/`ends_with`/`matches`, `onchange` watch globs, bare `key=value` overrides, `--explain`, `--quiet`, `--list --json`, `--jobs auto`, concurrent output prefixing, SIGINT cleanup |
 
 ## Feature Coverage
 

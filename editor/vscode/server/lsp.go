@@ -1635,7 +1635,7 @@ func isPrereqListLine(line string) bool {
 	if strings.HasPrefix(trimmed, "$") {
 		return false
 	}
-	for _, kw := range []string{"if ", "for ", "matrix ", "env ", "invoke ", "onfail ", "fail ", "else", "continue", "break"} {
+	for _, kw := range []string{"if ", "for ", "matrix ", "env ", "invoke ", "onfail ", "fail ", "global ", "require_env ", "retry ", "else", "continue", "break"} {
 		if strings.HasPrefix(trimmed, kw) {
 			return false
 		}

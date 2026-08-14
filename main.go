@@ -2,13 +2,18 @@ package main
 
 import (
 	"bufio"
+	"context"
+	"encoding/json"
 	"fmt"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"runtime"
 	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
+	"syscall"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -43,6 +48,10 @@ type options struct {
 	timing      bool
 	keepGoing   bool
 	noCache     bool
+	quiet       bool
+	explain     bool
+	json        bool
+	jobsStr     string
 	jobs        int
 	envFile     string
 	shell       string
@@ -63,9 +72,12 @@ Options:
   -v, --version     Show version information
   --debug           Enable debug mode for verbose output
   --concurrent      Execute commands and their prerequisites concurrently
-  --jobs N          Max parallel commands (implies --concurrent)
+  --jobs N          Max parallel commands (0 = unlimited, auto = CPU count)
   -k, --keep-going  Continue other targets when one fails
   --no-cache        Ignore the file-dep cache and run everything
+  --quiet, -q       Suppress command output, keep errors
+  --explain         Print why commands run or are skipped
+  --json            Machine-readable output (with --list)
   --shell PATH      Shell to run statements with
   --watch           Rerun when the Constfile or dependencies change
   --choose          Interactively select targets to run
@@ -139,6 +151,35 @@ func listCommands(data *pkg.ParsedData) {
 			fmt.Printf("    Depends on: %s\n", cmd.Prereqs)
 		}
 	}
+}
+
+func listCommandsJSON(data *pkg.ParsedData) {
+	type cmdInfo struct {
+		Name        string          `json:"name"`
+		Description string          `json:"description,omitempty"`
+		Arguments   []*pkg.Argument `json:"arguments,omitempty"`
+		Prereqs     []string        `json:"prereqs,omitempty"`
+		WorkDir     string          `json:"work_dir,omitempty"`
+		Produces    []string        `json:"produces,omitempty"`
+		IsDefault   bool            `json:"is_default"`
+	}
+	var out []cmdInfo
+	for _, cmd := range data.Commands {
+		if cmd.Name == "_" || isLazyName(cmd.Name) {
+			continue
+		}
+		out = append(out, cmdInfo{
+			Name:        cmd.Name,
+			Description: cmd.Description,
+			Arguments:   cmd.Arguments,
+			Prereqs:     cmd.Prereqs,
+			WorkDir:     cmd.WorkDir,
+			Produces:    cmd.Produces,
+			IsDefault:   cmd.IsDefault,
+		})
+	}
+	b, _ := json.MarshalIndent(out, "", "  ")
+	fmt.Println(string(b))
 }
 
 func printDryRunBody(body []pkg.BodyStatement, indent int) {
@@ -223,7 +264,10 @@ func defineFlags(fs *flag.FlagSet, o *options) {
 	fs.BoolVar(&o.timing, "timing", false, "Print per-command elapsed time")
 	fs.BoolVarP(&o.keepGoing, "keep-going", "k", false, "Continue other targets when one fails")
 	fs.BoolVar(&o.noCache, "no-cache", false, "Ignore the file-dep cache and run everything")
-	fs.IntVar(&o.jobs, "jobs", 0, "Max parallel commands (0 = unlimited)")
+	fs.BoolVarP(&o.quiet, "quiet", "q", false, "Suppress command output, keep errors")
+	fs.BoolVar(&o.explain, "explain", false, "Print why commands run or are skipped")
+	fs.BoolVar(&o.json, "json", false, "Machine-readable output (with --list)")
+	fs.StringVar(&o.jobsStr, "jobs", "", "Max parallel commands (0 = unlimited, auto = CPU count)")
 	fs.StringVar(&o.envFile, "env-file", "", "Load environment from file")
 	fs.StringVar(&o.shell, "shell", "", "Shell to run statements with (default: $SHELL)")
 	fs.StringArrayVarP(&o.overrides, "env", "e", []string{}, "Override variable (key=value)")
@@ -588,7 +632,7 @@ func chooseTargetsLine(items []chooseItem, data *pkg.ParsedData) ([]string, erro
 	}
 }
 
-func executeBuild(inputs *ConstructInput, o *options) ([]string, error) {
+func executeBuild(inputs *ConstructInput, o *options, runCtx context.Context) ([]string, error) {
 	p, err := pkg.NewParser(inputs.FileName)
 	if err != nil {
 		return nil, err
@@ -606,7 +650,10 @@ func executeBuild(inputs *ConstructInput, o *options) ([]string, error) {
 	executor.SetTiming(o.timing)
 	executor.SetNoCache(o.noCache)
 	executor.SetKeepGoing(o.keepGoing)
+	executor.SetQuiet(o.quiet)
+	executor.SetExplain(o.explain)
 	executor.SetShell(o.shell)
+	executor.SetRunContext(runCtx)
 	executor.RegisterArgumentFlags(flagSet)
 
 	flagSet.ParseErrorsWhitelist.UnknownFlags = false
@@ -640,7 +687,11 @@ func executeBuild(inputs *ConstructInput, o *options) ([]string, error) {
 	}
 
 	if o.showList {
-		listCommands(data)
+		if o.json {
+			listCommandsJSON(data)
+		} else {
+			listCommands(data)
+		}
 		return nil, nil
 	}
 
@@ -689,8 +740,8 @@ func collectWatchFiles(fileName string, data *pkg.ParsedData) []string {
 			files = append(files, sf)
 		}
 	}
-	for _, cmd := range data.Commands {
-		for _, pat := range append(append([]string{}, cmd.FileDeps...), cmd.Produces...) {
+	patterns := func(pats []string) {
+		for _, pat := range pats {
 			full := filepath.Join(baseDir, pat)
 			matches, _ := filepath.Glob(full)
 			if len(matches) == 0 {
@@ -700,15 +751,26 @@ func collectWatchFiles(fileName string, data *pkg.ParsedData) []string {
 			}
 		}
 	}
+	for _, cmd := range data.Commands {
+		patterns(append(append([]string{}, cmd.FileDeps...), cmd.Produces...))
+		patterns(cmd.OnChange)
+	}
 	return files
 }
 
-func waitForChange(files []string) bool {
+// waitForChange polls the watched files until one changes or the process
+// was interrupted.
+func waitForChange(files []string, interrupted *atomic.Bool) bool {
 	prev := fileSnapshot(files)
 	for {
-		time.Sleep(500 * time.Millisecond)
-		if !fileSnapshotEqual(prev, fileSnapshot(files)) {
-			return true
+		select {
+		case <-time.After(500 * time.Millisecond):
+			if interrupted.Load() {
+				return false
+			}
+			if !fileSnapshotEqual(prev, fileSnapshot(files)) {
+				return true
+			}
 		}
 	}
 }
@@ -739,8 +801,8 @@ func fileSnapshotEqual(a, b map[string]int64) bool {
 
 func exitError(err error) {
 	fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-	if cmdErr, ok := err.(*pkg.CommandError); ok {
-		os.Exit(cmdErr.ExitCode)
+	if ee, ok := err.(interface{ ExitCode() int }); ok {
+		os.Exit(ee.ExitCode())
 	}
 	os.Exit(1)
 }
@@ -766,7 +828,28 @@ func main() {
 		os.Exit(0)
 	}
 
-	inputs := determineInputs(flagSet.Args())
+	// Bare key=value positionals (construct deploy env=prod) become
+	// variable overrides.
+	var positionals []string
+	for _, a := range flagSet.Args() {
+		if strings.Contains(a, "=") && !fileExists(a) {
+			o.overrides = append(o.overrides, a)
+		} else {
+			positionals = append(positionals, a)
+		}
+	}
+	inputs := determineInputs(positionals)
+
+	if o.jobsStr == "auto" {
+		o.jobs = runtime.NumCPU()
+	} else if o.jobsStr != "" {
+		n, err := strconv.Atoi(o.jobsStr)
+		if err != nil || n < 0 {
+			fmt.Fprintf(os.Stderr, "invalid --jobs %q (expected a number, 0, or auto)\n", o.jobsStr)
+			os.Exit(1)
+		}
+		o.jobs = n
+	}
 
 	// Load environment variables: --env-file, or .env next to the Constfile.
 	envPath := o.envFile
@@ -785,20 +868,44 @@ func main() {
 
 	o.concurrent = o.concurrent || o.jobs > 0
 
+	// SIGINT/SIGTERM cancel the running command's process group; the
+	// resulting error flows through the normal path so onfail blocks run.
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(sigCh)
+	runCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var interrupted atomic.Bool
+	go func() {
+		for range sigCh {
+			interrupted.Store(true)
+			cancel()
+		}
+	}()
+
 	if o.watch && !o.showList && !o.dryRun {
 		for {
-			files, err := executeBuild(inputs, &o)
+			files, err := executeBuild(inputs, &o, runCtx)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				files = []string{inputs.FileName}
 			}
-			if !waitForChange(files) {
+			if !waitForChange(files, &interrupted) {
 				return
 			}
 		}
 	}
 
-	if _, err := executeBuild(inputs, &o); err != nil {
+	_, err := executeBuild(inputs, &o, runCtx)
+	if err != nil {
+		if interrupted.Load() {
+			fmt.Fprintln(os.Stderr, "interrupted")
+			os.Exit(130)
+		}
 		exitError(err)
+	}
+	if interrupted.Load() {
+		fmt.Fprintln(os.Stderr, "interrupted")
+		os.Exit(130)
 	}
 }

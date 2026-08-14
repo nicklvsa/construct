@@ -42,6 +42,12 @@
 				"scopeName": "source.constfile",
 				"path": "./syntaxes/constfile.tmLanguage.json"
 			}
+		],
+		"snippets": [
+			{
+				"language": "constfile",
+				"path": "./snippets/constfile.json"
+			}
 		]
 	},
 	"scripts": {

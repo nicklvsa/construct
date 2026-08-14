@@ -39,7 +39,7 @@
 			"patterns": [
 				{
 					"name": "keyword.control.constfile",
-					"match": "\\b(opt|if|else|for|matrix|in|contains|import|continue|break|exists|missing|glob|require|produces|env|invoke)\\b"
+					"match": "\\b(opt|if|else|for|matrix|in|contains|starts_with|ends_with|matches|import|continue|break|exists|missing|glob|require|produces|env|invoke|fail|onfail|global|require_env|retry|onchange)\\b"
 				}
 			]
 		},
@@ -143,7 +143,7 @@
 				{ "include": "#prerequisite-list" },
 				{
 					"comment": "in <dir> working directory modifier (stops before '<' so the prereq operator is tokenized separately)",
-					"match": "\\b(in)\\s+([^{}|,<]+?)\\s*(?=\\{|,|<)",
+					"match": "\\b(in)\\s+([^{}|,<]+?)\\s*(?=\\{|,|<|\\s+(?:onchange|produces)\\s)",
 					"captures": {
 						"1": { "name": "keyword.control.constfile" },
 						"2": { "name": "string.interpolated.constfile" }
