@@ -26,7 +26,6 @@ func StringValue(s string) Value { return Value{S: s} }
 
 func ListValue(items []string) Value { return Value{IsList: true, L: items} }
 
-// String is the canonical form: the value itself, or comma-joined items.
 func (v Value) String() string {
 	if v.IsList {
 		return strings.Join(v.L, ", ")
@@ -34,7 +33,6 @@ func (v Value) String() string {
 	return v.S
 }
 
-// Joined is the shell-friendly form: items space-joined.
 func (v Value) Joined() string {
 	if v.IsList {
 		return strings.Join(v.L, " ")
@@ -42,7 +40,6 @@ func (v Value) Joined() string {
 	return v.S
 }
 
-// Items returns the value as a slice.
 func (v Value) Items() []string {
 	if v.IsList {
 		return v.L
@@ -95,8 +92,6 @@ type EvalContext interface {
 	BaseDir() string
 }
 
-// LookupVariableIndexed resolves a possibly-dotted reference: the full name
-// first (namespaced vars, prereq outputs), then list indexing (&platforms.0).
 func LookupVariableIndexed(data *ParsedData, name, scope string) (Value, bool) {
 	if v, ok := data.LookupVariableValue(name, scope); ok {
 		return v, true
@@ -114,7 +109,6 @@ func LookupVariableIndexed(data *ParsedData, name, scope string) (Value, bool) {
 	return Value{}, false
 }
 
-// splitArgs splits a shell-like argument string, honoring quotes and escapes.
 func splitArgs(s string) []string {
 	var out []string
 	var cur strings.Builder
@@ -197,8 +191,6 @@ func resolveStateRefsWith(s string, lookup func(string) (string, bool)) string {
 	}
 	return b.String()
 }
-
-// ---- tokenizer ----
 
 type exprTokKind int
 
@@ -484,8 +476,6 @@ func tryStateCall(s string, j int) (end int, arg string, ok bool) {
 	return end, s[argStart:k], true
 }
 
-// ---- parser ----
-
 type exprParser struct {
 	toks []exprTok
 	pos  int
@@ -551,11 +541,17 @@ func (p *exprParser) parseBinops(next func() (Value, error), ops ...string) (Val
 	}
 }
 
-func (p *exprParser) parseOr() (Value, error)          { return p.parseBinops(p.parseAnd, "||") }
-func (p *exprParser) parseAnd() (Value, error)         { return p.parseBinops(p.parseEquality, "&&") }
-func (p *exprParser) parseEquality() (Value, error)    { return p.parseBinops(p.parseRelational, "==", "!=") }
-func (p *exprParser) parseRelational() (Value, error)  { return p.parseBinops(p.parseAdditive, ">", ">=", "<", "<=") }
-func (p *exprParser) parseAdditive() (Value, error)    { return p.parseBinops(p.parseMultiplicative, "+", "-") }
+func (p *exprParser) parseOr() (Value, error)  { return p.parseBinops(p.parseAnd, "||") }
+func (p *exprParser) parseAnd() (Value, error) { return p.parseBinops(p.parseEquality, "&&") }
+func (p *exprParser) parseEquality() (Value, error) {
+	return p.parseBinops(p.parseRelational, "==", "!=")
+}
+func (p *exprParser) parseRelational() (Value, error) {
+	return p.parseBinops(p.parseAdditive, ">", ">=", "<", "<=")
+}
+func (p *exprParser) parseAdditive() (Value, error) {
+	return p.parseBinops(p.parseMultiplicative, "+", "-")
+}
 func (p *exprParser) parseMultiplicative() (Value, error) {
 	return p.parseBinops(p.parseUnary, "*", "/", "%")
 }
@@ -740,27 +736,27 @@ var builtins = map[string]builtinDef{
 	"lower": unaryStr(strings.ToLower),
 	"trim":  unaryStr(strings.TrimSpace),
 	"abs":   unaryInt(absInt),
-	"length": builtinDef{arity: arity(1, 1), fn: func(args []Value, _ EvalContext) (Value, error) {
+	"length": {arity: arity(1, 1), fn: func(args []Value, _ EvalContext) (Value, error) {
 		if args[0].IsList {
 			return StringValue(strconv.Itoa(len(args[0].L))), nil
 		}
 		return StringValue(strconv.Itoa(utf8.RuneCountInString(args[0].S))), nil
 	}},
-	"len": builtinDef{arity: arity(1, 1), fn: func(args []Value, _ EvalContext) (Value, error) {
+	"len": {arity: arity(1, 1), fn: func(args []Value, _ EvalContext) (Value, error) {
 		if args[0].IsList {
 			return StringValue(strconv.Itoa(len(args[0].L))), nil
 		}
 		return StringValue(strconv.Itoa(utf8.RuneCountInString(args[0].S))), nil
 	}},
-	"exists": builtinDef{arity: arity(1, 1), fn: func(args []Value, ctx EvalContext) (Value, error) {
+	"exists": {arity: arity(1, 1), fn: func(args []Value, ctx EvalContext) (Value, error) {
 		_, err := os.Stat(resolveBase(args[0], ctx))
 		return boolValue(err == nil), nil
 	}},
-	"missing": builtinDef{arity: arity(1, 1), fn: func(args []Value, ctx EvalContext) (Value, error) {
+	"missing": {arity: arity(1, 1), fn: func(args []Value, ctx EvalContext) (Value, error) {
 		_, err := os.Stat(resolveBase(args[0], ctx))
 		return boolValue(err != nil), nil
 	}},
-	"glob": builtinDef{arity: arity(1, 1), fn: func(args []Value, ctx EvalContext) (Value, error) {
+	"glob": {arity: arity(1, 1), fn: func(args []Value, ctx EvalContext) (Value, error) {
 		matches, _ := filepath.Glob(resolveBase(args[0], ctx))
 		var items []string
 		for _, m := range matches {
@@ -768,18 +764,18 @@ var builtins = map[string]builtinDef{
 		}
 		return ListValue(items), nil
 	}},
-	"require": builtinDef{arity: arity(1, 1), fn: func(args []Value, _ EvalContext) (Value, error) {
+	"require": {arity: arity(1, 1), fn: func(args []Value, _ EvalContext) (Value, error) {
 		_, err := exec.LookPath(argStr(args[0]))
 		return boolValue(err == nil), nil
 	}},
-	"file": builtinDef{arity: arity(1, 1), fn: func(args []Value, ctx EvalContext) (Value, error) {
+	"file": {arity: arity(1, 1), fn: func(args []Value, ctx EvalContext) (Value, error) {
 		data, err := os.ReadFile(resolveBase(args[0], ctx))
 		if err != nil {
 			return StringValue(""), nil
 		}
 		return StringValue(strings.TrimSuffix(string(data), "\n")), nil
 	}},
-	"lines": builtinDef{arity: arity(1, 1), fn: func(args []Value, ctx EvalContext) (Value, error) {
+	"lines": {arity: arity(1, 1), fn: func(args []Value, ctx EvalContext) (Value, error) {
 		data, err := os.ReadFile(resolveBase(args[0], ctx))
 		if err != nil {
 			return ListValue(nil), nil
@@ -793,13 +789,13 @@ var builtins = map[string]builtinDef{
 		}
 		return ListValue(items), nil
 	}},
-	"sha256": builtinDef{arity: arity(1, 1), fn: func(args []Value, ctx EvalContext) (Value, error) {
+	"sha256": {arity: arity(1, 1), fn: func(args []Value, ctx EvalContext) (Value, error) {
 		return StringValue(hashFile(resolveBase(args[0], ctx))), nil
 	}},
-	"replace": builtinDef{arity: arity(3, 3), fn: func(args []Value, _ EvalContext) (Value, error) {
+	"replace": {arity: arity(3, 3), fn: func(args []Value, _ EvalContext) (Value, error) {
 		return StringValue(strings.ReplaceAll(argStr(args[0]), argStr(args[1]), argStr(args[2]))), nil
 	}},
-	"sprintf": builtinDef{arity: arity(1, -1), fn: func(args []Value, _ EvalContext) (Value, error) {
+	"sprintf": {arity: arity(1, -1), fn: func(args []Value, _ EvalContext) (Value, error) {
 		vals := make([]any, len(args)-1)
 		for i, a := range args[1:] {
 			if !a.IsList && isIntStr(a.S) {
@@ -811,28 +807,28 @@ var builtins = map[string]builtinDef{
 		}
 		return StringValue(fmt.Sprintf(argStr(args[0]), vals...)), nil
 	}},
-	"min": builtinDef{arity: arity(1, -1), fn: func(args []Value, _ EvalContext) (Value, error) {
+	"min": {arity: arity(1, -1), fn: func(args []Value, _ EvalContext) (Value, error) {
 		return minMax(args, true)
 	}},
-	"max": builtinDef{arity: arity(1, -1), fn: func(args []Value, _ EvalContext) (Value, error) {
+	"max": {arity: arity(1, -1), fn: func(args []Value, _ EvalContext) (Value, error) {
 		return minMax(args, false)
 	}},
-	"date": builtinDef{arity: arity(0, 1), fn: func(args []Value, _ EvalContext) (Value, error) {
+	"date": {arity: arity(0, 1), fn: func(args []Value, _ EvalContext) (Value, error) {
 		f := "2006-01-02"
 		if len(args) == 1 {
 			f = argStr(args[0])
 		}
 		return StringValue(time.Now().Format(f)), nil
 	}},
-	"uuid": builtinDef{arity: arity(0, 0), fn: func(_ []Value, _ EvalContext) (Value, error) {
+	"uuid": {arity: arity(0, 0), fn: func(_ []Value, _ EvalContext) (Value, error) {
 		return StringValue(newUUID()), nil
 	}},
-	"sort": builtinDef{arity: arity(1, 1), fn: func(args []Value, _ EvalContext) (Value, error) {
+	"sort": {arity: arity(1, 1), fn: func(args []Value, _ EvalContext) (Value, error) {
 		items := slices.Clone(args[0].Items())
 		sort.Strings(items)
 		return ListValue(items), nil
 	}},
-	"uniq": builtinDef{arity: arity(1, 1), fn: func(args []Value, _ EvalContext) (Value, error) {
+	"uniq": {arity: arity(1, 1), fn: func(args []Value, _ EvalContext) (Value, error) {
 		var out []string
 		seen := make(map[string]bool)
 		for _, it := range args[0].Items() {
@@ -843,23 +839,23 @@ var builtins = map[string]builtinDef{
 		}
 		return ListValue(out), nil
 	}},
-	"join": builtinDef{arity: arity(2, 2), fn: func(args []Value, _ EvalContext) (Value, error) {
+	"join": {arity: arity(2, 2), fn: func(args []Value, _ EvalContext) (Value, error) {
 		return StringValue(strings.Join(args[0].Items(), argStr(args[1]))), nil
 	}},
-	"split": builtinDef{arity: arity(2, 2), fn: func(args []Value, _ EvalContext) (Value, error) {
+	"split": {arity: arity(2, 2), fn: func(args []Value, _ EvalContext) (Value, error) {
 		var items []string
 		for part := range strings.SplitSeq(argStr(args[0]), argStr(args[1])) {
 			items = append(items, part)
 		}
 		return ListValue(items), nil
 	}},
-	"env": builtinDef{arity: arity(1, 1), fn: func(args []Value, ctx EvalContext) (Value, error) {
+	"env": {arity: arity(1, 1), fn: func(args []Value, ctx EvalContext) (Value, error) {
 		if v, ok := ctx.LookupEnv(argStr(args[0])); ok {
 			return StringValue(v), nil
 		}
 		return StringValue(""), nil
 	}},
-	"state": builtinDef{arity: arity(1, 1), fn: func(args []Value, ctx EvalContext) (Value, error) {
+	"state": {arity: arity(1, 1), fn: func(args []Value, ctx EvalContext) (Value, error) {
 		if v, ok := ctx.LookupState(argStr(args[0])); ok {
 			return StringValue(v), nil
 		}
@@ -944,8 +940,6 @@ func arityRange(arity func(int) bool) string {
 	return "1+"
 }
 
-// evalValueExprLoose evaluates s as an expression; on failure it returns the
-// substituted literal string.
 func evalValueExprLoose(s string, ctx EvalContext) Value {
 	if v, ok, err := evalValueExpr(s, ctx); err == nil && ok {
 		return v
@@ -983,9 +977,6 @@ func exprGate(s string) bool {
 	return false
 }
 
-// evalValueExpr evaluates s as an expression. ok is false when s cannot be
-// parsed as an expression (bare words, plain strings); err is non-nil only
-// when parsing succeeded but evaluation failed.
 func evalValueExpr(s string, ctx EvalContext) (Value, bool, error) {
 	if !exprGate(s) {
 		return Value{}, false, nil
