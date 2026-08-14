@@ -587,8 +587,16 @@ func (s *server) handleHover(params json.RawMessage) (interface{}, error) {
 		}
 	}
 
-	// Hover over statement keywords and builtins.
-	if word, ok := wordAtPosition(line, char); ok {
+	// Hover over the `$` shell prefix or the `!` tolerance prefix.
+	if prefixHover, ok := linePrefixHover(line, char); ok {
+		return hoverResult{
+			Contents: markupContent{Kind: "markdown", Value: prefixHover},
+		}, nil
+	}
+
+	// Hover over statement keywords and builtins — never inside a shell
+	// line: everything after a `$` is shell code, not construct syntax.
+	if word, ok := wordAtPosition(line, char); ok && !shellLineContentAt(line, char) {
 		if msg, found := keywordHover(word); found {
 			return hoverResult{
 				Contents: markupContent{Kind: "markdown", Value: msg},
@@ -1872,6 +1880,32 @@ func lastResultHover(name string) (string, bool) {
 	return "", false
 }
 
+// linePrefixHover explains the `$` shell prefix and the `!` tolerance
+// marker when hovered at the start of a body line.
+func linePrefixHover(line string, char int) (string, bool) {
+	trimmed := strings.TrimLeft(line, " \t")
+	lead := len(line) - len(trimmed)
+	if char != lead || trimmed == "" {
+		return "", false
+	}
+	switch trimmed[0] {
+	case '$':
+		return "`$` prefix — runs this line through the shell.\n\nA **bare** line (no `$`) starting with a builtin name (`cp`, `rm`, `mkdir`, `touch`, `download`, `extract`) runs as a cross-platform builtin instead; use `$ cp ...` to force the shell's version.", true
+	case '!':
+		return "`!` prefix — error-tolerant: a non-zero exit does not abort the command.\n\nThe outcome is available to later statements via `&last.exit` and `&last.output`.", true
+	}
+	return "", false
+}
+
+// shellLineContentAt reports whether char sits in the shell portion of a
+// line: anything after a `$` is shell code, not construct syntax.
+func shellLineContentAt(line string, char int) bool {
+	if idx := strings.IndexByte(line, '$'); idx >= 0 && char > idx {
+		return true
+	}
+	return false
+}
+
 func keywordHover(word string) (string, bool) {
 	switch word {
 	case "switch":
@@ -1895,17 +1929,17 @@ func keywordHover(word string) (string, bool) {
 	case "timeout":
 		return "`timeout 30s $ cmd` or `cmd timeout 30s { ... }`\n\nCaps the statement (or whole command) at the duration; a hit is reported as exit 124.", true
 	case "cp":
-		return "builtin: `cp <src> <dst>`\n\nCopies a file or directory recursively, cross-platform. Prefix with `$` to use the shell's cp instead.", true
+		return "builtin: `cp <src> <dst>`\n\nCopies a file or directory recursively, cross-platform.\n\nBare `cp` runs the builtin; `$ cp` runs the shell's cp.", true
 	case "rm":
-		return "builtin: `rm <path>`\n\nRemoves a file or directory recursively; refuses to remove the base directory or its ancestors.", true
+		return "builtin: `rm <path>`\n\nRemoves a file or directory recursively; refuses to remove the base directory or its ancestors.\n\nBare `rm` runs the builtin; `$ rm` runs the shell's rm.", true
 	case "mkdir":
-		return "builtin: `mkdir <path>`\n\nCreates a directory (and its parents).", true
+		return "builtin: `mkdir <path>`\n\nCreates a directory (and its parents).\n\nBare `mkdir` runs the builtin; `$ mkdir` runs the shell's mkdir.", true
 	case "touch":
-		return "builtin: `touch <path>`\n\nCreates the file if missing, otherwise updates its mtime.", true
+		return "builtin: `touch <path>`\n\nCreates the file if missing, otherwise updates its mtime.\n\nBare `touch` runs the builtin; `$ touch` runs the shell's touch.", true
 	case "download":
-		return "builtin: `download <url> <dst>`\n\nDownloads a URL to a file with a progress bar on TTYs.", true
+		return "builtin: `download <url> <dst>`\n\nDownloads a URL to a file with a progress bar on TTYs.\n\nBare `download` runs the builtin; `$ download` runs the shell's download.", true
 	case "extract":
-		return "builtin: `extract <archive> <dir>`\n\nExtracts `.zip`, `.tar`, `.tar.gz`/`.tgz` or `.tar.bz2` archives; entries escaping the destination are refused.", true
+		return "builtin: `extract <archive> <dir>`\n\nExtracts `.zip`, `.tar`, `.tar.gz`/`.tgz` or `.tar.bz2` archives; entries escaping the destination are refused.\n\nBare `extract` runs the builtin; `$ extract` runs the shell's extract.", true
 	}
 	return "", false
 }

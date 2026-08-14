@@ -280,6 +280,43 @@ func TestLSPCaseOutsideSwitchDiagnostic(t *testing.T) {
 	}
 }
 
+func TestLSPBuiltinShellPrecedenceHover(t *testing.T) {
+	text := `cmd {
+    cp a b
+    $ cp a b
+    rm x
+    $ rm x
+    ! $ false
+}
+`
+	// Hover on the bare builtin name shows the builtin hover.
+	got, ok := hoverAt(t, text, 1, 5)
+	if !ok || !strings.Contains(got, "Bare `cp` runs the builtin; `$ cp` runs the shell's cp") {
+		t.Errorf("bare cp hover = %q (ok=%v)", got, ok)
+	}
+	got, ok = hoverAt(t, text, 3, 5)
+	if !ok || !strings.Contains(got, "Bare `rm` runs the builtin; `$ rm` runs the shell's rm") {
+		t.Errorf("bare rm hover = %q (ok=%v)", got, ok)
+	}
+	// Hovering the same word inside a `$` shell line shows NO construct hover.
+	if got, ok := hoverAt(t, text, 2, 8); ok || strings.Contains(got, "builtin") {
+		t.Errorf("$ cp should not show a builtin hover, got %q (ok=%v)", got, ok)
+	}
+	if got, ok := hoverAt(t, text, 4, 8); ok || strings.Contains(got, "builtin") {
+		t.Errorf("$ rm should not show a builtin hover, got %q (ok=%v)", got, ok)
+	}
+	// Hover on the $ prefix explains the precedence rule.
+	got, ok = hoverAt(t, text, 2, 4)
+	if !ok || !strings.Contains(got, "bare") || !strings.Contains(got, "builtin") {
+		t.Errorf("$ prefix hover = %q (ok=%v)", got, ok)
+	}
+	// Hover on the ! tolerance marker.
+	got, ok = hoverAt(t, text, 5, 4)
+	if !ok || !strings.Contains(got, "error-tolerant") || !strings.Contains(got, "last.exit") {
+		t.Errorf("! prefix hover = %q (ok=%v)", got, ok)
+	}
+}
+
 func TestLSPLastResultCompletion(t *testing.T) {
 	text := `cmd {
     ! $ exit 3
