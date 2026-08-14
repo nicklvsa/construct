@@ -16,7 +16,7 @@ install in editor/vscode {
 # Packages and installs the host-platform extension.
 build-ext in editor/vscode < build-lsp, install {
     var vsix_version = $ cd editor/vscode && node -p "require('./package.json').version"
-    $ npx @vscode/vsce@latest package --no-yarn
+    timeout 10m $ npx @vscode/vsce@latest package --no-yarn
     $ code --install-extension constfile-&vsix_version.vsix --force as final_out
 }
 
@@ -38,9 +38,14 @@ build-all < install {
             env { VSCEARCH=x64 }
         }
         $ echo "==> @VSCEOS-@VSCEARCH (GOOS=&goos GOARCH=&arch)"
-        $ rm -f editor/vscode/server/construct-lsp editor/vscode/server/construct-lsp.exe
-        $ cd editor/vscode/server && GOOS=&goos GOARCH=&arch go build -o construct-lsp@SUFFIX .
-        $ cd editor/vscode && npx @vscode/vsce@latest package --target "@VSCEOS-@VSCEARCH" --no-yarn
+        rm editor/vscode/server/construct-lsp editor/vscode/server/construct-lsp.exe
+        in editor/vscode/server {
+            env { GOOS=&goos, GOARCH=&arch }
+            timeout 5m $ go build -o construct-lsp@SUFFIX .
+        }
+        in editor/vscode {
+            timeout 10m $ npx @vscode/vsce@latest package --target "@VSCEOS-@VSCEARCH" --no-yarn
+        }
     }
 }
 
