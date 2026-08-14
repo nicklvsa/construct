@@ -999,7 +999,7 @@ func TestEscapeHatch(t *testing.T) {
 	if got := resolveVarRefs(`echo "\&foo \@BAR"`, func(string) (string, bool) { return "X", true }); got != `echo "&foo \@BAR"` {
 		t.Errorf("resolveVarRefs escape = %q", got)
 	}
-	if got := resolveEnvRefs(`echo "\&foo \@BAR"`); got != `echo "\&foo @BAR"` {
+	if got := ResolveEnvRefs(`echo "\&foo \@BAR"`); got != `echo "\&foo @BAR"` {
 		t.Errorf("resolveEnvRefs escape = %q", got)
 	}
 
@@ -1898,7 +1898,7 @@ func TestEnvRefDefault(t *testing.T) {
 	os.Unsetenv(name)
 	defer os.Unsetenv(name)
 
-	if got := resolveEnvRefs("echo @CONSTRUCT_TEST_DEF_X:-hello"); got != "echo hello" {
+	if got := ResolveEnvRefs("echo @CONSTRUCT_TEST_DEF_X:-hello"); got != "echo hello" {
 		t.Errorf("unset with default = %q", got)
 	}
 	if got := resolveEnvRefsKeepUnset("echo @CONSTRUCT_TEST_DEF_X:-hello"); got != "echo hello" {
@@ -1906,7 +1906,7 @@ func TestEnvRefDefault(t *testing.T) {
 	}
 	os.Setenv(name, "real")
 	defer os.Unsetenv(name)
-	if got := resolveEnvRefs("echo @CONSTRUCT_TEST_DEF_X:-hello"); got != "echo real" {
+	if got := ResolveEnvRefs("echo @CONSTRUCT_TEST_DEF_X:-hello"); got != "echo real" {
 		t.Errorf("set env should win: %q", got)
 	}
 	// No default: unset stays literal for keep-unset, empty otherwise.

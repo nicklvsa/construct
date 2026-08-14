@@ -3,6 +3,7 @@ package pkg
 import (
 	"io"
 	"os"
+	"path/filepath"
 	"runtime"
 	"slices"
 	"strings"
@@ -668,8 +669,8 @@ func TestResolveRefsBehavior(t *testing.T) {
 		{"echo \\@CONSTRUCT_TEST_ENV", "echo @CONSTRUCT_TEST_ENV"}, // escaped stays literal
 	}
 	for _, tc := range envCases {
-		if got := resolveEnvRefs(tc.in); got != tc.want {
-			t.Errorf("resolveEnvRefs(%q) = %q, want %q", tc.in, got, tc.want)
+		if got := ResolveEnvRefs(tc.in); got != tc.want {
+			t.Errorf("ResolveEnvRefs(%q) = %q, want %q", tc.in, got, tc.want)
 		}
 	}
 
@@ -789,8 +790,10 @@ func TestEvaluateCommandLazyVariable(t *testing.T) {
 	data.buildIndexMaps()
 
 	executor := NewExecutor(data, false, false)
-	if err := executor.Execute(nil); err != nil {
-		t.Fatalf("Execute failed: %v", err)
+	// Global lazy variables evaluate even when no target is requested, but
+	// Execute still reports that there was nothing to run.
+	if err := executor.Execute(nil); err == nil {
+		t.Fatal("Execute(nil) with no default command should fail")
 	}
 
 	v, err := data.GetVariable("dyn", "global")
@@ -932,8 +935,17 @@ func TestEvaluateCommandUnsetArgEmpty(t *testing.T) {
 	}
 }
 
-func TestTryApplyCloudBody(t *testing.T) {
-	t.Setenv("CONSTRUCT_CLOUD_FILE", "testdata/cloud_test.json")
+func TestBodyFor(t *testing.T) {
+	dir := t.TempDir()
+	cloudFile := filepath.Join(dir, "cloud.json")
+	defs := map[string]Command{
+		"fetch": {Name: "fetch", Body: []BodyStatement{{Type: StmtShell, Shell: "echo remote"}}},
+	}
+	cloudData, _ := jsonMarshal(defs)
+	if err := os.WriteFile(cloudFile, cloudData, 0644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CONSTRUCT_CLOUD_FILE", cloudFile)
 
 	data := &ParsedData{
 		Commands: []*Command{
@@ -947,11 +959,30 @@ func TestTryApplyCloudBody(t *testing.T) {
 	t.Run("non-cloud command unchanged", func(t *testing.T) {
 		cmd := &Command{Name: "local", Body: shellBody("echo local")}
 		before := append([]BodyStatement(nil), cmd.Body...)
-		if err := executor.tryApplyCloudBody(cmd); err != nil {
-			t.Fatalf("unexpected error: %v", err)
+		body := executor.bodyFor(cmd)
+		if len(body) != len(before) {
+			t.Errorf("body changed: %#v vs %#v", body, before)
 		}
 		if len(cmd.Body) != len(before) {
-			t.Errorf("body changed: %#v vs %#v", cmd.Body, before)
+			t.Errorf("cmd.Body mutated: %#v vs %#v", cmd.Body, before)
+		}
+	})
+
+	t.Run("cloud body combined without mutating cmd", func(t *testing.T) {
+		cmd := &Command{Name: "fetch", CloudAccessible: true, Body: shellBody("echo local")}
+		body := executor.bodyFor(cmd)
+		if len(cmd.Body) != 1 {
+			t.Errorf("cmd.Body mutated: %d stmts, want 1", len(cmd.Body))
+		}
+		if len(body) != 2 {
+			t.Errorf("combined body = %d stmts, want 2", len(body))
+		}
+	})
+
+	t.Run("cloud command with no definition unchanged", func(t *testing.T) {
+		cmd := &Command{Name: "missing", CloudAccessible: true, Body: shellBody("echo local")}
+		if body := executor.bodyFor(cmd); len(body) != 1 {
+			t.Errorf("body = %d stmts, want 1", len(body))
 		}
 	})
 }
@@ -1089,5 +1120,23 @@ func TestNamedOutput(t *testing.T) {
 	}
 	if gen.NamedOutput == nil || gen.NamedOutput["greeting"] != "hello" {
 		t.Errorf("named output = %#v, want greeting=\"hello\"", gen.NamedOutput)
+	}
+}
+
+func TestConcurrentSharedPrereq(t *testing.T) {
+	// Two parents sharing one prereq exercise the concurrent paths around
+	// IsPrereq/WorkDir mutation and prereq output collection; run with
+	// -race to catch data races.
+	data := &ParsedData{
+		Commands: []*Command{
+			{Name: "a", Prereqs: []string{"shared"}, Body: nil},
+			{Name: "b", Prereqs: []string{"shared"}, Body: nil},
+			{Name: "shared", Body: shellBody("echo shared")},
+		},
+	}
+	data.buildIndexMaps()
+	e := NewExecutor(data, true, false)
+	if err := e.Execute([]string{"a", "b"}); err != nil {
+		t.Fatalf("Execute: %v", err)
 	}
 }

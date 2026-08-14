@@ -5,7 +5,9 @@ import (
 	"context"
 	"embed"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -27,7 +29,7 @@ import (
 	"golang.org/x/term"
 )
 
-const version = "0.1.0"
+const version = "0.2.0"
 
 func debugf(on bool, format string, args ...interface{}) {
 	if on {
@@ -144,18 +146,22 @@ func getPlatformConstfile() string {
 	return fmt.Sprintf("Constfile-%s", runtime.GOOS)
 }
 
+// defaultConstfileName prefers Constfile, else Constfile-$GOOS when only that exists.
+func defaultConstfileName() string {
+	if fileExists(getPlatformConstfile()) && !fileExists("Constfile") {
+		return getPlatformConstfile()
+	}
+	return "Constfile"
+}
+
 func fileExists(path string) bool {
 	_, err := os.Stat(path)
 	return err == nil
 }
-func isLazyName(name string) bool {
-	return strings.HasPrefix(name, "__lazy_") || strings.Contains(name, ".__lazy_")
-}
-
 func listCommands(data *pkg.ParsedData) {
 	fmt.Println("Available commands:")
 	for _, cmd := range data.Commands {
-		if cmd.Name == "_" || isLazyName(cmd.Name) {
+		if cmd.Name == "_" || pkg.IsLazyName(cmd.Name) {
 			continue
 		}
 		if cmd.IsDefault {
@@ -210,7 +216,7 @@ func listCommandsJSON(data *pkg.ParsedData) {
 	}
 	var out []cmdInfo
 	for _, cmd := range data.Commands {
-		if cmd.Name == "_" || isLazyName(cmd.Name) {
+		if cmd.Name == "_" || pkg.IsLazyName(cmd.Name) {
 			continue
 		}
 		out = append(out, cmdInfo{
@@ -315,11 +321,7 @@ func printDryRunBody(body []pkg.BodyStatement, indent int) {
 }
 
 func determineInputs(remaining []string) *ConstructInput {
-	defaultFileName := "Constfile"
-	platformFile := getPlatformConstfile()
-	if fileExists(platformFile) && !fileExists(defaultFileName) {
-		defaultFileName = platformFile
-	}
+	defaultFileName := defaultConstfileName()
 
 	if len(remaining) > 0 {
 		info, err := os.Stat(remaining[0])
@@ -426,7 +428,6 @@ func (s *chooseState) moveEnd() {
 	}
 }
 
-// toggle selects or deselects the item under the cursor and moves down.
 func (s *chooseState) toggle() {
 	vis := s.filtered()
 	if len(vis) == 0 {
@@ -464,7 +465,6 @@ func (s *chooseState) clearFilter() {
 	s.cursor = 0
 }
 
-// selectedNames returns the chosen commands in the picker's original order.
 func (s *chooseState) selectedNames() []string {
 	var out []string
 	for _, it := range s.all {
@@ -607,7 +607,7 @@ func termSize(lastW, lastH int) (int, int) {
 func chooseTargets(data *pkg.ParsedData) ([]string, error) {
 	var items []chooseItem
 	for _, cmd := range data.Commands {
-		if cmd.Name == "_" || isLazyName(cmd.Name) {
+		if cmd.Name == "_" || pkg.IsLazyName(cmd.Name) {
 			continue
 		}
 		desc := ""
@@ -743,7 +743,9 @@ func executeBuild(inputs *ConstructInput, o *options, runCtx context.Context) ([
 		return nil, err
 	}
 
-	flagSet := flag.NewFlagSet("construct", flag.ExitOnError)
+	// Strict second parse so per-command argument flags (--cmd:arg) are recognized.
+	flagSet := flag.NewFlagSet("construct", flag.ContinueOnError)
+	flagSet.SetOutput(io.Discard)
 	defineFlags(flagSet, &options{})
 	executor := pkg.NewExecutor(data, o.concurrent, o.debug)
 	executor.SetBaseDir(filepath.Dir(inputs.FileName))
@@ -811,7 +813,7 @@ func executeBuild(inputs *ConstructInput, o *options, runCtx context.Context) ([
 	if o.dryRun {
 		fmt.Println("Dry run mode - commands that would be executed:")
 		for _, cmd := range data.Commands {
-			if isLazyName(cmd.Name) {
+			if pkg.IsLazyName(cmd.Name) {
 				continue
 			}
 			if len(inputs.Commands) == 0 || slices.Contains(inputs.Commands, cmd.Name) {
@@ -831,11 +833,13 @@ func executeBuild(inputs *ConstructInput, o *options, runCtx context.Context) ([
 		return nil, nil
 	}
 
-	if err := executor.Execute(inputs.Commands); err != nil {
-		return nil, err
-	}
+	execErr := executor.Execute(inputs.Commands)
 	if o.flame {
+		// Render even on failure — the flame graph is most useful then.
 		renderFlame(executor.FlameRows())
+	}
+	if execErr != nil {
+		return nil, execErr
 	}
 	return collectWatchFiles(inputs.FileName, data), nil
 }
@@ -860,7 +864,8 @@ func collectWatchFiles(fileName string, data *pkg.ParsedData) []string {
 		}
 	}
 	for _, cmd := range data.Commands {
-		patterns(append(append([]string{}, cmd.FileDeps...), cmd.Produces...))
+		patterns(cmd.FileDeps)
+		patterns(cmd.Produces)
 		patterns(cmd.OnChange)
 	}
 	return files
@@ -903,8 +908,25 @@ func fileSnapshotEqual(a, b map[string]int64) bool {
 	return true
 }
 
+// exitCodeError carries a process exit code; an empty message means the
+// caller already printed its diagnostics.
+type exitCodeError struct {
+	err  error
+	code int
+}
+
+func (e *exitCodeError) Error() string { return e.err.Error() }
+func (e *exitCodeError) Unwrap() error { return e.err }
+func (e *exitCodeError) ExitCode() int { return e.code }
+
+func exitAt(code int, format string, args ...any) error {
+	return &exitCodeError{err: fmt.Errorf(format, args...), code: code}
+}
+
 func exitError(err error) {
-	fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+	if msg := err.Error(); msg != "" {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+	}
 	if ee, ok := err.(interface{ ExitCode() int }); ok {
 		os.Exit(ee.ExitCode())
 	}
@@ -921,10 +943,7 @@ func isSubcommandName(s string) bool {
 }
 
 func commandExistsInConstfile(name string) bool {
-	fileName := "Constfile"
-	if fileExists(getPlatformConstfile()) && !fileExists(fileName) {
-		fileName = getPlatformConstfile()
-	}
+	fileName := defaultConstfileName()
 	if !fileExists(fileName) {
 		return false
 	}
@@ -951,7 +970,7 @@ func parseConstfileOptional(fileName string) (*pkg.ParsedData, error) {
 	return p.Parse()
 }
 
-func runInit(args []string, o *options) {
+func runInit(args []string, o *options) error {
 	template := o.template
 	fileName := o.fileName
 	force := o.force
@@ -963,29 +982,28 @@ func runInit(args []string, o *options) {
 	}
 	for _, a := range args {
 		if strings.HasPrefix(a, "-") {
-			fmt.Fprintf(os.Stderr, "unknown init option %q\n", a)
-			os.Exit(2)
+			return exitAt(2, "unknown init option %q", a)
 		}
 		template = a
 	}
 	if _, err := os.Stat(fileName); err == nil && !force {
-		fmt.Fprintf(os.Stderr, "%s already exists (use --force to overwrite)\n", fileName)
-		os.Exit(1)
+		return fmt.Errorf("%s already exists (use --force to overwrite)", fileName)
 	}
 	content, err := initTemplates.ReadFile("init-templates/" + template + ".constfile")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "unknown template %q (available: minimal, go, python, node, rust, monorepo)\n", template)
-		os.Exit(1)
+		return fmt.Errorf("unknown template %q (available: minimal, go, python, node, rust, monorepo)", template)
 	}
 	if err := os.WriteFile(fileName, content, 0644); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
+		return err
 	}
 	fmt.Printf("created %s from the %q template\n", fileName, template)
 	fmt.Println("next: construct --list")
+	return nil
 }
 
-func runDoctor(o *options, inputs *ConstructInput) {
+var doctorRequireRe = regexp.MustCompile(`require\(\s*"([^"]+)"`)
+
+func runDoctor(o *options, inputs *ConstructInput) error {
 	problems := 0
 	fail := func(format string, args ...any) {
 		problems++
@@ -1039,18 +1057,17 @@ func runDoctor(o *options, inputs *ConstructInput) {
 	data, err := parseConstfileOptional(inputs.FileName)
 	if err != nil {
 		fail("Constfile: %v", err)
-		exitErrorWithCode(1)
+		return errDoctorFailed
 	}
 	if data == nil {
 		fmt.Println("no Constfile found — run `construct init` to scaffold one")
-		return
+		return nil
 	}
 	pass("Constfile: %d command(s), %d variable(s)", len(data.Commands), len(data.Variables))
 
-	requireRe := regexp.MustCompile(`require\(\s*"([^"]+)"`)
 	for _, cmd := range data.Commands {
 		for _, stmt := range collectAllStatements(cmd.Body) {
-			for _, m := range requireRe.FindAllStringSubmatch(stmt.Cond, -1) {
+			for _, m := range doctorRequireRe.FindAllStringSubmatch(stmt.Cond, -1) {
 				tool := m[1]
 				if _, err := exec.LookPath(tool); err != nil {
 					fail("command %q requires tool %q, which is not on PATH", cmd.Name, tool)
@@ -1095,7 +1112,7 @@ func runDoctor(o *options, inputs *ConstructInput) {
 		}
 	}
 	for _, cmd := range data.Commands {
-		if cmd.Name == "_" || strings.Contains(cmd.Name, "__lazy_") {
+		if cmd.Name == "_" || pkg.IsLazyName(cmd.Name) {
 			continue
 		}
 		if !referenced[cmd.Name] {
@@ -1107,14 +1124,13 @@ func runDoctor(o *options, inputs *ConstructInput) {
 		fmt.Println("(warnings above are informational)")
 	}
 	if problems > 0 {
-		exitErrorWithCode(1)
+		return errDoctorFailed
 	}
 	fmt.Println("no problems found")
+	return nil
 }
 
-func exitErrorWithCode(code int) {
-	os.Exit(code)
-}
+var errDoctorFailed = errors.New("doctor found problems (see [FAIL] entries above)")
 
 func collectAllStatements(body []pkg.BodyStatement) []pkg.BodyStatement {
 	var out []pkg.BodyStatement
@@ -1140,27 +1156,17 @@ func collectAllStatements(body []pkg.BodyStatement) []pkg.BodyStatement {
 }
 
 func markRefs(used map[string]bool, s string) {
-	for i := 0; i < len(s); i++ {
-		if s[i] == '&' {
-			j := i + 1
-			for j < len(s) && (s[j] == '_' || s[j] == '-' || s[j] == '.' ||
-				(s[j] >= 'a' && s[j] <= 'z') || (s[j] >= 'A' && s[j] <= 'Z') || (s[j] >= '0' && s[j] <= '9')) {
-				j++
-			}
-			if j > i+1 {
-				used[s[i+1:j]] = true
-			}
-			i = j - 1
-		}
+	for _, name := range pkg.VarRefNames(s) {
+		used[name] = true
 	}
 }
 
-func runStats(o *options, inputs *ConstructInput) {
+func runStats(o *options, inputs *ConstructInput) error {
 	dir := filepath.Join(filepath.Dir(inputs.FileName), ".construct-cache")
 	hist := pkg.LoadRunHistory(dir)
 	if len(hist) == 0 {
 		fmt.Println("no run records yet (run a build first)")
-		return
+		return nil
 	}
 	names := make([]string, 0, len(hist))
 	for n := range hist {
@@ -1180,6 +1186,7 @@ func runStats(o *options, inputs *ConstructInput) {
 		avg := total / int64(len(recs))
 		fmt.Printf("%-20s %5d %10s %10s %10s %s\n", n, len(recs), durMs(avg), durMs(last.DurationMs), durMs(total), last.Status)
 	}
+	return nil
 }
 
 func sumMs(recs []pkg.RunRecord) int64 {
@@ -1197,9 +1204,9 @@ func durMs(ms int64) string {
 	return (time.Duration(ms) * time.Millisecond).Round(time.Millisecond).String()
 }
 
-func runCloud(args []string, o *options, inputs *ConstructInput) {
+func runCloud(args []string, o *options, inputs *ConstructInput) error {
 	if len(args) == 0 {
-		cloudUsage()
+		return cloudUsage()
 	}
 	sub := args[0]
 	rest := args[1:]
@@ -1208,8 +1215,7 @@ func runCloud(args []string, o *options, inputs *ConstructInput) {
 	exec := pkg.NewExecutor(&pkg.ParsedData{}, o.debug, false)
 	exec.SetBaseDir(baseDir)
 	if data, err := parseConstfileOptional(inputs.FileName); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
+		return err
 	} else if data != nil {
 		exec.SetParsedData(data)
 	}
@@ -1218,12 +1224,11 @@ func runCloud(args []string, o *options, inputs *ConstructInput) {
 	case "list":
 		entries, err := exec.CloudList()
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			os.Exit(1)
+			return err
 		}
 		if len(entries) == 0 {
 			fmt.Println("no cloud definitions")
-			return
+			return nil
 		}
 		fmt.Printf("%-20s %s\n", "name", "statements")
 		for _, en := range entries {
@@ -1232,8 +1237,7 @@ func runCloud(args []string, o *options, inputs *ConstructInput) {
 	case "pull":
 		n, err := exec.CloudPull(rest, o.output)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			os.Exit(1)
+			return err
 		}
 		target := o.output
 		if target == "" {
@@ -1243,22 +1247,77 @@ func runCloud(args []string, o *options, inputs *ConstructInput) {
 	case "push":
 		n, err := exec.CloudPush(rest, o.fileName)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			os.Exit(1)
+			return err
 		}
 		fmt.Printf("pushed %d command(s) into the cloud file\n", n)
 	case "submit":
-		runCloudSubmit(rest, o)
+		return runCloudSubmit(rest, o)
 	case "status":
-		runCloudStatus(rest, o)
+		return runCloudStatus(rest, o)
 	case "logs":
-		runCloudLogs(rest, o)
+		return runCloudLogs(rest, o)
 	case "cancel":
-		runCloudCancel(rest, o)
+		return runCloudCancel(rest, o)
 	case "init-actions":
-		runCloudInitActions(rest)
+		return runCloudInitActions(rest)
 	default:
-		cloudUsage()
+		return cloudUsage()
+	}
+	return nil
+}
+
+// flameBlocks are partial-fill runes for sub-cell bar precision (eighths).
+const flameBlocks = " ▏▎▍▌▋▊▉█"
+
+var flameBlockRunes = []rune(flameBlocks)
+
+// flameHeatRamp is a cool-to-hot 256-color gradient; longer spans land hotter.
+var flameHeatRamp = []int{61, 67, 68, 74, 73, 79, 78, 84, 83, 82, 118, 154, 148, 190, 184, 226, 220, 214, 208, 202, 196}
+
+func heatColor(share float64) int {
+	idx := int(share*float64(len(flameHeatRamp)-1) + 0.5)
+	return flameHeatRamp[min(max(idx, 0), len(flameHeatRamp)-1)]
+}
+
+// flameBar renders one timeline bar from start/duration fractions of the run.
+func flameBar(offset, share float64, width int, failed, color bool) string {
+	cells := make([]rune, width)
+	for i := range cells {
+		cells[i] = ' '
+	}
+	startCell := min(int(offset*float64(width)), width-1)
+	if startCell < 0 {
+		startCell = 0
+	}
+	fill := share * float64(width)
+	full := int(fill)
+	for i := 0; i < full && startCell+i < width; i++ {
+		cells[startCell+i] = '█'
+	}
+	if frac := fill - float64(full); frac >= 0.125 && startCell+full < width {
+		cells[startCell+full] = flameBlockRunes[int(frac*8+0.5)]
+	} else if full == 0 && fill > 0 && startCell < width {
+		cells[startCell] = flameBlockRunes[1] // tiny span: keep a visible sliver
+	}
+	bar := string(cells)
+	if !color {
+		return bar
+	}
+	if failed {
+		return "\x1b[1;91m" + bar + "\x1b[0m"
+	}
+	return fmt.Sprintf("\x1b[38;5;%dm%s\x1b[0m", heatColor(share), bar)
+}
+
+// flameDur formats a duration compactly: 1.24s, 412.3ms, 87µs.
+func flameDur(d time.Duration) string {
+	switch {
+	case d >= time.Second:
+		return d.Round(10 * time.Millisecond).String()
+	case d >= time.Millisecond:
+		return d.Round(100 * time.Microsecond).String()
+	default:
+		return d.Round(10 * time.Microsecond).String()
 	}
 }
 
@@ -1266,8 +1325,12 @@ func renderFlame(rows []pkg.FlameRow) {
 	if len(rows) == 0 {
 		return
 	}
-	start, end := rows[0].Start, rows[0].End
-	for _, r := range rows {
+	// Chronological order: parents start before their children.
+	sorted := slices.Clone(rows)
+	slices.SortStableFunc(sorted, func(a, b pkg.FlameRow) int { return a.Start.Compare(b.Start) })
+
+	start, end := sorted[0].Start, sorted[0].End
+	for _, r := range sorted {
 		if r.Start.Before(start) {
 			start = r.Start
 		}
@@ -1279,39 +1342,50 @@ func renderFlame(rows []pkg.FlameRow) {
 	if total <= 0 {
 		total = time.Millisecond
 	}
+
 	width := 100
 	if w, _, err := term.GetSize(int(os.Stdout.Fd())); err == nil && w > 80 {
 		width = w - 4
 	}
-	labelW := min(width/3, 30)
-	barW := width - labelW - 14
+	labelW := min(width/3, 34)
+	// Row layout: mark(1) label(labelW) sp(1) bar(barW) sp(1) pct(6) sp(1) dur(9).
+	barW := width - labelW - 19
 	if barW < 20 {
 		barW = 20
 	}
-	fmt.Printf("\nflame: %d statement(s), total %s\n", len(rows), total.Round(time.Millisecond))
-	for _, r := range rows {
-		pos := int(float64(r.Start.Sub(start)) / float64(total) * float64(barW))
-		span := int(float64(r.End.Sub(r.Start)) / float64(total) * float64(barW))
-		if span < 1 {
-			span = 1
-		}
-		if pos > barW-1 {
-			pos = barW - 1
-		}
-		if pos+span > barW {
-			span = barW - pos
-		}
+	rowW := labelW + barW + 19
+	useColor := os.Getenv("NO_COLOR") == "" && term.IsTerminal(int(os.Stdout.Fd()))
+
+	fmt.Printf("\n flame · %d statement(s) · %s total\n", len(sorted), flameDur(total))
+	sep := strings.Repeat("─", rowW)
+	if useColor {
+		sep = "\x1b[2m" + sep + "\x1b[0m"
+	}
+	fmt.Println(sep)
+	for _, r := range sorted {
+		dur := r.End.Sub(r.Start)
+		share := float64(dur) / float64(total)
+
 		label := strings.Repeat("  ", r.Depth) + r.Label
 		if utf8.RuneCountInString(label) > labelW {
 			label = string([]rune(label)[:labelW-1]) + "…"
 		}
-		color, reset := "", ""
+		mark := " "
+		labelColor, labelReset := "", ""
 		if r.Failed {
-			color, reset = "\x1b[31m", "\x1b[0m"
+			mark = "✗"
+			if useColor {
+				labelColor, labelReset = "\x1b[1;91m", "\x1b[0m"
+			}
 		}
-		dur := r.End.Sub(r.Start).Round(time.Millisecond)
-		fmt.Printf("%-*s %s%s%s %10s\n", labelW, label, color,
-			strings.Repeat(" ", pos)+strings.Repeat("█", span), reset, dur)
+		// Pad by visible runes: printf would pad by bytes and the label can
+		// contain multibyte characters.
+		pad := strings.Repeat(" ", max(labelW-utf8.RuneCountInString(label), 0))
+
+		bar := flameBar(float64(r.Start.Sub(start))/float64(total), share, barW, r.Failed, useColor)
+
+		fmt.Printf("%s%s%s%s%s %s %5.1f%% %9s\n",
+			labelColor, mark, labelReset, label, pad, bar, share*100, flameDur(dur))
 	}
 }
 
@@ -1345,30 +1419,32 @@ func main() {
 		}
 	}
 
-	// --doctor runs the environment/Constfile diagnosis (same as the
-	// `doctor` subcommand; accepts an optional Constfile path).
+	// --doctor is the doctor subcommand with an optional Constfile path.
 	if o.doctor {
-		runDoctor(&o, determineInputs(positionals))
+		if err := runDoctor(&o, determineInputs(positionals)); err != nil {
+			exitError(err)
+		}
 		return
 	}
 
 	if len(positionals) > 0 && isSubcommandName(positionals[0]) && !commandExistsInConstfile(positionals[0]) {
-		inputs := &ConstructInput{FileName: "Constfile", Commands: nil}
-		if fileExists(getPlatformConstfile()) && !fileExists(inputs.FileName) {
-			inputs.FileName = getPlatformConstfile()
-		}
+		inputs := &ConstructInput{FileName: defaultConstfileName()}
 		if len(positionals) > 1 && fileExists(positionals[1]) {
 			inputs.FileName = positionals[1]
 		}
+		var err error
 		switch positionals[0] {
 		case "init":
-			runInit(positionals[1:], &o)
+			err = runInit(positionals[1:], &o)
 		case "doctor":
-			runDoctor(&o, inputs)
+			err = runDoctor(&o, inputs)
 		case "stats":
-			runStats(&o, inputs)
+			err = runStats(&o, inputs)
 		case "cloud":
-			runCloud(positionals[1:], &o, inputs)
+			err = runCloud(positionals[1:], &o, inputs)
+		}
+		if err != nil {
+			exitError(err)
 		}
 		return
 	}

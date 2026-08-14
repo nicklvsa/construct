@@ -51,4 +51,5 @@ build-all < install {
 
 _ < build-ext {
     echo "&build-ext.final_out"
+    echo "reminder: reload open VS Code windows (Cmd+Shift+P -> 'Reload Window') to pick up the new grammar/server — same-version installs do not hot-reload"
 }

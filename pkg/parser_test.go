@@ -1,6 +1,7 @@
 package pkg
 
 import (
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -61,9 +62,9 @@ func TestParseCommandName(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := parseCommandName(tt.input)
+			result := ParseCommandName(tt.input)
 			if result != tt.expected {
-				t.Errorf("parseCommandName(%q) = %q, want %q", tt.input, result, tt.expected)
+				t.Errorf("ParseCommandName(%q) = %q, want %q", tt.input, result, tt.expected)
 			}
 		})
 	}
@@ -1320,5 +1321,96 @@ func TestExtractOutputName(t *testing.T) {
 				t.Errorf("name = %q, want %q", name, tt.wantName)
 			}
 		})
+	}
+}
+
+func TestParseCommandNameHeaderModifiers(t *testing.T) {
+	tests := []struct {
+		input    string
+		expected string
+	}{
+		{"|deploy| produces dist {", "deploy"},
+		{"|deploy| onchange src/** {", "deploy"},
+		{"|deploy| timeout 5s {", "deploy"},
+		{"build produces dist/app.js, dist/lib.js < src/main.go {", "build"},
+		{"build onchange src/** < src/main.go {", "build"},
+		{"build timeout 5s {", "build"},
+		{"build produces dist timeout 5s in dir {", "build"},
+		{"build < dep.txt produces dist {", "build"},
+	}
+	for _, tc := range tests {
+		if got := ParseCommandName(tc.input); got != tc.expected {
+			t.Errorf("ParseCommandName(%q) = %q, want %q", tc.input, got, tc.expected)
+		}
+	}
+}
+
+func TestExtractProducesCutAtTimeout(t *testing.T) {
+	// `produces` used to swallow a following `timeout` modifier.
+	line := "build produces dist timeout 5s {"
+	got := extractProduces(line)
+	if len(got) != 1 || got[0] != "dist" {
+		t.Errorf("extractProduces = %v, want [dist]", got)
+	}
+	if timeout := extractTimeout("build timeout 5s produces dist {"); timeout != "5s" {
+		t.Errorf("extractTimeout = %q, want 5s", timeout)
+	}
+}
+
+func TestIndentedDefaultCommand(t *testing.T) {
+	p := NewParserFromContent("Constfile", "build {\n  $ echo hi\n}\n\n  _ < build {\n    $ echo default\n  }\n")
+	data, err := p.Parse()
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	def, err := data.GetDefaultCommand()
+	if err != nil {
+		t.Fatalf("indented `_` not detected as default: %v", err)
+	}
+	if def.Name != "_" {
+		t.Errorf("default command name = %q, want _", def.Name)
+	}
+}
+
+func TestExecuteNoDefaultCommandErrors(t *testing.T) {
+	data := &ParsedData{
+		Commands: []*Command{
+			{Name: "build", Body: shellBody("echo hi")},
+		},
+	}
+	data.buildIndexMaps()
+	executor := NewExecutor(data, false, false)
+	if err := executor.Execute(nil); err == nil {
+		t.Fatal("Execute with no targets and no default should error")
+	}
+}
+
+func TestCacheKeyWithoutRegisteredFlags(t *testing.T) {
+	// An executor built without RegisterArgumentFlags used to panic in
+	// cacheKey when a command had file deps and arguments.
+	cmd := &Command{
+		Name:      "c",
+		FileDeps:  []string{"dep.txt"},
+		Arguments: []*Argument{{Name: "a"}},
+	}
+	data := &ParsedData{Commands: []*Command{cmd}}
+	data.buildIndexMaps()
+	e := NewExecutor(data, false, false)
+	e.SetBaseDir(t.TempDir())
+	if err := e.Execute([]string{"c"}); err != nil {
+		t.Fatalf("Execute failed: %v", err)
+	}
+}
+
+func TestResolveCloudFileDefaultName(t *testing.T) {
+	dir := t.TempDir()
+	e := NewExecutor(&ParsedData{}, false, false)
+	e.SetBaseDir(dir)
+	if got := e.resolveCloudFile(); got != filepath.Join(dir, "construct-cloud.json") {
+		t.Errorf("resolveCloudFile = %q, want %q", got, filepath.Join(dir, "construct-cloud.json"))
+	}
+	t.Setenv("CONSTRUCT_CLOUD_FILE", "custom.json")
+	if got := e.resolveCloudFile(); got != "custom.json" {
+		t.Errorf("resolveCloudFile with env override = %q, want custom.json", got)
 	}
 }

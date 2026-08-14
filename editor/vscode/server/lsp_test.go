@@ -18,7 +18,7 @@ main < gen in subdir, gen in other {
     echo done
 }`
 	data := parseForTest(t, text)
-	diags := duplicatePrereqWarnings(text, data)
+	diags := duplicatePrereqWarnings(strings.Split(text, "\n"), data)
 	if len(diags) != 1 {
 		t.Fatalf("expected 1 duplicate warning, got %d: %v", len(diags), diags)
 	}
@@ -38,7 +38,7 @@ main < gen in subdir {
     echo done
 }`
 	data := parseForTest(t, text)
-	diags := duplicatePrereqWarnings(text, data)
+	diags := duplicatePrereqWarnings(strings.Split(text, "\n"), data)
 	if len(diags) != 0 {
 		t.Fatalf("expected no duplicate warnings, got %v", diags)
 	}
@@ -99,7 +99,7 @@ func TestDefinitionAcrossImport(t *testing.T) {
 
 	uri := pathToURI(mainPath)
 	s := newServer()
-	s.updateDoc(uri, mainText, 1)
+	s.updateDoc(uri, mainText)
 
 	lines := strings.Split(mainText, "\n")
 	params, _ := json.Marshal(map[string]interface{}{
@@ -128,7 +128,7 @@ func TestDefinitionLocalCommandStillResolves(t *testing.T) {
 	text := "gen {\n    echo hi\n}\nmain < gen {\n    echo done\n}\n"
 	uri := "file:///x/main.constfile"
 	s := newServer()
-	s.updateDoc(uri, text, 1)
+	s.updateDoc(uri, text)
 
 	lines := strings.Split(text, "\n")
 	params, _ := json.Marshal(map[string]interface{}{
@@ -163,7 +163,7 @@ func TestDefinitionNamespacedPrereq(t *testing.T) {
 
 	uri := pathToURI(mainPath)
 	s := newServer()
-	s.updateDoc(uri, mainText, 1)
+	s.updateDoc(uri, mainText)
 
 	lines := strings.Split(mainText, "\n")
 	params, _ := json.Marshal(map[string]interface{}{
@@ -199,7 +199,7 @@ func TestDefinitionFileDepStillOpens(t *testing.T) {
 
 	uri := pathToURI(mainPath)
 	s := newServer()
-	s.updateDoc(uri, mainText, 1)
+	s.updateDoc(uri, mainText)
 
 	lines := strings.Split(mainText, "\n")
 	params, _ := json.Marshal(map[string]interface{}{
@@ -235,7 +235,7 @@ _ < log, ls {
 `
 	uri := "file:///x/main.constfile"
 	s := newServer()
-	s.updateDoc(uri, text, 1)
+	s.updateDoc(uri, text)
 
 	lines := strings.Split(text, "\n")
 	for i := 7; i <= 8; i++ {
@@ -273,7 +273,7 @@ use < lib.gen {
 	mainPath := filepath.Join(dir, "main.constfile")
 	uri := pathToURI(mainPath)
 	s := newServer()
-	s.updateDoc(uri, text, 1)
+	s.updateDoc(uri, text)
 
 	lines := strings.Split(text, "\n")
 	params, _ := json.Marshal(map[string]interface{}{
@@ -305,7 +305,7 @@ func TestDefinitionInvokeTarget(t *testing.T) {
 
 	uri := pathToURI(mainPath)
 	s := newServer()
-	s.updateDoc(uri, mainText, 1)
+	s.updateDoc(uri, mainText)
 
 	lines := strings.Split(mainText, "\n")
 	params, _ := json.Marshal(map[string]interface{}{
@@ -333,7 +333,7 @@ func TestDefinitionInvokeLocal(t *testing.T) {
 	text := "gen {\n    echo hi\n}\nuse {\n    invoke gen\n}\n"
 	uri := "file:///x/main.constfile"
 	s := newServer()
-	s.updateDoc(uri, text, 1)
+	s.updateDoc(uri, text)
 
 	lines := strings.Split(text, "\n")
 	params, _ := json.Marshal(map[string]interface{}{
@@ -361,7 +361,7 @@ func TestHoverInvokeTarget(t *testing.T) {
 	text := "gen {\n    echo hi\n}\nuse {\n    invoke gen\n}\n"
 	uri := "file:///x/main.constfile"
 	s := newServer()
-	s.updateDoc(uri, text, 1)
+	s.updateDoc(uri, text)
 
 	lines := strings.Split(text, "\n")
 	params, _ := json.Marshal(map[string]interface{}{
@@ -386,7 +386,7 @@ func TestCompletionInvokeTarget(t *testing.T) {
 	text := "gen {\n    echo hi\n}\nuse {\n    invoke \n}\n"
 	uri := "file:///x/main.constfile"
 	s := newServer()
-	s.updateDoc(uri, text, 1)
+	s.updateDoc(uri, text)
 
 	lines := strings.Split(text, "\n")
 	params, _ := json.Marshal(map[string]interface{}{
@@ -428,7 +428,7 @@ use {
 `
 	uri := "file:///x/main.constfile"
 	s := newServer()
-	s.updateDoc(uri, text, 1)
+	s.updateDoc(uri, text)
 
 	lines := strings.Split(text, "\n")
 	params, _ := json.Marshal(map[string]interface{}{
@@ -462,7 +462,7 @@ func TestHoverLoopVarUnknown(t *testing.T) {
 `
 	uri := "file:///x/main.constfile"
 	s := newServer()
-	s.updateDoc(uri, text, 1)
+	s.updateDoc(uri, text)
 
 	lines := strings.Split(text, "\n")
 	params, _ := json.Marshal(map[string]interface{}{
@@ -493,7 +493,7 @@ use {
 `
 	uri := "file:///x/main.constfile"
 	s := newServer()
-	s.updateDoc(uri, text, 1)
+	s.updateDoc(uri, text)
 
 	lines := strings.Split(text, "\n")
 	params, _ := json.Marshal(map[string]interface{}{
@@ -530,7 +530,7 @@ use {
 `
 	uri := "file:///x/main.constfile"
 	s := newServer()
-	s.updateDoc(uri, text, 1)
+	s.updateDoc(uri, text)
 
 	lines := strings.Split(text, "\n")
 	params, _ := json.Marshal(map[string]interface{}{
@@ -568,7 +568,7 @@ use {
 `
 	uri := "file:///x/main.constfile"
 	s := newServer()
-	s.updateDoc(uri, text, 1)
+	s.updateDoc(uri, text)
 
 	lines := strings.Split(text, "\n")
 	params, _ := json.Marshal(map[string]interface{}{
@@ -607,7 +607,7 @@ use {
 `
 	uri := "file:///x/main.constfile"
 	s := newServer()
-	s.updateDoc(uri, text, 1)
+	s.updateDoc(uri, text)
 
 	lines := strings.Split(text, "\n")
 	params, _ := json.Marshal(map[string]interface{}{
@@ -644,7 +644,7 @@ _ < log, ls {
 `
 	uri := "file:///x/main.constfile"
 	s := newServer()
-	s.updateDoc(uri, text, 1)
+	s.updateDoc(uri, text)
 
 	lines := strings.Split(text, "\n")
 	params, _ := json.Marshal(map[string]interface{}{
@@ -676,7 +676,7 @@ _ < log {
 `
 	uri := "file:///x/main.constfile"
 	s := newServer()
-	s.updateDoc(uri, text, 1)
+	s.updateDoc(uri, text)
 
 	lines := strings.Split(text, "\n")
 	params, _ := json.Marshal(map[string]interface{}{
@@ -718,7 +718,7 @@ _ < gen {
 		t.Errorf("namedOutputAt(gen, 1) = %q, want gen.out", hint)
 	}
 
-	diags := namedOutputHints(text, data)
+	diags := namedOutputHints(strings.Split(text, "\n"), data)
 	for _, d := range diags {
 		if d.Severity == sevError {
 			t.Errorf("unexpected error diagnostic: %q", d.Message)
@@ -739,7 +739,7 @@ _ < log, ls {
 }
 `
 	data := parseForTest(t, text)
-	diags := namedOutputHints(text, data)
+	diags := namedOutputHints(strings.Split(text, "\n"), data)
 	found := false
 	for _, d := range diags {
 		if strings.Contains(d.Message, "result") {
@@ -769,7 +769,7 @@ _ < log {
 `
 	uri := "file:///x/main.constfile"
 	s := newServer()
-	s.updateDoc(uri, text, 1)
+	s.updateDoc(uri, text)
 
 	lines := strings.Split(text, "\n")
 	params, _ := json.Marshal(map[string]interface{}{
@@ -812,7 +812,7 @@ _ < build {
 `
 	uri := "file:///x/main.constfile"
 	s := newServer()
-	s.updateDoc(uri, text, 1)
+	s.updateDoc(uri, text)
 
 	params, _ := json.Marshal(map[string]interface{}{
 		"textDocument": map[string]string{"uri": uri},
@@ -849,12 +849,12 @@ _ < build {
 func TestEnvRefDefaultInWorkdir(t *testing.T) {
 	os.Unsetenv("CONSTRUCT_LSP_DEF_DIR")
 	defer os.Unsetenv("CONSTRUCT_LSP_DEF_DIR")
-	if got := resolveEnvRefsInString("sub/@CONSTRUCT_LSP_DEF_DIR:-src"); got != "sub/src" {
-		t.Errorf("resolveEnvRefsInString default = %q", got)
+	if got := pkg.ResolveEnvRefs("sub/@CONSTRUCT_LSP_DEF_DIR:-src"); got != "sub/src" {
+		t.Errorf("ResolveEnvRefs default = %q", got)
 	}
 	os.Setenv("CONSTRUCT_LSP_DEF_DIR", "real")
-	if got := resolveEnvRefsInString("sub/@CONSTRUCT_LSP_DEF_DIR:-src"); got != "sub/real" {
-		t.Errorf("resolveEnvRefsInString set = %q", got)
+	if got := pkg.ResolveEnvRefs("sub/@CONSTRUCT_LSP_DEF_DIR:-src"); got != "sub/real" {
+		t.Errorf("ResolveEnvRefs set = %q", got)
 	}
 }
 
@@ -872,7 +872,7 @@ main < lib.gen {
 	mainPath := filepath.Join(dir, "main.constfile")
 	uri := pathToURI(mainPath)
 	s := newServer()
-	s.updateDoc(uri, text, 1)
+	s.updateDoc(uri, text)
 
 	params, _ := json.Marshal(map[string]interface{}{
 		"textDocument": map[string]string{"uri": uri},
@@ -910,7 +910,7 @@ func TestHoverFailContext(t *testing.T) {
 `
 	uri := "file:///x/main.constfile"
 	s := newServer()
-	s.updateDoc(uri, text, 1)
+	s.updateDoc(uri, text)
 	lines := strings.Split(text, "\n")
 
 	hover := func(line int, sub string) string {
@@ -945,7 +945,7 @@ func TestHoverOnFailKeyword(t *testing.T) {
 	text := "deploy {\n    onfail {\n        $ echo x\n    }\n}\n"
 	uri := "file:///x/main.constfile"
 	s := newServer()
-	s.updateDoc(uri, text, 1)
+	s.updateDoc(uri, text)
 
 	params, _ := json.Marshal(map[string]interface{}{
 		"textDocument": map[string]string{"uri": uri},
@@ -976,7 +976,7 @@ func TestCompletionFailContext(t *testing.T) {
 `
 	uri := "file:///x/main.constfile"
 	s := newServer()
-	s.updateDoc(uri, text, 1)
+	s.updateDoc(uri, text)
 	lines := strings.Split(text, "\n")
 
 	complete := func(line int) []string {

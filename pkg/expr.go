@@ -84,7 +84,6 @@ func isIntStr(s string) bool {
 	return i > 0
 }
 
-// EvalContext resolves names during expression evaluation.
 type EvalContext interface {
 	LookupVar(name string) (Value, bool)
 	LookupEnv(name string) (string, bool)
@@ -285,7 +284,6 @@ func splitTopLevel(s string, sep byte) []string {
 	return out
 }
 
-// substituteInner resolves &refs, @env refs and state refs inside a string.
 func substituteInner(s string, ctx EvalContext) string {
 	if !strings.ContainsAny(s, "&@") {
 		return s
@@ -697,8 +695,6 @@ func applyBinop(l, r Value, op string) (Value, error) {
 	return boolValue(compareValues(l.S, r.S, op)), nil
 }
 
-// ---- builtin functions ----
-
 type builtinDef struct {
 	arity func(n int) bool // nil means unconstrained
 	fn    func(args []Value, ctx EvalContext) (Value, error)
@@ -724,6 +720,13 @@ func unaryInt(f func(int) int) builtinDef {
 	}}
 }
 
+var lengthDef = builtinDef{arity: arity(1, 1), fn: func(args []Value, _ EvalContext) (Value, error) {
+	if args[0].IsList {
+		return StringValue(strconv.Itoa(len(args[0].L))), nil
+	}
+	return StringValue(strconv.Itoa(utf8.RuneCountInString(args[0].S))), nil
+}}
+
 var builtins = map[string]builtinDef{
 	"basename": unaryStr(func(s string) string { return filepath.Base(s) }),
 	"dirname":  unaryStr(func(s string) string { return filepath.Dir(s) }),
@@ -732,22 +735,12 @@ var builtins = map[string]builtinDef{
 		base := filepath.Base(s)
 		return strings.TrimSuffix(base, filepath.Ext(base))
 	}),
-	"upper": unaryStr(strings.ToUpper),
-	"lower": unaryStr(strings.ToLower),
-	"trim":  unaryStr(strings.TrimSpace),
-	"abs":   unaryInt(absInt),
-	"length": {arity: arity(1, 1), fn: func(args []Value, _ EvalContext) (Value, error) {
-		if args[0].IsList {
-			return StringValue(strconv.Itoa(len(args[0].L))), nil
-		}
-		return StringValue(strconv.Itoa(utf8.RuneCountInString(args[0].S))), nil
-	}},
-	"len": {arity: arity(1, 1), fn: func(args []Value, _ EvalContext) (Value, error) {
-		if args[0].IsList {
-			return StringValue(strconv.Itoa(len(args[0].L))), nil
-		}
-		return StringValue(strconv.Itoa(utf8.RuneCountInString(args[0].S))), nil
-	}},
+	"upper":  unaryStr(strings.ToUpper),
+	"lower":  unaryStr(strings.ToLower),
+	"trim":   unaryStr(strings.TrimSpace),
+	"abs":    unaryInt(absInt),
+	"length": lengthDef,
+	"len":    lengthDef,
 	"exists": {arity: arity(1, 1), fn: func(args []Value, ctx EvalContext) (Value, error) {
 		_, err := os.Stat(resolveBase(args[0], ctx))
 		return boolValue(err == nil), nil
@@ -928,16 +921,9 @@ func callBuiltin(name string, args []Value, ctx EvalContext) (Value, error) {
 		return Value{}, fmt.Errorf("unknown function %q", name)
 	}
 	if def.arity != nil && !def.arity(len(args)) {
-		return Value{}, fmt.Errorf("%s expects %s argument(s), got %d", name, arityRange(def.arity), len(args))
+		return Value{}, fmt.Errorf("%s called with %d argument(s)", name, len(args))
 	}
 	return def.fn(args, ctx)
-}
-
-func arityRange(arity func(int) bool) string {
-	if arity(0) && arity(1) && !arity(2) {
-		return "0-1"
-	}
-	return "1+"
 }
 
 func evalValueExprLoose(s string, ctx EvalContext) Value {

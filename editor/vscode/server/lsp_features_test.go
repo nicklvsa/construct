@@ -2,15 +2,19 @@ package main
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	pkg "github.com/nicklvsa/construct/pkg"
 )
 
 func hoverAt(t *testing.T, text string, line, char int) (string, bool) {
 	t.Helper()
 	uri := "file:///test.constfile"
 	s := newServer()
-	s.updateDoc(uri, text, 1)
+	s.updateDoc(uri, text)
 	params, _ := json.Marshal(map[string]interface{}{
 		"textDocument": map[string]string{"uri": uri},
 		"position":     map[string]int{"line": line, "character": char},
@@ -30,7 +34,7 @@ func completionAt(t *testing.T, text string, line, char int) []completionItem {
 	t.Helper()
 	uri := "file:///test.constfile"
 	s := newServer()
-	s.updateDoc(uri, text, 1)
+	s.updateDoc(uri, text)
 	params, _ := json.Marshal(map[string]interface{}{
 		"textDocument": map[string]string{"uri": uri},
 		"position":     map[string]int{"line": line, "character": char},
@@ -119,7 +123,7 @@ cmd {
 	// Go-to-definition jumps to the state declaration.
 	uri := "file:///test.constfile"
 	s := newServer()
-	s.updateDoc(uri, text, 1)
+	s.updateDoc(uri, text)
 	params, _ := json.Marshal(map[string]interface{}{
 		"textDocument": map[string]string{"uri": uri},
 		"position":     map[string]int{"line": 2, "character": 15},
@@ -145,7 +149,7 @@ build {
 `
 	uri := "file:///test.constfile"
 	s := newServer()
-	s.updateDoc(uri, text, 1)
+	s.updateDoc(uri, text)
 	params, _ := json.Marshal(map[string]interface{}{
 		"textDocument": map[string]string{"uri": uri},
 	})
@@ -246,7 +250,7 @@ build timeout 30s {
 `
 	uri := "file:///test.constfile"
 	s := newServer()
-	s.updateDoc(uri, text, 1)
+	s.updateDoc(uri, text)
 	if _, ok := s.docs[uri]; !ok {
 		t.Fatal("doc not registered")
 	}
@@ -271,7 +275,7 @@ func TestLSPCaseOutsideSwitchDiagnostic(t *testing.T) {
 `
 	uri := "file:///test.constfile"
 	s := newServer()
-	s.updateDoc(uri, text, 1)
+	s.updateDoc(uri, text)
 	s.mu.Lock()
 	doc := s.docs[uri]
 	s.mu.Unlock()
@@ -330,5 +334,227 @@ func TestLSPLastResultCompletion(t *testing.T) {
 	}
 	if !found["last.exit"] || !found["last.output"] {
 		t.Errorf("last.* completion missing: %v", items)
+	}
+}
+
+func TestLSPCommandNameWithProducesOnChange(t *testing.T) {
+	for _, c := range []struct {
+		line string
+		want string
+	}{
+		{"build produces dist/app < src {", "build"},
+		{"build onchange src/** {", "build"},
+		{"build produces a, b onchange src < dep.txt timeout 5s in dir {", "build"},
+		{"|deploy| produces dist {", "deploy"},
+	} {
+		if got, ok := commandNameAtLine(c.line); !ok || got != c.want {
+			t.Errorf("commandNameAtLine(%q) = %q (ok=%v), want %q", c.line, got, ok, c.want)
+		}
+	}
+}
+
+func TestLSPHoverOnProducesHeader(t *testing.T) {
+	text := "build produces dist/app < src/main.go {\n    $ echo built\n}\n"
+	msg, ok := hoverAt(t, text, 0, 2)
+	if !ok {
+		t.Fatal("no hover on a produces header")
+	}
+	if !strings.Contains(msg, "**build**") {
+		t.Errorf("hover = %q, want the build command summary", msg)
+	}
+}
+
+// Named outputs and shell-line indexes must see into switch/onfail/in/lock
+// bodies, matching what the executor actually captures.
+func TestLSPNamedOutputInSwitchAndOnFail(t *testing.T) {
+	text := `src {
+    switch "&os" {
+        case "linux" {
+            $ echo lnx as out
+        }
+    }
+    onfail {
+        $ echo cleanup as err
+    }
+    in sub {
+        $ echo nested as deep
+    }
+}
+use {
+    $ deploy &src.out &src.err &src.deep &src.1
+}
+`
+	parser := pkg.NewParserFromContent("file:///test.constfile", text)
+	data, err := parser.Parse()
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	diags := namedOutputHints(strings.Split(text, "\n"), data)
+	for _, d := range diags {
+		if strings.Contains(d.Message, "unknown named output") || strings.Contains(d.Message, "out of bounds") {
+			t.Errorf("false diagnostic: %s", d.Message)
+		}
+	}
+	if n := countShellLines(mustCommand(t, data, "src").Body); n != 3 {
+		t.Errorf("countShellLines = %d, want 3 (switch case, onfail, and in-sub statements)", n)
+	}
+}
+
+func mustCommand(t *testing.T, data *pkg.ParsedData, name string) *pkg.Command {
+	t.Helper()
+	cmd, err := data.GetCommand(name)
+	if err != nil {
+		t.Fatalf("get command %s: %v", name, err)
+	}
+	return cmd
+}
+
+func TestLSPDidCloseForgetsDocument(t *testing.T) {
+	uri := "file:///test.constfile"
+	s := newServer()
+	s.updateDoc(uri, "build {\n    $ echo hi\n}\n")
+	params, _ := json.Marshal(map[string]any{
+		"textDocument": map[string]string{"uri": uri},
+	})
+	if _, err := s.handleDidClose(params); err != nil {
+		t.Fatalf("didClose: %v", err)
+	}
+	s.mu.Lock()
+	_, open := s.docs[uri]
+	s.mu.Unlock()
+	if open {
+		t.Error("document still tracked after didClose")
+	}
+}
+
+// Every keyword we complete must have hover documentation, and vice versa —
+// this keeps hover coverage from silently rotting as the language grows.
+func TestLSPKeywordHoverCoverage(t *testing.T) {
+	for _, kw := range statementKeywords {
+		if _, ok := keywordHover(kw); !ok {
+			t.Errorf("keywordHover(%q) has no documentation", kw)
+		}
+	}
+	for _, extra := range []string{"produces", "onchange"} {
+		if _, ok := keywordHover(extra); !ok {
+			t.Errorf("keywordHover(%q) has no documentation", extra)
+		}
+	}
+}
+
+func TestLSPFunctionHoverCoverage(t *testing.T) {
+	for _, fn := range builtinFunctions {
+		if _, ok := functionHover(fn); !ok {
+			t.Errorf("functionHover(%q) has no documentation", fn)
+		}
+	}
+}
+
+func TestLSPStateRefHover(t *testing.T) {
+	text := "state version = 3\nshow {\n    $ echo state(\"version\") @state(\"version\")\n}\n"
+	for _, char := range []int{17, 18, 36, 37} {
+		msg, ok := hoverAt(t, text, 2, char)
+		if !ok {
+			t.Fatalf("no hover at char %d", char)
+		}
+		if !strings.Contains(msg, "persisted state") {
+			t.Errorf("hover at char %d = %q, want persisted-state info", char, msg)
+		}
+		if strings.Contains(msg, "environment variable") {
+			t.Errorf("hover at char %d = %q: @state misread as an env var", char, msg)
+		}
+		if !strings.Contains(msg, "declared value: `3`") {
+			t.Errorf("hover at char %d = %q, want the declared value", char, msg)
+		}
+	}
+}
+
+func TestLSPWorkdirHover(t *testing.T) {
+	text := "build in sub {\n    $ pwd\n}\n"
+	// "sub" starts at column 9.
+	msg, ok := hoverAt(t, text, 0, 10)
+	if !ok {
+		t.Fatal("no hover over the workdir")
+	}
+	if !strings.Contains(msg, "working directory") || !strings.Contains(msg, "`sub`") {
+		t.Errorf("hover = %q, want working-directory info", msg)
+	}
+	// The command name itself still gets the command hover.
+	msg, ok = hoverAt(t, text, 0, 2)
+	if !ok || !strings.Contains(msg, "**build**") {
+		t.Errorf("hover over header name = %q (ok=%v), want the command summary", msg, ok)
+	}
+}
+
+func TestLSPFileDepHover(t *testing.T) {
+	dir := t.TempDir()
+	srcDir := filepath.Join(dir, "src")
+	os.MkdirAll(srcDir, 0755)
+	os.WriteFile(filepath.Join(srcDir, "main.go"), []byte("package main\n"), 0644)
+	uri := pathToURI(filepath.Join(dir, "Constfile"))
+	text := "build < src/main.go {\n    $ go build ./...\n}\n"
+	s := newServer()
+	s.updateDoc(uri, text)
+	params, _ := json.Marshal(map[string]any{
+		"textDocument": map[string]string{"uri": uri},
+		"position":     map[string]int{"line": 0, "character": 11},
+	})
+	res, err := s.handleHover(params)
+	if err != nil {
+		t.Fatalf("hover: %v", err)
+	}
+	msg := res.(hoverResult).Contents.Value
+	if !strings.Contains(msg, "file dependency") || !strings.Contains(msg, "src/main.go") {
+		t.Errorf("hover = %q, want file-dependency info", msg)
+	}
+	if !strings.Contains(msg, "modified") {
+		t.Errorf("hover = %q, want the file's mtime", msg)
+	}
+}
+
+func TestLSPHeaderArgHover(t *testing.T) {
+	text := "deploy (env, opt region) < build {\n    $ echo &env\n}\nbuild {\n    $ echo ok\n}\n"
+	// "region" is at column 17.
+	msg, ok := hoverAt(t, text, 0, 18)
+	if !ok {
+		t.Fatal("no hover over an argument declaration")
+	}
+	if !strings.Contains(msg, "argument of command `deploy`") || !strings.Contains(msg, "--deploy:region") {
+		t.Errorf("hover = %q, want argument info with the flag spelling", msg)
+	}
+	if !strings.Contains(msg, "optional") {
+		t.Errorf("hover = %q, want the optional marker", msg)
+	}
+	// "opt" itself explains the marker.
+	msg, ok = hoverAt(t, text, 0, 13)
+	if !ok || !strings.Contains(msg, "optional") {
+		t.Errorf("hover over opt = %q (ok=%v), want the opt explanation", msg, ok)
+	}
+}
+
+func TestLSPFunctionCallBeatsKeyword(t *testing.T) {
+	// `env` is both a block keyword and a builtin function; in a call
+	// position the function hover must win.
+	text := "var home = env(\"HOME\")\ncmd {\n    $ echo &home\n}\n"
+	at := strings.Index(text[:strings.Index(text, "\n")], "env") + 1
+	msg, ok := hoverAt(t, text, 0, at)
+	if !ok {
+		t.Fatal("no hover over env()")
+	}
+	if !strings.Contains(msg, "environment variable's value") {
+		t.Errorf("hover = %q, want the builtin-function hover", msg)
+	}
+}
+
+func TestLSPEnvDefaultHover(t *testing.T) {
+	os.Unsetenv("CONSTRUCT_LSP_HOVER_MISSING")
+	text := "cmd {\n    $ echo @CONSTRUCT_LSP_HOVER_MISSING:-fallback\n}\n"
+	at := strings.Index(text, "@CONSTRUCT") + 3
+	msg, ok := hoverAt(t, text, 1, at)
+	if !ok {
+		t.Fatal("no hover over the env ref")
+	}
+	if !strings.Contains(msg, "default: `fallback`") {
+		t.Errorf("hover = %q, want the default value shown", msg)
 	}
 }

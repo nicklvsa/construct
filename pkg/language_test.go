@@ -43,18 +43,18 @@ func evalStr(t *testing.T, content, expr, scope string) string {
 
 func TestEvalArithmetic(t *testing.T) {
 	cases := map[string]string{
-		"1 + 2":              "3",
-		"&a * 2 + 1":         "11",
-		"&a - 1":             "4",
-		"10 / 3":             "3",
-		"10 % 3":             "1",
-		"&a * (&b + 2)":      "35",
-		"-5 + 2":             "-3",
+		"1 + 2":                        "3",
+		"&a * 2 + 1":                   "11",
+		"&a - 1":                       "4",
+		"10 / 3":                       "3",
+		"10 % 3":                       "1",
+		"&a * (&b + 2)":                "35",
+		"-5 + 2":                       "-3",
 		"&a > 3 ? \"big\" : \"small\"": "big",
-		"\"x\" + \"y\"":      "xy",
-		"&a >= 5 && &b == 5": "true",
-		"&a < 5 || &b == 5":  "true",
-		"!&a":                "false",
+		"\"x\" + \"y\"":                "xy",
+		"&a >= 5 && &b == 5":           "true",
+		"&a < 5 || &b == 5":            "true",
+		"!&a":                          "false",
 	}
 	for expr, want := range cases {
 		got := evalStr(t, "var a = 5\nvar b = 5\n", expr, "global")
@@ -73,21 +73,21 @@ func TestEvalTernary(t *testing.T) {
 
 func TestEvalFunctions(t *testing.T) {
 	cases := map[string]string{
-		"upper(\"hello\")":      "HELLO",
-		"lower(\"HELLO\")":      "hello",
-		"trim(\"  x  \")":       "x",
+		"upper(\"hello\")":                 "HELLO",
+		"lower(\"HELLO\")":                 "hello",
+		"trim(\"  x  \")":                  "x",
 		"replace(\"a.b.c\", \".\", \"-\")": "a-b-c",
-		"sprintf(\"%s-%d\", \"v\", 2)":    "v-2",
-		"length(\"abc\")":       "3",
-		"abs(-7)":               "7",
-		"min(3, 1, 2)":          "1",
-		"max(3, 1, 2)":          "3",
-		"basename(\"a/b/c.txt\")": "c.txt",
-		"dirname(\"a/b/c.txt\")":  "a/b",
-		"ext(\"a/b/c.txt\")":      ".txt",
-		"stem(\"a/b/c.txt\")":     "c",
-		"exists(\"nope-xyz\")":    "false",
-		"missing(\"nope-xyz\")":   "true",
+		"sprintf(\"%s-%d\", \"v\", 2)":     "v-2",
+		"length(\"abc\")":                  "3",
+		"abs(-7)":                          "7",
+		"min(3, 1, 2)":                     "1",
+		"max(3, 1, 2)":                     "3",
+		"basename(\"a/b/c.txt\")":          "c.txt",
+		"dirname(\"a/b/c.txt\")":           "a/b",
+		"ext(\"a/b/c.txt\")":               ".txt",
+		"stem(\"a/b/c.txt\")":              "c",
+		"exists(\"nope-xyz\")":             "false",
+		"missing(\"nope-xyz\")":            "true",
 	}
 	for expr, want := range cases {
 		got := evalStr(t, "", expr, "global")
@@ -892,10 +892,10 @@ type fileCtx struct {
 	dir string
 }
 
-func (c fileCtx) LookupVar(string) (Value, bool) { return Value{}, false }
-func (c fileCtx) LookupEnv(string) (string, bool) { return "", false }
+func (c fileCtx) LookupVar(string) (Value, bool)    { return Value{}, false }
+func (c fileCtx) LookupEnv(string) (string, bool)   { return "", false }
 func (c fileCtx) LookupState(string) (string, bool) { return "", false }
-func (c fileCtx) BaseDir() string                  { return c.dir }
+func (c fileCtx) BaseDir() string                   { return c.dir }
 
 func TestEvalDateAndUUID(t *testing.T) {
 	ev, _ := evalCtxFor(t, "", "global")

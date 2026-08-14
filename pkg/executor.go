@@ -129,7 +129,6 @@ func (e *Executor) FlameRows() []FlameRow {
 	return append([]FlameRow(nil), e.flameRows...)
 }
 
-// RunRecords returns the persisted run outcomes for this execution.
 func (e *Executor) RunRecords() map[string]RunRecord {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -359,7 +358,6 @@ func LoadRunHistory(dir string) map[string][]RunRecord {
 	return hist
 }
 
-// LastRecord returns the most recent record per command.
 func LastRecord(hist map[string][]RunRecord) map[string]RunRecord {
 	out := make(map[string]RunRecord, len(hist))
 	for name, recs := range hist {
@@ -370,7 +368,6 @@ func LastRecord(hist map[string][]RunRecord) map[string]RunRecord {
 	return out
 }
 
-// SaveRunHistory writes run records to a cache dir.
 func SaveRunHistory(dir string, hist map[string][]RunRecord) {
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return
@@ -413,7 +410,6 @@ func (e *Executor) resolveGlobalValue(s string) string {
 	return resolveEnvRefsWith(s, func(name string) string { return os.Getenv(name) })
 }
 
-// setRuntimeState persists a state variable across runs.
 func (e *Executor) setRuntimeState(name, value string) {
 	e.loadState()
 	e.state[name] = value
@@ -563,7 +559,7 @@ func (e *Executor) executeCommand(command *Command) error {
 		s = resolveVarRefs(s, func(name string) (string, bool) {
 			return e.StructuredParse.LookupVariable(name, scope)
 		})
-		return resolveEnvRefs(s)
+		return ResolveEnvRefs(s)
 	}
 
 	if len(command.FileDeps) > 0 && !isPrereq && len(command.Produces) == 0 && !e.noCache {
@@ -664,20 +660,13 @@ func (e *Executor) executeCommand(command *Command) error {
 		}
 	}
 
-	if err := e.tryApplyCloudBody(command); err != nil {
-		return err
-	}
-
-	body, err := e.cleanCommandBody(command)
-	if err != nil {
-		return err
-	}
+	body := e.cleanCommandBody(command, e.bodyFor(command))
 
 	if e.ghActions && !isPrereq && command.LazyEval == nil {
 		fmt.Printf("::group::%s\n", command.Name)
 	}
 
-	bodyErr := e.timed(ctx, command.Name, func() error {
+	bodyErr := e.timed(ctx, ctx.targetLabel(), func() error {
 		return e.execBody(ctx, body)
 	})
 
@@ -739,7 +728,7 @@ func (e *Executor) argFlags(cmd *Command) map[string]bool {
 	return flags
 }
 
-func (e *Executor) cleanCommandBody(cmd *Command) ([]BodyStatement, error) {
+func (e *Executor) cleanCommandBody(cmd *Command, body []BodyStatement) []BodyStatement {
 	if len(cmd.PrereqCmds) > 0 {
 		for _, prereq := range cmd.PrereqCmds {
 			for idx, arg := range prereq.PrereqOutput {
@@ -753,7 +742,7 @@ func (e *Executor) cleanCommandBody(cmd *Command) ([]BodyStatement, error) {
 			}
 		}
 	}
-	return e.cleanStatements(cmd.Body, cmd, e.argFlags(cmd)), nil
+	return e.cleanStatements(body, cmd, e.argFlags(cmd))
 }
 
 func (e *Executor) cleanStatements(stmts []BodyStatement, cmd *Command, argFlags map[string]bool) []BodyStatement {
@@ -904,7 +893,6 @@ func isVarIdentByte(c byte) bool {
 		(c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
 }
 
-// envLookupValue finds KEY=value in an env slice.
 func envLookupValue(env []string, name string) (string, bool) {
 	prefix := name + "="
 	for _, kv := range env {
@@ -1012,6 +1000,37 @@ func resolveVarRefs(line string, lookup func(string) (string, bool)) string {
 	return scanRefs(line, '&', isVarIdentRune, isPlainRune, lookup, true)
 }
 
+// VarRefNames returns the &variable names in s, using runtime resolution's
+// character classes.
+func VarRefNames(s string) []string {
+	if strings.IndexByte(s, '&') < 0 {
+		return nil
+	}
+	var names []string
+	runes := []rune(s)
+	for i := 0; i < len(runes); i++ {
+		if runes[i] != '&' {
+			continue
+		}
+		j := i + 1
+		for j < len(runes) && isVarIdentRune(runes[j]) {
+			j++
+		}
+		if j == i+1 {
+			continue
+		}
+		for j < len(runes) && runes[j] == '.' && j+1 < len(runes) && isPlainRune(runes[j+1]) {
+			j++
+			for j < len(runes) && isPlainRune(runes[j]) {
+				j++
+			}
+		}
+		names = append(names, string(runes[i+1:j]))
+		i = j - 1
+	}
+	return names
+}
+
 // isEnvDefaultEnd reports characters that terminate an @ENV:-default value.
 func isEnvDefaultEnd(r rune) bool {
 	switch r {
@@ -1028,7 +1047,7 @@ func splitEnvRefToken(token string) (name, def string, hasDefault bool) {
 	return token, "", false
 }
 
-func resolveEnvRefs(s string) string {
+func ResolveEnvRefs(s string) string {
 	if strings.IndexByte(s, '@') < 0 {
 		return s
 	}
@@ -1125,7 +1144,6 @@ func evaluateConditionWithBase(cond, base string) bool {
 		return evaluateConditionWithBase(cond[:idx], base) && evaluateConditionWithBase(cond[idx+2:], base)
 	}
 
-	// Negation: ! expr
 	if strings.HasPrefix(cond, "!") {
 		rest := strings.TrimSpace(cond[1:])
 		return rest != "" && !evaluateConditionWithBase(rest, base)
@@ -1272,19 +1290,17 @@ func compare[T ~int | ~string](l, r T, op string) bool {
 	return false
 }
 
-func (e *Executor) tryApplyCloudBody(cmd *Command) error {
+// bodyFor returns the command's body with any cloud definition appended. It
+// never mutates cmd, so concurrent prereq/invoke paths cannot race on cmd.Body.
+func (e *Executor) bodyFor(cmd *Command) []BodyStatement {
 	if !cmd.CloudAccessible {
-		return nil
+		return cmd.Body
 	}
-
 	external, err := e.getCloudDefinition(cmd.Name)
 	if err != nil || external == nil {
-		return nil
+		return cmd.Body
 	}
-
-	cmd.Body = append(cmd.Body, external.Body...)
-	cmd.CloudAccessible = false
-	return nil
+	return append(slices.Clone(cmd.Body), external.Body...)
 }
 
 type execContext struct {
@@ -1300,7 +1316,14 @@ type execContext struct {
 	onFailRun bool
 }
 
-// timed runs fn and records a --flame row when flame tracking is enabled.
+// targetLabel shows lazy-evaluation commands as `name (lazy)`, not __lazy_.
+func (ctx *execContext) targetLabel() string {
+	if ctx.target != nil && ctx.target.LazyEval != nil {
+		return ctx.target.LazyEval.VarName + " (lazy)"
+	}
+	return ctx.target.Name
+}
+
 func (e *Executor) timed(ctx *execContext, label string, fn func() error) error {
 	if !e.flame {
 		return fn()
@@ -1378,7 +1401,6 @@ func (e *Executor) resolveBodyEnvRef(ctx *execContext, s string) string {
 	})
 }
 
-// executorEvalContext resolves expression names at execution time.
 type executorEvalContext struct {
 	e     *Executor
 	ctx   *execContext
@@ -1442,7 +1464,7 @@ func (e *Executor) execBody(ctx *execContext, body []BodyStatement) (err error) 
 		case StmtIf:
 			cond := e.resolveBodyValue(ctx, stmt.Cond, ctx.target.Name)
 			e.debugf("Evaluating condition: %s\n", cond)
-			err := e.timed(ctx, truncateLabel(ctx.target.Name+": if "+stmt.Cond), func() error {
+			err := e.timed(ctx, truncateLabel(ctx.targetLabel()+": if "+stmt.Cond), func() error {
 				if evaluateConditionWithBase(cond, condBase) {
 					if err := e.execBody(ctx, stmt.ThenBody); err != nil {
 						return err
@@ -1460,7 +1482,7 @@ func (e *Executor) execBody(ctx *execContext, body []BodyStatement) (err error) 
 
 		case StmtSwitch:
 			expr := strings.Trim(e.resolveBodyValue(ctx, stmt.SwitchExpr, ctx.target.Name), `"`)
-			err := e.timed(ctx, truncateLabel(ctx.target.Name+": switch "+stmt.SwitchExpr), func() error {
+			err := e.timed(ctx, truncateLabel(ctx.targetLabel()+": switch "+stmt.SwitchExpr), func() error {
 				for _, c := range stmt.Cases {
 					if c.IsDefault {
 						continue
@@ -1484,7 +1506,7 @@ func (e *Executor) execBody(ctx *execContext, body []BodyStatement) (err error) 
 
 		case StmtInDir:
 			dir := e.resolveBodyValue(ctx, stmt.Shell, ctx.target.Name)
-			err := e.timed(ctx, truncateLabel(ctx.target.Name+": in "+dir), func() error {
+			err := e.timed(ctx, truncateLabel(ctx.targetLabel()+": in "+dir), func() error {
 				sub := *ctx
 				sub.workDir = dir
 				sub.depth = ctx.depth + 1
@@ -1501,7 +1523,7 @@ func (e *Executor) execBody(ctx *execContext, body []BodyStatement) (err error) 
 
 		case StmtLock:
 			name := e.resolveBodyValue(ctx, stmt.Shell, ctx.target.Name)
-			err := e.timed(ctx, truncateLabel(ctx.target.Name+": lock "+name), func() error {
+			err := e.timed(ctx, truncateLabel(ctx.targetLabel()+": lock "+name), func() error {
 				return e.withLock(ctx, name, func() error {
 					return e.execBody(ctx, stmt.ThenBody)
 				})
@@ -1561,14 +1583,14 @@ func (e *Executor) execBody(ctx *execContext, body []BodyStatement) (err error) 
 			body = append(body[:i+1], rest...)
 
 		case StmtBuiltin:
-			if err := e.timed(ctx, truncateLabel(ctx.target.Name+": "+stmt.Shell+" "+stmt.BuiltinArgs), func() error {
+			if err := e.timed(ctx, truncateLabel(ctx.targetLabel()+": "+stmt.Shell+" "+stmt.BuiltinArgs), func() error {
 				return e.runBuiltin(ctx, stmt)
 			}); err != nil {
 				return err
 			}
 
 		case StmtInvoke:
-			if err := e.timed(ctx, truncateLabel(ctx.target.Name+": invoke "+stmt.Shell), func() error {
+			if err := e.timed(ctx, truncateLabel(ctx.targetLabel()+": invoke "+stmt.Shell), func() error {
 				return e.invokeCommand(ctx, stmt)
 			}); err != nil {
 				return err
@@ -1641,7 +1663,7 @@ func (e *Executor) execBody(ctx *execContext, body []BodyStatement) (err error) 
 					end++
 				}
 				if end > i {
-					if err := e.timed(ctx, truncateLabel(ctx.target.Name+": batch"), func() error {
+					if err := e.timed(ctx, truncateLabel(ctx.targetLabel()+": batch"), func() error {
 						return e.runShellBatch(ctx, body[i:end])
 					}); err != nil {
 						return err
@@ -1650,7 +1672,7 @@ func (e *Executor) execBody(ctx *execContext, body []BodyStatement) (err error) 
 					continue
 				}
 			}
-			if err := e.timed(ctx, truncateLabel(ctx.target.Name+": "+stmt.Shell), func() error {
+			if err := e.timed(ctx, truncateLabel(ctx.targetLabel()+": "+stmt.Shell), func() error {
 				return e.runShell(ctx, stmt)
 			}); err != nil {
 				return err
@@ -1709,11 +1731,6 @@ func (e *Executor) invokeCommand(ctx *execContext, stmt BodyStatement) error {
 			return err
 		}
 	}
-	if invoked.CloudAccessible {
-		if err := e.tryApplyCloudBody(invoked); err != nil {
-			return err
-		}
-	}
 	if e.invokeDepth == nil {
 		e.invokeDepth = make(map[string]int)
 	}
@@ -1728,6 +1745,7 @@ func (e *Executor) invokeCommand(ctx *execContext, stmt BodyStatement) error {
 	sub := *ctx // invoke bodies run in the caller's context
 	sub.srcFile = invoked.SourceFile
 	sub.out = nil
+	sub.depth = ctx.depth + 1 // one level deeper in the --flame report
 
 	passed := make(map[string]bool)
 	for _, pair := range stmt.InvokeArgs {
@@ -1746,7 +1764,7 @@ func (e *Executor) invokeCommand(ctx *execContext, stmt BodyStatement) error {
 		}
 	}
 
-	cleaned := e.cleanStatements(invoked.Body, ctx.target, e.argFlags(ctx.target))
+	cleaned := e.cleanStatements(e.bodyFor(invoked), ctx.target, e.argFlags(ctx.target))
 
 	var invokeErr error
 	if stmt.OutputName != "" {
@@ -1874,7 +1892,7 @@ func (e *Executor) runShellBatch(ctx *execContext, stmts []BodyStatement) error 
 		if supportsPipefail(e.shellName) {
 			script = "set -o pipefail\n" + script
 		}
-		args := append(e.shellArgs, script)
+		args := append(slices.Clone(e.shellArgs), script)
 		cmd := e.command(ctx, args)
 
 		var buf bytes.Buffer
@@ -1965,12 +1983,11 @@ func (e *Executor) runShellOnce(ctx *execContext, stmt BodyStatement) error {
 		cmdLine = "set -o pipefail\n" + cmdLine
 	}
 
-	runCtx, cancel := e.statementCtx(ctx, stmt.Timeout)
+	stmtCtx, cancel := e.statementCtx(ctx, stmt.Timeout)
 	defer cancel()
-	args := append(e.shellArgs, cmdLine)
-	cmd := e.command(runCtx, args)
+	args := append(slices.Clone(e.shellArgs), cmdLine)
+	cmd := e.command(stmtCtx, args)
 
-	// A single string form is used for debug output and error messages.
 	fullCommand := e.shellName + " " + strings.Join(args, " ")
 	if e.debug {
 		switch {
@@ -2002,7 +2019,7 @@ func (e *Executor) runShellOnce(ctx *execContext, stmt BodyStatement) error {
 		}
 		e.setLastResult(ctx, exitCodeOf(err), buf.String())
 		if err != nil && !ignoreErr {
-			return e.commandError(fullCommand, runCtx, stmt, err, "")
+			return e.commandError(fullCommand, stmtCtx, stmt, err, "")
 		}
 		return nil
 	}
@@ -2032,7 +2049,7 @@ func (e *Executor) runShellOnce(ctx *execContext, stmt BodyStatement) error {
 			e.debugf("Error output: %s\n", string(stderr))
 		}
 		if !ignoreErr {
-			return e.commandError(fullCommand, runCtx, stmt, err, string(stderr))
+			return e.commandError(fullCommand, stmtCtx, stmt, err, string(stderr))
 		}
 		e.debugf("Ignoring failure (error-tolerant statement)\n")
 	}
@@ -2072,23 +2089,23 @@ func (e *Executor) runShellOnce(ctx *execContext, stmt BodyStatement) error {
 	return nil
 }
 
-func (e *Executor) commandError(fullCommand string, ctx *execContext, stmt BodyStatement, err error, stderr string) error {
+func (e *Executor) commandError(fullCommand string, stmtCtx *execContext, stmt BodyStatement, err error, stderr string) error {
 	ce := &CommandError{
 		Cmd:      fullCommand,
 		ExitCode: exitCodeOf(err),
 		Stderr:   stderr,
-		File:     ctx.srcFile,
+		File:     stmtCtx.srcFile,
 		Line:     stmt.SourceLine,
 	}
 	timedOut := errors.Is(err, context.DeadlineExceeded)
-	if !timedOut && e.effectiveRunCtx(ctx).Err() == context.DeadlineExceeded {
+	if !timedOut && e.effectiveRunCtx(stmtCtx).Err() == context.DeadlineExceeded {
 		timedOut = true
 	}
 	if timedOut {
 		ce.TimedOut = true
 		ce.Timeout = stmt.Timeout
 		if ce.Timeout == "" {
-			ce.Timeout = ctx.target.Timeout
+			ce.Timeout = stmtCtx.target.Timeout
 		}
 		ce.ExitCode = 124
 	}
@@ -2110,7 +2127,6 @@ func (e *Executor) Execute(commands []string) error {
 	e.loadState()
 
 	for _, decl := range e.StructuredParse.StateDecls {
-		e.loadState()
 		if _, exists := e.state[decl.Name]; !exists {
 			e.setRuntimeState(decl.Name, e.resolveGlobalValue(decl.Value))
 			e.debugf("state %s=%s (initialized)\n", decl.Name, decl.Value)
@@ -2163,6 +2179,10 @@ func (e *Executor) Execute(commands []string) error {
 		if err := e.EvaluateCommand(cmd); err != nil {
 			return err
 		}
+	}
+
+	if len(targets) == 0 {
+		return errors.New("no commands requested and no default ('_') command defined (run `construct --list` to see available commands)")
 	}
 
 	if e.concurrent {
@@ -2413,7 +2433,10 @@ func (e *Executor) cacheManifest() fileCache {
 func (e *Executor) cacheKey(cmd *Command) string {
 	parts := []string{cmd.Name}
 	for _, arg := range cmd.Arguments {
-		v, _ := e.flagSet.GetString(cmd.Name + ":" + arg.Name)
+		v := arg.Default
+		if e.flagSet != nil {
+			v, _ = e.flagSet.GetString(cmd.Name + ":" + arg.Name)
+		}
 		parts = append(parts, arg.Name+"="+v)
 	}
 	for name, val := range e.StructuredParse.GlobalVariableSnapshot() {

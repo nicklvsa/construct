@@ -9,7 +9,6 @@ import (
 	"strings"
 )
 
-// CloudEntry describes one cloud definition for `construct cloud list`.
 type CloudEntry struct {
 	Name      string
 	BodyStmts int
@@ -21,12 +20,9 @@ func (e *Executor) resolveCloudFile() string {
 		return v
 	}
 	if e.baseDir != "" {
-		candidate := filepath.Join(e.baseDir, "construct-cloud.json")
-		if _, err := os.Stat(candidate); err == nil {
-			return candidate
-		}
+		return filepath.Join(e.baseDir, "construct-cloud.json")
 	}
-	return "fakecloud.json"
+	return "construct-cloud.json"
 }
 
 func LoadCloudDefsFile(path string) (map[string]Command, error) {
@@ -55,7 +51,6 @@ func cloudStmtCount(c Command) int {
 	return n
 }
 
-// CloudList returns the definitions from the cloud file.
 func (e *Executor) CloudList() ([]CloudEntry, error) {
 	path := e.resolveCloudFile()
 	defs, err := LoadCloudDefsFile(path)

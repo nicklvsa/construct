@@ -13,7 +13,7 @@ import (
 	pkg "github.com/nicklvsa/construct/pkg"
 )
 
-// ---- LSP types (subset, hand-rolled to avoid a framework dependency) ----
+// LSP types, hand-rolled to avoid a framework dependency.
 
 type position struct {
 	Line      int `json:"line"`
@@ -104,15 +104,12 @@ type publishDiagnosticsParams struct {
 const (
 	sevError   = 1
 	sevWarning = 2
-	sevInfo    = 3
 )
 
-// ---- server state ----
-
 type docState struct {
-	text    string
-	version int
-	data    *pkg.ParsedData
+	text  string
+	lines []string
+	data  *pkg.ParsedData
 }
 
 type server struct {
@@ -148,9 +145,29 @@ func (s *server) dispatch(method string, params json.RawMessage) (interface{}, e
 		return s.handleCompletion(params)
 	case "textDocument/documentSymbol":
 		return s.handleDocumentSymbol(params)
+	case "textDocument/didClose":
+		return s.handleDidClose(params)
 	default:
-		return nil, nil
+		return nil, errMethodNotFound
 	}
+}
+
+var errMethodNotFound = fmt.Errorf("method not found")
+
+func (s *server) handleDidClose(params json.RawMessage) (any, error) {
+	var p struct {
+		TextDocument struct {
+			URI string `json:"uri"`
+		} `json:"textDocument"`
+	}
+	if err := json.Unmarshal(params, &p); err != nil {
+		return nil, fmt.Errorf("bad params: %w", err)
+	}
+	s.mu.Lock()
+	delete(s.docs, p.TextDocument.URI)
+	s.mu.Unlock()
+	s.publishDiagnostics(p.TextDocument.URI, nil)
+	return nil, nil
 }
 
 func (s *server) handleInitialize(_ json.RawMessage) (any, error) {
@@ -173,7 +190,7 @@ func (s *server) handleDidOpen(params json.RawMessage) (any, error) {
 		return nil, fmt.Errorf("bad params: %w", err)
 	}
 	item := p.TextDocument
-	s.updateDoc(item.URI, item.Text, item.Version)
+	s.updateDoc(item.URI, item.Text)
 	return nil, nil
 }
 
@@ -183,30 +200,31 @@ func (s *server) handleDidChange(params json.RawMessage) (any, error) {
 		return nil, fmt.Errorf("bad params: %w", err)
 	}
 	if len(p.ContentChanges) > 0 {
-		s.updateDoc(p.TextDocument.URI, p.ContentChanges[0].Text, p.TextDocument.Version)
+		s.updateDoc(p.TextDocument.URI, p.ContentChanges[0].Text)
 	}
 	return nil, nil
 }
 
-func (s *server) updateDoc(uri, text string, version int) {
+func (s *server) updateDoc(uri, text string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	lines := strings.Split(text, "\n")
 	parser := pkg.NewParserFromContent(uri, text)
 	data, err := parser.Parse()
 	if err != nil {
-		st := &docState{text: text, version: version}
+		st := &docState{text: text, lines: lines}
 		if old, ok := s.docs[uri]; ok {
 			st.data = old.data
 		}
 		s.docs[uri] = st
-		s.publishDiagnostics(uri, parseErrorToDiagnostics(err, text))
+		s.publishDiagnostics(uri, parseErrorToDiagnostics(err, uri, lines))
 		return
 	}
 
-	s.docs[uri] = &docState{text: text, version: version, data: data}
-	diags := namedOutputHints(text, data)
-	diags = append(diags, duplicatePrereqWarnings(text, data)...)
+	s.docs[uri] = &docState{text: text, lines: lines, data: data}
+	diags := namedOutputHints(lines, data)
+	diags = append(diags, duplicatePrereqWarnings(lines, data)...)
 	s.publishDiagnostics(uri, diags)
 }
 
@@ -217,16 +235,24 @@ func (s *server) publishDiagnostics(uri string, diags []diagnostic) {
 	})
 }
 
-func parseErrorToDiagnostics(err error, text string) []diagnostic {
+func parseErrorToDiagnostics(err error, uri string, lines []string) []diagnostic {
 	sev := sevError
 
 	switch e := err.(type) {
 	case *pkg.ParseError:
+		if docPath := uriToPath(uri); docPath != "" && e.File != "" && e.File != uri && e.File != docPath {
+			// Imported-file error: its lines don't map onto this document.
+			return []diagnostic{{
+				Range:    fullRange(lines),
+				Severity: sev,
+				Source:   "constfile",
+				Message:  e.Error(),
+			}}
+		}
 		line := e.Line
 		if line < 1 {
 			line = 1
 		}
-		lines := strings.Split(text, "\n")
 		endChar := 0
 		if line-1 < len(lines) {
 			endChar = len(lines[line-1])
@@ -245,14 +271,14 @@ func parseErrorToDiagnostics(err error, text string) []diagnostic {
 		}}
 	case *pkg.CircularDependencyError:
 		return []diagnostic{{
-			Range:    fullRange(text),
+			Range:    fullRange(lines),
 			Severity: sevError,
 			Source:   "constfile",
 			Message:  e.Error(),
 		}}
 	case *pkg.MissingDependencyError:
 		return []diagnostic{{
-			Range:    fullRange(text),
+			Range:    fullRange(lines),
 			Severity: sevError,
 			Source:   "constfile",
 			Message:  e.Error(),
@@ -260,15 +286,14 @@ func parseErrorToDiagnostics(err error, text string) []diagnostic {
 	}
 
 	return []diagnostic{{
-		Range:    fullRange(text),
+		Range:    fullRange(lines),
 		Severity: sev,
 		Source:   "constfile",
 		Message:  err.Error(),
 	}}
 }
 
-func fullRange(text string) range_ {
-	lines := strings.Split(text, "\n")
+func fullRange(lines []string) range_ {
 	endLine := max(len(lines)-1, 0)
 	endChar := len(lines[endLine])
 	return range_{
@@ -277,9 +302,8 @@ func fullRange(text string) range_ {
 	}
 }
 
-func duplicatePrereqWarnings(text string, data *pkg.ParsedData) []diagnostic {
+func duplicatePrereqWarnings(lines []string, data *pkg.ParsedData) []diagnostic {
 	diags := []diagnostic{}
-	lines := strings.Split(text, "\n")
 	for lineIdx, line := range lines {
 		lt := strings.IndexByte(line, '<')
 		if lt < 0 {
@@ -349,9 +373,8 @@ func duplicatePrereqWarnings(text string, data *pkg.ParsedData) []diagnostic {
 	return diags
 }
 
-func namedOutputHints(text string, data *pkg.ParsedData) []diagnostic {
+func namedOutputHints(lines []string, data *pkg.ParsedData) []diagnostic {
 	diags := []diagnostic{}
-	lines := strings.Split(text, "\n")
 	for lineIdx, line := range lines {
 		searchFrom := 0
 		for {
@@ -439,6 +462,12 @@ func shellStatements(body []pkg.BodyStatement) []pkg.BodyStatement {
 			out = append(out, shellStatements(stmt.LoopBody)...)
 		case pkg.StmtOnFail:
 			out = append(out, shellStatements(stmt.OnFailBody)...)
+		case pkg.StmtSwitch:
+			for _, c := range stmt.Cases {
+				out = append(out, shellStatements(c.Body)...)
+			}
+		case pkg.StmtInDir, pkg.StmtLock:
+			out = append(out, shellStatements(stmt.ThenBody)...)
 		}
 	}
 	return out
@@ -453,32 +482,27 @@ func hasNamedOutput(body []pkg.BodyStatement, name string) bool {
 		if stmt.OutputName == name {
 			return true
 		}
-		if stmt.Type == pkg.StmtIf {
+		switch stmt.Type {
+		case pkg.StmtIf:
 			if hasNamedOutput(stmt.ThenBody, name) || hasNamedOutput(stmt.ElseBody, name) {
 				return true
 			}
-		}
-		if stmt.Type == pkg.StmtFor && hasNamedOutput(stmt.LoopBody, name) {
-			return true
-		}
-	}
-	return false
-}
-
-// hasInvokeCapture reports whether body has `invoke <cmd> as name`.
-func hasInvokeCapture(body []pkg.BodyStatement, name string) bool {
-	for _, stmt := range body {
-		switch stmt.Type {
-		case pkg.StmtInvoke:
-			if stmt.OutputName == name {
-				return true
-			}
-		case pkg.StmtIf:
-			if hasInvokeCapture(stmt.ThenBody, name) || hasInvokeCapture(stmt.ElseBody, name) {
-				return true
-			}
 		case pkg.StmtFor:
-			if hasInvokeCapture(stmt.LoopBody, name) {
+			if hasNamedOutput(stmt.LoopBody, name) {
+				return true
+			}
+		case pkg.StmtOnFail:
+			if hasNamedOutput(stmt.OnFailBody, name) {
+				return true
+			}
+		case pkg.StmtSwitch:
+			for _, c := range stmt.Cases {
+				if hasNamedOutput(c.Body, name) {
+					return true
+				}
+			}
+		case pkg.StmtInDir, pkg.StmtLock:
+			if hasNamedOutput(stmt.ThenBody, name) {
 				return true
 			}
 		}
@@ -486,7 +510,11 @@ func hasInvokeCapture(body []pkg.BodyStatement, name string) bool {
 	return false
 }
 
-// namedOutputAt checks if command cmdName has a named output at the given index.
+func hasInvokeCapture(body []pkg.BodyStatement, name string) bool {
+	_, _, found := invokeCaptureHint(body, name)
+	return found
+}
+
 func namedOutputAt(data *pkg.ParsedData, cmdName string, idx int) string {
 	cmd, err := data.GetCommand(cmdName)
 	if err != nil || cmd == nil {
@@ -500,20 +528,16 @@ func namedOutputAt(data *pkg.ParsedData, cmdName string, idx int) string {
 	return ""
 }
 
-// extractRefName extracts the variable name from a &reference at the start of s.
+// extractRefName extracts the &reference at the start of s with the canonical charset.
 func extractRefName(s string) string {
 	if len(s) < 2 || s[0] != '&' {
 		return ""
 	}
-	var name strings.Builder
-	for _, r := range s[1:] {
-		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' || r == '.' || r == '-' {
-			name.WriteRune(r)
-		} else {
-			break
-		}
+	names := pkg.VarRefNames(s)
+	if len(names) == 0 || !strings.HasPrefix(s[1:], names[0]) {
+		return ""
 	}
-	return name.String()
+	return names[0]
 }
 
 func (s *server) handleHover(params json.RawMessage) (interface{}, error) {
@@ -529,14 +553,13 @@ func (s *server) handleHover(params json.RawMessage) (interface{}, error) {
 		return nil, nil
 	}
 
-	lines := strings.Split(doc.text, "\n")
+	lines := doc.lines
 	if p.Position.Line >= len(lines) {
 		return nil, nil
 	}
 	line := lines[p.Position.Line]
 	char := p.Position.Character
 
-	// Hover over a &varName reference.
 	if str, name := refAtPosition(line, char); str != "" {
 		hoverMsg := varHoverMessage(name, doc.data)
 		if hoverMsg != "" {
@@ -572,14 +595,12 @@ func (s *server) handleHover(params json.RawMessage) (interface{}, error) {
 			}
 		}
 
-		// &fail.* refs are only meaningful inside onfail blocks.
 		if msg, ok := failContextHover(lines, p.Position.Line, name); ok {
 			return hoverResult{
 				Contents: markupContent{Kind: "markdown", Value: msg},
 			}, nil
 		}
 
-		// &last.* refs are set by the previous shell statement.
 		if msg, ok := lastResultHover(name); ok {
 			return hoverResult{
 				Contents: markupContent{Kind: "markdown", Value: msg},
@@ -587,16 +608,47 @@ func (s *server) handleHover(params json.RawMessage) (interface{}, error) {
 		}
 	}
 
-	// Hover over the `$` shell prefix or the `!` tolerance prefix.
 	if prefixHover, ok := linePrefixHover(line, char); ok {
 		return hoverResult{
 			Contents: markupContent{Kind: "markdown", Value: prefixHover},
 		}, nil
 	}
 
-	// Hover over statement keywords and builtins — never inside a shell
-	// line: everything after a `$` is shell code, not construct syntax.
+	// Argument declarations in a command header: `deploy (env, opt region)`.
+	if arg, ok := headerArgAtPosition(line, char); ok {
+		if arg == "opt" {
+			return hoverResult{
+				Contents: markupContent{Kind: "markdown", Value: "`opt` — marks the preceding argument declaration as optional."},
+			}, nil
+		}
+		if cmd := enclosingCommand(lines, p.Position.Line, doc.data); cmd != nil {
+			for _, a := range cmd.Arguments {
+				if a.Name == arg {
+					msg := fmt.Sprintf("`%s` — argument of command `%s`\n\npass with `--%s:%s=<value>`", arg, cmd.Name, cmd.Name, a.Name)
+					if a.IsOptional {
+						msg += "\n\noptional"
+					}
+					if a.Default != "" {
+						msg += fmt.Sprintf("\n\ndefault: `%s`", a.Default)
+					}
+					return hoverResult{
+						Contents: markupContent{Kind: "markdown", Value: msg},
+					}, nil
+				}
+			}
+		}
+	}
+
+	// Keywords/builtins — never in shell text after a `$`.
 	if word, ok := wordAtPosition(line, char); ok && !shellLineContentAt(line, char) {
+		// A word used as a call (`env("X")`) is a function, not a keyword.
+		if strings.Contains(line, word+"(") {
+			if msg, found := functionHover(word); found {
+				return hoverResult{
+					Contents: markupContent{Kind: "markdown", Value: msg},
+				}, nil
+			}
+		}
 		if msg, found := keywordHover(word); found {
 			return hoverResult{
 				Contents: markupContent{Kind: "markdown", Value: msg},
@@ -609,7 +661,6 @@ func (s *server) handleHover(params json.RawMessage) (interface{}, error) {
 		}
 	}
 
-	// Hover over the `onfail` keyword itself.
 	if trimmed := strings.TrimSpace(line); strings.HasPrefix(trimmed, "onfail ") || trimmed == "onfail{" {
 		return hoverResult{
 			Contents: markupContent{
@@ -619,13 +670,29 @@ func (s *server) handleHover(params json.RawMessage) (interface{}, error) {
 		}, nil
 	}
 
-	// Hover over an @ENV reference — show the environment variable's value.
+	// Must precede the @ENV hover, which would misread @state as an env var.
+	if name, ok := stateRefAtPosition(line, char); ok {
+		msg := fmt.Sprintf("`state(\"%s\")` — persisted state", name)
+		for _, d := range doc.data.StateDecls {
+			if d.Name == name {
+				msg += fmt.Sprintf("\n\ndeclared value: `%s`", d.Value)
+			}
+		}
+		msg += "\n\npersists across runs in `.construct-cache/state.json`"
+		return hoverResult{
+			Contents: markupContent{Kind: "markdown", Value: msg},
+		}, nil
+	}
+
 	if envName, ok := envRefAtPosition(line, char); ok {
 		val := os.Getenv(envName)
 		var msg string
-		if val != "" {
+		switch {
+		case val != "":
 			msg = fmt.Sprintf("`@%s` (environment variable)\n\nresolved to: `%s`", envName, val)
-		} else {
+		case envDefaultOnLine(line, envName) != "":
+			msg = fmt.Sprintf("`@%s` (environment variable)\n\n⚠ not set — default: `%s`", envName, envDefaultOnLine(line, envName))
+		default:
 			msg = fmt.Sprintf("`@%s` (environment variable)\n\n⚠ not set (resolves to empty)", envName)
 		}
 		return hoverResult{
@@ -644,6 +711,38 @@ func (s *server) handleHover(params json.RawMessage) (interface{}, error) {
 		}
 	}
 
+	if fd, _, _, ok := fileDepAtPosition(line, char); ok {
+		resolved := resolveWorkDir(fd, p.TextDocument.URI)
+		msg := fmt.Sprintf("`%s` — file dependency\n\nresolved: `%s`", fd, resolved)
+		if info, err := os.Stat(resolved); err == nil {
+			if info.IsDir() {
+				msg += fmt.Sprintf("\n\ndirectory — modified %s", info.ModTime().Format("2006-01-02 15:04"))
+			} else {
+				msg += fmt.Sprintf("\n\n%s — modified %s", humanSize(info.Size()), info.ModTime().Format("2006-01-02 15:04"))
+			}
+		} else if !strings.ContainsAny(resolved, "*?") {
+			msg += "\n\n⚠ missing (the command always runs)"
+		}
+		return hoverResult{
+			Contents: markupContent{Kind: "markdown", Value: msg},
+		}, nil
+	}
+
+	if name, isCmd := commandNameAtLine(line); isCmd {
+		if _, err := doc.data.GetCommand(name); err == nil {
+			if dir, _, _, ok := workDirAtPosition(line, char); ok {
+				resolved := resolveWorkDir(dir, p.TextDocument.URI)
+				msg := fmt.Sprintf("📂 working directory: `%s`\n\nresolved: `%s`", dir, resolved)
+				if info, err := os.Stat(resolved); err == nil && info.IsDir() {
+					msg += "\n\nexists ✓"
+				}
+				return hoverResult{
+					Contents: markupContent{Kind: "markdown", Value: msg},
+				}, nil
+			}
+		}
+	}
+
 	if name, isCmd := commandNameAtLine(line); isCmd {
 		if cmd, err := doc.data.GetCommand(name); err == nil {
 			return hoverResult{
@@ -655,7 +754,6 @@ func (s *server) handleHover(params json.RawMessage) (interface{}, error) {
 		}
 	}
 
-	// Hover over an `invoke <command>` target.
 	if target, _, _, ok := invokeNameAtPosition(line, char); ok {
 		if cmd, err := doc.data.GetCommand(target); err == nil {
 			return hoverResult{
@@ -667,26 +765,15 @@ func (s *server) handleHover(params json.RawMessage) (interface{}, error) {
 		}
 	}
 
-	if hdr, isHdr := commandNameAtLine(line); isHdr {
-		if _, err := doc.data.GetCommand(hdr); err == nil {
-			if dir, _, _, ok := workDirAtPosition(line, char); ok {
-				resolved := resolveWorkDir(dir, p.TextDocument.URI)
-				return hoverResult{
-					Contents: markupContent{
-						Kind:  "markdown",
-						Value: fmt.Sprintf("📂 working directory: `%s`\n\nresolved: `%s`", dir, resolved),
-					},
-				}, nil
-			}
-		}
-	}
-
 	return nil, nil
 }
 
 func commandHover(c *pkg.Command) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "**%s**\n\n", c.Name)
+	if c.Description != "" {
+		fmt.Fprintf(&b, "%s\n\n", c.Description)
+	}
 	if c.CloudAccessible {
 		b.WriteString("- cloud-accessible\n")
 	}
@@ -713,6 +800,12 @@ func commandHover(c *pkg.Command) string {
 	if c.WorkDir != "" {
 		fmt.Fprintf(&b, "- working dir: `%s`\n", c.WorkDir)
 	}
+	if c.Timeout != "" {
+		fmt.Fprintf(&b, "- timeout: `%s`\n", c.Timeout)
+	}
+	if len(c.Produces) > 0 {
+		fmt.Fprintf(&b, "- produces: `%s`\n", strings.Join(c.Produces, "`, `"))
+	}
 	if len(c.Body) > 0 {
 		fmt.Fprintf(&b, "- %d body statement(s)\n", len(c.Body))
 	}
@@ -738,7 +831,6 @@ func splitCommandRef(data *pkg.ParsedData, name string) (cmdName, suffix string,
 func varHoverMessage(name string, data *pkg.ParsedData) string {
 	cmdName, suffix, ok := splitCommandRef(data, name)
 	if !ok {
-		// Plain &var — look it up in the variable map.
 		v, err := data.GetVariable(name, "")
 		if err != nil {
 			for _, vv := range data.Variables {
@@ -799,7 +891,7 @@ func (s *server) handleDefinition(params json.RawMessage) (interface{}, error) {
 		return nil, nil
 	}
 
-	lines := strings.Split(doc.text, "\n")
+	lines := doc.lines
 	if p.Position.Line >= len(lines) {
 		return nil, nil
 	}
@@ -829,7 +921,6 @@ func (s *server) handleDefinition(params json.RawMessage) (interface{}, error) {
 	}
 
 	if _, name := refAtPosition(line, char); name != "" {
-		// Find the declaration line ("var name ...") anywhere in the doc.
 		for i, l := range lines {
 			trimmed := strings.TrimSpace(l)
 			if strings.HasPrefix(trimmed, "var ") {
@@ -860,7 +951,6 @@ func (s *server) handleDefinition(params json.RawMessage) (interface{}, error) {
 			}
 		}
 
-		// &cmd.out / &cmd.N: jump to the shell statement producing it.
 		if loc, ok := outputStmtLocation(doc, name, p.TextDocument.URI); ok {
 			return loc, nil
 		}
@@ -874,7 +964,6 @@ func (s *server) handleDefinition(params json.RawMessage) (interface{}, error) {
 		}
 	}
 
-	// invoke <command> targets resolve the same way.
 	if target, _, _, ok := invokeNameAtPosition(line, char); ok {
 		if _, err := doc.data.GetCommand(target); err == nil {
 			if loc, ok := s.findCommandLocation(doc, target, p.TextDocument.URI); ok {
@@ -959,7 +1048,7 @@ func (s *server) handleCompletion(params json.RawMessage) (any, error) {
 		return nil, nil
 	}
 
-	lines := strings.Split(doc.text, "\n")
+	lines := doc.lines
 	if p.Position.Line >= len(lines) {
 		return nil, nil
 	}
@@ -971,7 +1060,6 @@ func (s *server) handleCompletion(params json.RawMessage) (any, error) {
 		return completionList{Items: completionVarItems(doc.data, lines, p.Position.Line, prefix)}, nil
 	}
 
-	// In a prereq list we complete command names.
 	if isPrereqListLine(line) {
 		for _, c := range doc.data.Commands {
 			items = append(items, completionItem{Label: c.Name, Kind: 3}) // Function
@@ -1011,7 +1099,7 @@ func (s *server) handleCompletion(params json.RawMessage) (any, error) {
 }
 
 var statementKeywords = []string{
-	"switch", "case", "default", "in", "lock", "state",
+	"var", "import", "switch", "case", "default", "in", "lock", "state",
 	"confirm", "prompt", "input", "timeout",
 	"cp", "rm", "mkdir", "touch", "download", "extract",
 	"for", "if", "matrix", "env", "invoke", "fail", "global",
@@ -1025,8 +1113,7 @@ var builtinFunctions = []string{
 	"len", "sort", "uniq", "join", "split", "env", "state",
 }
 
-// lineStartWord returns the word being typed at the start of a line (only
-// whitespace before it).
+// lineStartWord returns the word at the start of a line (only whitespace before).
 func lineStartWord(line string, char int) (string, bool) {
 	if char > len(line) {
 		char = len(line)
@@ -1042,6 +1129,49 @@ func lineStartWord(line string, char int) (string, bool) {
 		}
 	}
 	return trimmed, true
+}
+
+// headerArgAtPosition reports the word under char inside a header's argument
+// list, e.g. `deploy (env, opt region) {`.
+func headerArgAtPosition(line string, char int) (string, bool) {
+	open := strings.IndexByte(line, '(')
+	if open < 0 {
+		return "", false
+	}
+	closeIdx := strings.IndexByte(line[open:], ')')
+	if closeIdx < 0 {
+		return "", false
+	}
+	closeIdx += open
+	if char <= open || char >= closeIdx {
+		return "", false
+	}
+	return wordAtPosition(line, char)
+}
+
+// envDefaultOnLine extracts the :-default of an @ENV reference on the line.
+func envDefaultOnLine(line, envName string) string {
+	idx := strings.Index(line, "@"+envName+":-")
+	if idx < 0 {
+		return ""
+	}
+	rest := line[idx+1+len(envName)+2:]
+	end := strings.IndexAny(rest, " \t\r\n\"',;&$")
+	if end < 0 {
+		end = len(rest)
+	}
+	return rest[:end]
+}
+
+func humanSize(n int64) string {
+	switch {
+	case n >= 1<<20:
+		return fmt.Sprintf("%.1f MB", float64(n)/(1<<20))
+	case n >= 1<<10:
+		return fmt.Sprintf("%.1f KB", float64(n)/(1<<10))
+	default:
+		return fmt.Sprintf("%d B", n)
+	}
 }
 
 func wordAtPosition(line string, char int) (string, bool) {
@@ -1087,11 +1217,10 @@ func (s *server) handleDocumentSymbol(params json.RawMessage) (interface{}, erro
 	lines := strings.Split(doc.text, "\n")
 	var symbols []documentSymbol
 	for _, cmd := range doc.data.Commands {
-		if strings.Contains(cmd.Name, "__lazy_") {
+		if pkg.IsLazyName(cmd.Name) {
 			continue
 		}
-		// Imported commands live in other files; their SourceLine is not a
-		// line in this document.
+		// Imported commands' SourceLines belong to other files.
 		if strings.TrimPrefix(cmd.SourceFile, "file://") != strings.TrimPrefix(p.TextDocument.URI, "file://") {
 			continue
 		}
@@ -1108,11 +1237,10 @@ func (s *server) handleDocumentSymbol(params json.RawMessage) (interface{}, erro
 			End:   position{Line: cmd.SourceLine - 1, Character: nameCol + len(cmd.Name)},
 		}
 
-		// Command range: header line through the matching closing brace.
 		endLine := cmd.SourceLine - 1
-		depth := strings.Count(headerLine, "{") - strings.Count(headerLine, "}")
+		depth := netBraces(headerLine)
 		for l := cmd.SourceLine; l < len(lines) && depth > 0; l++ {
-			depth += strings.Count(lines[l], "{") - strings.Count(lines[l], "}")
+			depth += netBraces(lines[l])
 			endLine = l
 		}
 		detail := ""
@@ -1267,16 +1395,13 @@ func outputStmtLocation(doc *docState, ref, docURI string) (location, bool) {
 		return location{}, false
 	}
 
-	shellIdx := 0
+	stmts := shellStatements(cmd.Body)
 	var hit *pkg.BodyStatement
-	for i := range cmd.Body {
-		stmt := &cmd.Body[i]
-		if stmt.Type != pkg.StmtShell {
-			continue
-		}
+	for i := range stmts {
+		stmt := &stmts[i]
 		match := false
 		if idx, err := strconv.Atoi(suffix); err == nil {
-			match = shellIdx == idx
+			match = i == idx
 		} else if stmt.OutputName == suffix {
 			match = true
 		}
@@ -1284,7 +1409,6 @@ func outputStmtLocation(doc *docState, ref, docURI string) (location, bool) {
 			hit = stmt
 			break
 		}
-		shellIdx++
 	}
 	if hit == nil || hit.SourceLine <= 0 {
 		return location{}, false
@@ -1368,6 +1492,20 @@ func invokeCaptureHint(body []pkg.BodyStatement, name string) (invoked string, l
 			if inv, ln, f := invokeCaptureHint(stmt.LoopBody, name); f {
 				return inv, ln, f
 			}
+		case pkg.StmtOnFail:
+			if inv, ln, f := invokeCaptureHint(stmt.OnFailBody, name); f {
+				return inv, ln, f
+			}
+		case pkg.StmtSwitch:
+			for _, c := range stmt.Cases {
+				if inv, ln, f := invokeCaptureHint(c.Body, name); f {
+					return inv, ln, f
+				}
+			}
+		case pkg.StmtInDir, pkg.StmtLock:
+			if inv, ln, f := invokeCaptureHint(stmt.ThenBody, name); f {
+				return inv, ln, f
+			}
 		}
 	}
 	return "", 0, false
@@ -1401,7 +1539,8 @@ func refAtPosition(line string, char int) (string, string) {
 	return string(runes[idx : idx+1+len(full)]), full
 }
 
-func envRefAtPosition(line string, char int) (string, bool) {	runes := []rune(line)
+func envRefAtPosition(line string, char int) (string, bool) {
+	runes := []rune(line)
 	idx := -1
 	for i, r := range runes {
 		if i <= char && r == '@' {
@@ -1427,8 +1566,7 @@ func envRefAtPosition(line string, char int) (string, bool) {	runes := []rune(li
 	return name.String(), true
 }
 
-// stateRefAtPosition finds a state("name") or @state("name") reference
-// covering char.
+// stateRefAtPosition finds a state("name")/@state("name") reference covering char.
 func stateRefAtPosition(line string, char int) (string, bool) {
 	for _, marker := range []string{"@state(", "state("} {
 		idx := 0
@@ -1462,38 +1600,10 @@ func isIdentRune(r rune) bool {
 	return r == '_' || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z')
 }
 
+// commandNameAtLine guesses the header's command name via the parser's own
+// header logic. Callers must validate with GetCommand; shell lines match nothing.
 func commandNameAtLine(line string) (string, bool) {
-	trimmed := strings.TrimSpace(line)
-
-	// Cloud command |name|
-	if strings.HasPrefix(trimmed, "|") {
-		end := strings.Index(trimmed[1:], "|")
-		if end > 0 {
-			return trimmed[1 : 1+end], true
-		}
-	}
-
-	// Default command _
-	if trimmed == "_" || strings.HasPrefix(trimmed, "_ ") || strings.HasPrefix(trimmed, "_(") {
-		return "_", true
-	}
-
-	inIdx := strings.Index(trimmed, " in ")
-	timeoutIdx := strings.Index(trimmed, " timeout ")
-	endIdx := len(trimmed)
-	for i, r := range trimmed {
-		if r == '(' || r == '<' || r == '{' {
-			endIdx = i
-			break
-		}
-	}
-	if inIdx >= 0 && inIdx < endIdx {
-		endIdx = inIdx
-	}
-	if timeoutIdx >= 0 && timeoutIdx < endIdx {
-		endIdx = timeoutIdx
-	}
-	name := strings.TrimSpace(trimmed[:endIdx])
+	name := pkg.ParseCommandName(line)
 	if name == "" {
 		return "", false
 	}
@@ -1575,7 +1685,7 @@ func fileDepAtPosition(line string, char int) (token string, startCol, endCol in
 
 	for part := range strings.SplitSeq(region, ",") {
 		part = strings.TrimSpace(part)
-		if part == "" || !looksLikeFileDep(part) {
+		if part == "" || !pkg.IsFileDep(part) {
 			continue
 		}
 		idx := strings.Index(region, part)
@@ -1584,16 +1694,6 @@ func fileDepAtPosition(line string, char int) (token string, startCol, endCol in
 		}
 	}
 	return "", 0, 0, false
-}
-
-func looksLikeFileDep(token string) bool {
-	if strings.ContainsAny(token, "/*\\?") {
-		return true
-	}
-	if dot := strings.LastIndexByte(token, '.'); dot > 0 && dot < len(token)-1 {
-		return true
-	}
-	return false
 }
 
 func workDirAtPosition(line string, char int) (dir string, startCol, endCol int, ok bool) {
@@ -1635,7 +1735,7 @@ func workDirAtPosition(line string, char int) (dir string, startCol, endCol int,
 }
 
 func resolveWorkDir(dir, docURI string) string {
-	dir = resolveEnvRefsInString(dir)
+	dir = pkg.ResolveEnvRefs(dir)
 	if filepath.IsAbs(dir) {
 		return filepath.Clean(dir)
 	}
@@ -1675,54 +1775,6 @@ func uriToPath(uri string) string {
 	return filepath.FromSlash(p)
 }
 
-// isEnvDefaultEnd reports characters that terminate an @ENV:-default value.
-func isEnvDefaultEnd(r rune) bool {
-	switch r {
-	case ' ', '\t', '\r', '\n', '"', '\'', ',', ';', '&', '@', '$':
-		return true
-	}
-	return false
-}
-
-func resolveEnvRefsInString(s string) string {
-	var result strings.Builder
-	runes := []rune(s)
-	for i := 0; i < len(runes); {
-		if runes[i] == '@' {
-			var name strings.Builder
-			j := i + 1
-			for j < len(runes) && (isIdentRune(runes[j]) || (runes[j] >= '0' && runes[j] <= '9')) {
-				name.WriteRune(runes[j])
-				j++
-			}
-			if name.Len() > 0 {
-				envName := name.String()
-				def := ""
-				hasDefault := false
-				if j+1 < len(runes) && runes[j] == ':' && runes[j+1] == '-' {
-					j += 2
-					defStart := j
-					for j < len(runes) && !isEnvDefaultEnd(runes[j]) {
-						j++
-					}
-					def = string(runes[defStart:j])
-					hasDefault = true
-				}
-				if val, ok := os.LookupEnv(envName); ok {
-					result.WriteString(val)
-				} else if hasDefault {
-					result.WriteString(def)
-				}
-				i = j
-				continue
-			}
-		}
-		result.WriteRune(runes[i])
-		i++
-	}
-	return result.String()
-}
-
 func completionVarPrefix(line string, char int) (string, bool) {
 	runes := []rune(line)
 	if char > len(runes) {
@@ -1758,10 +1810,7 @@ func completionVarItems(data *pkg.ParsedData, lines []string, lineIdx int, prefi
 		if c := resolveCommandRef(data, prefix[:dot]); c != nil {
 			named := 0
 			shellIdx := 0
-			for _, stmt := range c.Body {
-				if stmt.Type != pkg.StmtShell {
-					continue
-				}
+			for _, stmt := range shellStatements(c.Body) {
 				if stmt.OutputName != "" {
 					add(c.Name+"."+stmt.OutputName, stmt.OutputName, 6) // Variable
 					named++
@@ -1811,12 +1860,13 @@ func completionVarItems(data *pkg.ParsedData, lines []string, lineIdx int, prefi
 	return items
 }
 
-// resolveCommandRef finds the longest command prefixing name (e.g. "lib.gen").
+// resolveCommandRef finds name itself or its longest command prefix.
 func resolveCommandRef(data *pkg.ParsedData, name string) *pkg.Command {
-	for i := len(name); i > 0; i = strings.LastIndexByte(name[:i], '.') {
-		if cmd, err := data.GetCommand(name[:i]); err == nil {
-			return cmd
-		}
+	if cmdName, _, ok := splitCommandRef(data, name); ok {
+		name = cmdName
+	}
+	if cmd, err := data.GetCommand(name); err == nil {
+		return cmd
 	}
 	return nil
 }
@@ -1829,7 +1879,7 @@ func isPrereqListLine(line string) bool {
 	if strings.HasPrefix(trimmed, "$") {
 		return false
 	}
-	for _, kw := range []string{"if ", "for ", "matrix ", "env ", "invoke ", "onfail ", "fail ", "global ", "require_env ", "retry ", "else", "continue", "break", "switch ", "case ", "default", "in ", "lock ", "state ", "confirm ", "prompt ", "input ", "timeout ", "cp ", "rm ", "mkdir ", "touch ", "download ", "extract "} {
+	for _, kw := range []string{"var ", "import ", "if ", "for ", "matrix ", "env ", "invoke ", "onfail ", "fail ", "global ", "require_env ", "retry ", "else", "continue", "break", "switch ", "case ", "default", "in ", "lock ", "state ", "confirm ", "prompt ", "input ", "timeout ", "cp ", "rm ", "mkdir ", "touch ", "download ", "extract "} {
 		if strings.HasPrefix(trimmed, kw) {
 			return false
 		}
@@ -1837,15 +1887,23 @@ func isPrereqListLine(line string) bool {
 	return strings.Contains(line, "<")
 }
 
-// inOnFailBlock reports whether lineIdx is inside an `onfail { ... }` block.
-// Walks up counting braces; when a line's `{` drops the depth below zero,
-// its matching closer lies below the cursor, so the cursor is inside that
-// block.
+// netBraces counts braces on a line, ignoring shell lines (starting with `$`
+// or `!`) so `awk '{print}'` and `${var}` don't skew the depth.
+func netBraces(line string) int {
+	trimmed := strings.TrimLeft(line, " \t")
+	if strings.HasPrefix(trimmed, "$") || strings.HasPrefix(trimmed, "!") {
+		return 0
+	}
+	return strings.Count(line, "{") - strings.Count(line, "}")
+}
+
+// inOnFailBlock reports whether lineIdx is inside an `onfail` block, walking
+// up counting braces until an unmatched closer appears.
 func inOnFailBlock(lines []string, lineIdx int) bool {
 	depth := 0
 	for i := lineIdx; i >= 0; i-- {
 		line := lines[i]
-		depth += strings.Count(line, "}") - strings.Count(line, "{")
+		depth -= netBraces(line)
 		if depth < 0 && (strings.HasPrefix(strings.TrimSpace(line), "onfail ") || strings.TrimSpace(line) == "onfail{") {
 			return true
 		}
@@ -1853,8 +1911,6 @@ func inOnFailBlock(lines []string, lineIdx int) bool {
 	return false
 }
 
-// failContextHover describes an &fail.* ref when hovered inside an onfail
-// block.
 func failContextHover(lines []string, lineIdx int, name string) (string, bool) {
 	if !inOnFailBlock(lines, lineIdx) {
 		return "", false
@@ -1880,8 +1936,6 @@ func lastResultHover(name string) (string, bool) {
 	return "", false
 }
 
-// linePrefixHover explains the `$` shell prefix and the `!` tolerance
-// marker when hovered at the start of a body line.
 func linePrefixHover(line string, char int) (string, bool) {
 	trimmed := strings.TrimLeft(line, " \t")
 	lead := len(line) - len(trimmed)
@@ -1897,8 +1951,7 @@ func linePrefixHover(line string, char int) (string, bool) {
 	return "", false
 }
 
-// shellLineContentAt reports whether char sits in the shell portion of a
-// line: anything after a `$` is shell code, not construct syntax.
+// shellLineContentAt reports whether char sits after the `$` shell marker.
 func shellLineContentAt(line string, char int) bool {
 	if idx := strings.IndexByte(line, '$'); idx >= 0 && char > idx {
 		return true
@@ -1940,6 +1993,38 @@ func keywordHover(word string) (string, bool) {
 		return "builtin: `download <url> <dst>`\n\nDownloads a URL to a file with a progress bar on TTYs.\n\nBare `download` runs the builtin; `$ download` runs the shell's download.", true
 	case "extract":
 		return "builtin: `extract <archive> <dir>`\n\nExtracts `.zip`, `.tar`, `.tar.gz`/`.tgz` or `.tar.bz2` archives; entries escaping the destination are refused.\n\nBare `extract` runs the builtin; `$ extract` runs the shell's extract.", true
+	case "for":
+		return "`for x in a, b, c { ... }`\n\nIterates over comma-separated items. `for i, x in ...` also binds the index; globs (`*.go`) and ranges (`1..5`) expand too.", true
+	case "if":
+		return "`if <cond> { ... } else if ... { ... } else { ... }`\n\nConditions support `==`, `!=`, `<`, `>`, `<=`, `>=`, `&&`, `||`, `!`, `contains`, `starts_with`, `ends_with`, `matches`, `in`, and the helpers `exists()`, `missing()`, `glob()`, `require()`.", true
+	case "matrix":
+		return "`matrix os in linux, mac; arch in amd64, arm64 { ... }`\n\nRuns the body once per combination of the `;`-separated clauses (nested loops).", true
+	case "env":
+		return "`env KEY=VALUE { ... }` or `env KEY=VALUE, ... { ... }`\n\nExports variables to the rest of the command's statements; reference them as `@KEY`.", true
+	case "invoke":
+		return "`invoke <cmd> k=v, ...`\n\nRuns another command's body inline in the current one. `invoke <cmd> as out` captures its combined output into `&out`.", true
+	case "fail":
+		return "`fail \"message\"`\n\nAborts the command with a failure (onfail blocks run).", true
+	case "global":
+		return "`global name = value`\n\nWrites a global variable from inside a command body; visible to every command.", true
+	case "require_env":
+		return "`require_env KEY \"message\"`\n\nFails the command when the environment variable KEY is not set.", true
+	case "retry":
+		return "`retry N $ cmd`\n\nReruns the statement up to N extra times when it fails.", true
+	case "onfail":
+		return "runs once when any later statement in this command fails\n\nfailure context available: `&fail.message`, `&fail.line`, `&fail.exit`", true
+	case "continue":
+		return "`continue` — skip to the next loop iteration; `continue if <cond>` is the conditional form.", true
+	case "break":
+		return "`break` — exit the loop; `break if <cond>` is the conditional form.", true
+	case "var":
+		return "`var name = value`\n\nDeclares a variable; reference it as `&name`. Values support expressions (`[a, b]`, `1 + 2`), `@ENV` refs, and `state(\"name\")`.", true
+	case "import":
+		return "`import \"lib.constfile\" as lib`\n\nMerges another file's commands and variables, optionally under a namespace (`lib.cmd`, `&lib.var`).", true
+	case "produces":
+		return "`produces <files>`\n\nDeclares the command's outputs. While the artifacts exist and are newer than the command's file dependencies, the command is skipped as up to date.", true
+	case "onchange":
+		return "`onchange <globs>`\n\nExtra file patterns that rerun this command in `--watch` mode.", true
 	}
 	return "", false
 }

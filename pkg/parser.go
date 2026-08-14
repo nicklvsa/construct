@@ -27,77 +27,74 @@ type ParsedData struct {
 	mu sync.RWMutex
 }
 
-func (p *ParsedData) buildIndexMaps() {
-	p.variableMap = make(map[string]*Variable, len(p.Variables))
-	p.commandMap = make(map[string]*Command, len(p.Commands))
+// buildIndexMapsLocked creates the lookup maps if missing; mu must be held.
+// addVariable/addCommand keep them in sync afterwards.
+func (p *ParsedData) buildIndexMapsLocked() {
+	if p.variableMap == nil {
+		p.variableMap = make(map[string]*Variable, len(p.Variables))
+		for _, v := range p.Variables {
+			p.variableMap[v.Scope+"."+v.Name] = v
+		}
+	}
+	if p.commandMap == nil {
+		p.commandMap = make(map[string]*Command, len(p.Commands))
+		for _, cmd := range p.Commands {
+			p.commandMap[cmd.Name] = cmd
+		}
+	}
+}
 
+// buildIndexMaps rebuilds the lookup maps from scratch (Parse, tests).
+func (p *ParsedData) buildIndexMaps() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.variableMap = make(map[string]*Variable, len(p.Variables))
 	for _, v := range p.Variables {
 		p.variableMap[v.Scope+"."+v.Name] = v
 	}
+	p.commandMap = make(map[string]*Command, len(p.Commands))
 	for _, cmd := range p.Commands {
 		p.commandMap[cmd.Name] = cmd
 	}
+}
+
+func (p *ParsedData) addVariable(v *Variable) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.buildIndexMapsLocked()
+	p.Variables = append(p.Variables, v)
+	p.variableMap[v.Scope+"."+v.Name] = v
+}
+
+func (p *ParsedData) addCommand(cmd *Command) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.buildIndexMapsLocked()
+	p.Commands = append(p.Commands, cmd)
+	p.commandMap[cmd.Name] = cmd
 }
 
 func (p *ParsedData) SetVariable(name, scope, value string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	if p.variableMap != nil {
-		key := scope + "." + name
-		if v, ok := p.variableMap[key]; ok {
-			v.Value = value
-			return
-		}
-		v := &Variable{Name: name, Value: value, Scope: scope}
-		p.Variables = append(p.Variables, v)
-		p.variableMap[key] = v
+	p.buildIndexMapsLocked()
+	key := scope + "." + name
+	if v, ok := p.variableMap[key]; ok {
+		v.Value = value
 		return
 	}
-
-	for _, v := range p.Variables {
-		if v.Name == name && v.Scope == scope {
-			v.Value = value
-			return
-		}
-	}
-	p.Variables = append(p.Variables, &Variable{Name: name, Value: value, Scope: scope})
+	v := &Variable{Name: name, Value: value, Scope: scope}
+	p.Variables = append(p.Variables, v)
+	p.variableMap[key] = v
 }
 
 func (p *ParsedData) LookupVariable(name, scope string) (string, bool) {
-	if strings.IndexByte(name, '"') >= 0 {
-		name = strings.ReplaceAll(name, `"`, "")
-	}
-	if scope == "" {
-		scope = "global"
-	}
-
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-
-	if p.variableMap != nil {
-		if v, ok := p.variableMap[scope+"."+name]; ok {
-			return v.Value, true
-		}
-		if scope != "global" {
-			if v, ok := p.variableMap["global."+name]; ok {
-				return v.Value, true
-			}
-		}
+	v, err := p.GetVariable(name, scope)
+	if err != nil {
 		return "", false
 	}
-
-	for _, v := range p.Variables {
-		if v.Name == name && v.Scope == scope {
-			return v.Value, true
-		}
-	}
-	for _, v := range p.Variables {
-		if v.Name == name && v.Scope == "global" {
-			return v.Value, true
-		}
-	}
-	return "", false
+	return v.Value, true
 }
 
 func (p *ParsedData) GetVariable(variableName, scope string) (*Variable, error) {
@@ -109,49 +106,35 @@ func (p *ParsedData) GetVariable(variableName, scope string) (*Variable, error) 
 		scope = "global"
 	}
 
+	if p.variableMap == nil {
+		p.mu.Lock()
+		p.buildIndexMapsLocked()
+		p.mu.Unlock()
+	}
+
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 
-	if p.variableMap != nil {
-		if v, ok := p.variableMap[scope+"."+variableName]; ok {
+	if v, ok := p.variableMap[scope+"."+variableName]; ok {
+		return v, nil
+	}
+	if scope != "global" {
+		if v, ok := p.variableMap["global."+variableName]; ok {
 			return v, nil
 		}
-		if scope != "global" {
-			if v, ok := p.variableMap["global."+variableName]; ok {
-				return v, nil
-			}
-		}
-		return nil, fmt.Errorf("cannot find variable with name %s", variableName)
 	}
-
-	for _, variable := range p.Variables {
-		if variable.Name == variableName && variable.Scope == scope {
-			return variable, nil
-		}
-	}
-	for _, variable := range p.Variables {
-		if variable.Name == variableName && variable.Scope == "global" {
-			return variable, nil
-		}
-	}
-
 	return nil, fmt.Errorf("cannot find variable with name %s", variableName)
 }
 
 func (p *ParsedData) GetCommand(commandName string) (*Command, error) {
-	if p.commandMap != nil {
-		if cmd, ok := p.commandMap[commandName]; ok {
-			return cmd, nil
-		}
-		return nil, fmt.Errorf("cannot find command with name %s", commandName)
+	if p.commandMap == nil {
+		p.mu.Lock()
+		p.buildIndexMapsLocked()
+		p.mu.Unlock()
 	}
-
-	for _, command := range p.Commands {
-		if command.Name == commandName {
-			return command, nil
-		}
+	if cmd, ok := p.commandMap[commandName]; ok {
+		return cmd, nil
 	}
-
 	return nil, fmt.Errorf("cannot find command with name %s", commandName)
 }
 
@@ -200,7 +183,6 @@ type Variable struct {
 	List   []string `json:"list,omitempty"`
 }
 
-// SetVariableValue stores a value (string or list) into the variable map.
 func (p *ParsedData) SetVariableValue(name, scope string, v Value) {
 	if v.IsList {
 		p.SetVariableList(name, scope, v.L)
@@ -209,37 +191,24 @@ func (p *ParsedData) SetVariableValue(name, scope string, v Value) {
 	p.SetVariable(name, scope, v.S)
 }
 
-// SetVariableList stores a list value; Value becomes the comma-joined form.
+// SetVariableList stores a list; Value becomes the comma-joined form.
 func (p *ParsedData) SetVariableList(name, scope string, items []string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	value := strings.Join(items, ", ")
-	if p.variableMap != nil {
-		key := scope + "." + name
-		if v, ok := p.variableMap[key]; ok {
-			v.Value = value
-			v.IsList = true
-			v.List = items
-			return
-		}
-		v := &Variable{Name: name, Value: value, Scope: scope, IsList: true, List: items}
-		p.Variables = append(p.Variables, v)
-		p.variableMap[key] = v
+	p.buildIndexMapsLocked()
+	key := scope + "." + name
+	if v, ok := p.variableMap[key]; ok {
+		v.Value = value
+		v.IsList = true
+		v.List = items
 		return
 	}
-	for _, v := range p.Variables {
-		if v.Name == name && v.Scope == scope {
-			v.Value = value
-			v.IsList = true
-			v.List = items
-			return
-		}
-	}
-	p.Variables = append(p.Variables, &Variable{Name: name, Value: value, Scope: scope, IsList: true, List: items})
+	v := &Variable{Name: name, Value: value, Scope: scope, IsList: true, List: items}
+	p.Variables = append(p.Variables, v)
+	p.variableMap[key] = v
 }
 
-// LookupVariableValue returns the variable as a typed Value, resolving list
-// variables into their item lists.
 func (p *ParsedData) LookupVariableValue(name, scope string) (Value, bool) {
 	v, err := p.GetVariable(name, scope)
 	if err != nil || v == nil {
@@ -251,12 +220,16 @@ func (p *ParsedData) LookupVariableValue(name, scope string) (Value, bool) {
 	return StringValue(v.Value), true
 }
 
+// IsLazyName reports a synthetic lazy-evaluation command, not a user command.
+func IsLazyName(name string) bool {
+	return strings.HasPrefix(name, "__lazy_") || strings.Contains(name, ".__lazy_")
+}
+
 type LazyOutput struct {
 	VarName string `json:"var_name"`
 	Scope   string `json:"scope"`
 }
 
-// BodyStatement statement types.
 const (
 	StmtShell      = "shell"
 	StmtIf         = "if"
@@ -278,7 +251,6 @@ const (
 	StmtInput      = "input"
 )
 
-// SwitchCase is one `case` arm of a switch statement.
 type SwitchCase struct {
 	Values     []string        `json:"values,omitempty"`
 	IsDefault  bool            `json:"is_default,omitempty"`
@@ -349,24 +321,6 @@ func NewParserFromContent(file, content string) *Parser {
 		Data:      &ParsedData{},
 		Lines:     strings.Split(content, "\n"),
 	}
-}
-
-func (p *Parser) findVariable(varName string, scope *string) (*Variable, error) {
-	if scope != nil && *scope != "" {
-		for _, v := range p.Data.Variables {
-			if v.Name == varName && v.Scope == *scope {
-				return v, nil
-			}
-		}
-	}
-
-	for _, v := range p.Data.Variables {
-		if v.Name == varName && v.Scope == "global" {
-			return v, nil
-		}
-	}
-
-	return nil, fmt.Errorf("cannot find %s", varName)
 }
 
 func (p *Parser) stateDeclLookup(name string) (string, bool) {
@@ -445,7 +399,7 @@ func (p *Parser) tryEvalExpression(expression string, varName *string, varScope 
 				if varScope != nil && *varScope != "" {
 					scope = *varScope
 				}
-				if variable, err := p.findVariable(refName.String(), &scope); err == nil {
+				if variable, err := p.Data.GetVariable(refName.String(), scope); err == nil {
 					if variable.IsList {
 						result.WriteString(strings.Join(variable.List, ", "))
 					} else {
@@ -459,7 +413,7 @@ func (p *Parser) tryEvalExpression(expression string, varName *string, varScope 
 
 		if char == '$' && varName != nil && varScope != nil {
 			restOfLine := strings.TrimSpace(string(runes[i+1:]))
-			p.Data.Commands = append(p.Data.Commands, &Command{
+			p.Data.addCommand(&Command{
 				Name:       fmt.Sprintf("__lazy_%s_%s", *varName, *varScope),
 				LazyEval:   &LazyOutput{VarName: *varName, Scope: *varScope},
 				Body:       []BodyStatement{{Type: StmtShell, Shell: fmt.Sprintf("$ %s", restOfLine), SourceLine: lineNum}},
@@ -477,7 +431,6 @@ func (p *Parser) tryEvalExpression(expression string, varName *string, varScope 
 	return result.String()
 }
 
-// parserEvalContext resolves expression names against parser state.
 type parserEvalContext struct {
 	p     *Parser
 	scope string
@@ -499,8 +452,7 @@ func (c parserEvalContext) BaseDir() string {
 	return importBaseDir(c.p.InputFile)
 }
 
-// evalVarValue evaluates a variable value, returning the string form plus
-// list metadata when the value is a list.
+// evalVarValue evaluates a variable value, with list metadata when it is a list.
 func (p *Parser) evalVarValue(value string, varName *string, varScope *string, lineNum int) (string, bool, []string, error) {
 	value = strings.TrimSpace(value)
 	ctx := parserEvalContext{p: p, scope: *varScope}
@@ -513,8 +465,7 @@ func (p *Parser) evalVarValue(value string, varName *string, varScope *string, l
 		}
 		return v.S, false, nil, nil
 	}
-	// Fall back to literal substitution, resolving refs with list/index
-	// support before the legacy substitution pass.
+	// Fall back to literal substitution when the value is not an expression.
 	if strings.IndexByte(value, '&') >= 0 {
 		value = resolveVarRefs(value, func(name string) (string, bool) {
 			v, ok := LookupVariableIndexed(p.Data, name, *varScope)
@@ -546,7 +497,7 @@ func (p *Parser) parseVar(line string, scope string, lineNum int) error {
 		}
 	}
 
-	p.Data.Variables = append(p.Data.Variables, &Variable{
+	p.Data.addVariable(&Variable{
 		Name:   variableName,
 		Value:  variableValue,
 		Scope:  scope,
@@ -557,7 +508,7 @@ func (p *Parser) parseVar(line string, scope string, lineNum int) error {
 	return nil
 }
 
-func parseCommandName(line string) string {
+func ParseCommandName(line string) string {
 	line = strings.TrimSpace(line)
 
 	// Cloud command markers: |commandname|
@@ -566,8 +517,10 @@ func parseCommandName(line string) string {
 		if endIdx > 0 {
 			name := line[1 : endIdx+1]
 			remainder := strings.TrimSpace(line[endIdx+2:])
-			if strings.HasPrefix(remainder, "(") || strings.HasPrefix(remainder, "<") || strings.HasPrefix(remainder, "{") || strings.HasPrefix(remainder, "in ") {
-				return strings.TrimSpace(name)
+			for _, cont := range []string{"(", "<", "{", "in ", "produces ", "onchange ", "timeout ", ""} {
+				if strings.HasPrefix(remainder, cont) {
+					return strings.TrimSpace(name)
+				}
 			}
 		}
 	}
@@ -600,8 +553,7 @@ func parseCommandName(line string) string {
 	return strings.TrimSpace(line[:endIdx])
 }
 
-// findTopLevelKeyword finds a keyword (e.g. " produces ") outside quotes and
-// parens at brace depth zero.
+// findTopLevelKeyword finds a keyword outside quotes and parens at depth zero.
 func findTopLevelKeyword(line, kw string) int {
 	depth := 0
 	inQuote := false
@@ -629,80 +581,52 @@ func findProducesIdx(line string) int {
 	return findTopLevelKeyword(line, " produces ")
 }
 
-func extractProduces(line string) []string {
-	idx := findProducesIdx(line)
-	if idx < 0 {
-		return nil
-	}
-	segment := line[idx+len(" produces "):]
-	if lt := strings.IndexByte(segment, '<'); lt >= 0 {
-		segment = segment[:lt]
-	}
-	if brace := strings.IndexByte(segment, '{'); brace >= 0 {
-		segment = segment[:brace]
-	}
-	if inIdx := strings.Index(segment, " in "); inIdx >= 0 {
-		segment = segment[:inIdx]
-	}
-	if ocIdx := findTopLevelKeyword(segment, " onchange "); ocIdx >= 0 {
-		segment = segment[:ocIdx]
-	}
-	var out []string
-	for _, p := range strings.Split(segment, ",") {
-		p = strings.TrimSpace(p)
-		if p != "" {
-			out = append(out, p)
-		}
-	}
-	return out
-}
-
-// extractOnChange parses the `onchange <glob>, <glob>` header modifier.
-func extractOnChange(line string) []string {
-	idx := findTopLevelKeyword(line, " onchange ")
-	if idx < 0 {
-		return nil
-	}
-	segment := line[idx+len(" onchange "):]
-	if lt := strings.IndexByte(segment, '<'); lt >= 0 {
-		segment = segment[:lt]
-	}
-	if brace := strings.IndexByte(segment, '{'); brace >= 0 {
-		segment = segment[:brace]
-	}
-	var out []string
-	for _, p := range strings.Split(segment, ",") {
-		p = strings.TrimSpace(p)
-		if p != "" {
-			out = append(out, p)
-		}
-	}
-	return out
-}
-
-// extractTimeout parses the `timeout <duration>` header modifier.
-func extractTimeout(line string) string {
-	idx := findTopLevelKeyword(line, " timeout ")
+// headerSegmentAfter returns the text after the top-level keyword kw, cut at
+// '<', '{', and any header modifier that follows.
+func headerSegmentAfter(line, kw string) string {
+	idx := findTopLevelKeyword(line, kw)
 	if idx < 0 {
 		return ""
 	}
-	segment := line[idx+len(" timeout "):]
+	segment := line[idx+len(kw):]
 	if lt := strings.IndexByte(segment, '<'); lt >= 0 {
 		segment = segment[:lt]
 	}
 	if brace := strings.IndexByte(segment, '{'); brace >= 0 {
 		segment = segment[:brace]
 	}
-	if inIdx := strings.Index(segment, " in "); inIdx >= 0 {
-		segment = segment[:inIdx]
+	for _, other := range []string{" in ", " produces ", " onchange ", " timeout "} {
+		if other == kw {
+			continue
+		}
+		if cut := findTopLevelKeyword(segment, other); cut >= 0 {
+			segment = segment[:cut]
+		}
 	}
-	if prod := findTopLevelKeyword(segment, " produces "); prod >= 0 {
-		segment = segment[:prod]
+	return segment
+}
+
+func splitListSegment(segment string) []string {
+	var out []string
+	for _, p := range strings.Split(segment, ",") {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			out = append(out, p)
+		}
 	}
-	if oc := findTopLevelKeyword(segment, " onchange "); oc >= 0 {
-		segment = segment[:oc]
-	}
-	segment = strings.TrimSpace(segment)
+	return out
+}
+
+func extractProduces(line string) []string {
+	return splitListSegment(headerSegmentAfter(line, " produces "))
+}
+
+func extractOnChange(line string) []string {
+	return splitListSegment(headerSegmentAfter(line, " onchange "))
+}
+
+func extractTimeout(line string) string {
+	segment := strings.TrimSpace(headerSegmentAfter(line, " timeout "))
 	if _, err := time.ParseDuration(segment); err != nil {
 		return ""
 	}
@@ -856,8 +780,9 @@ func parseArgumentList(argStr string) ([]*Argument, error) {
 	return args, nil
 }
 
-func isFileDep(token string) bool {
-	if strings.ContainsAny(token, "/*\\") {
+// IsFileDep reports whether a prerequisite token looks like a file path or glob.
+func IsFileDep(token string) bool {
+	if strings.ContainsAny(token, "/*\\?") {
 		return true
 	}
 	if dot := strings.LastIndexByte(token, '.'); dot > 0 && dot < len(token)-1 {
@@ -1738,7 +1663,6 @@ func parseInvokeArgs(s string) (name string, args []string) {
 	if s == "" {
 		return "", nil
 	}
-	// The command name is the first whitespace-delimited token.
 	name = s
 	if idx := strings.IndexAny(s, " \t"); idx >= 0 {
 		name, s = s[:idx], strings.TrimSpace(s[idx:])
@@ -1806,7 +1730,6 @@ func (p *Parser) parseForBlock(raw []rawLine, scope string) (BodyStatement, int,
 		}
 	}
 
-	// Single-line block: "for x in a, b { stmt }".
 	if body, ok := singleLineBody(raw[0].text); ok {
 		bodyStmts, err := p.parseBodyStatements(atLine(splitStatements(body), headerLine.num), scope)
 		if err != nil {
@@ -1875,23 +1798,7 @@ func (p *Parser) parseMatrixBlock(raw []rawLine, scope string) (BodyStatement, i
 		if err != nil {
 			return BodyStatement{}, 0, err
 		}
-		stmt := BodyStatement{
-			Type:       StmtFor,
-			LoopVar:    vars[len(vars)-1],
-			LoopItems:  items[len(items)-1],
-			LoopBody:   bodyStmts,
-			SourceLine: headerLine.num,
-		}
-		for i := len(vars) - 2; i >= 0; i-- {
-			stmt = BodyStatement{
-				Type:       StmtFor,
-				LoopVar:    vars[i],
-				LoopItems:  items[i],
-				LoopBody:   []BodyStatement{stmt},
-				SourceLine: headerLine.num,
-			}
-		}
-		return stmt, 1, nil
+		return nestMatrixLoops(vars, items, bodyStmts, headerLine.num), 1, nil
 	}
 
 	bodyLines, endIdx, err := collectBodyLines(raw, 1)
@@ -1903,25 +1810,28 @@ func (p *Parser) parseMatrixBlock(raw []rawLine, scope string) (BodyStatement, i
 	if err != nil {
 		return BodyStatement{}, 0, err
 	}
+	return nestMatrixLoops(vars, items, bodyStmts, headerLine.num), endIdx, nil
+}
 
+// nestMatrixLoops wraps body in one nested for-loop per matrix clause.
+func nestMatrixLoops(vars, items []string, body []BodyStatement, lineNum int) BodyStatement {
 	stmt := BodyStatement{
 		Type:       StmtFor,
 		LoopVar:    vars[len(vars)-1],
 		LoopItems:  items[len(items)-1],
-		LoopBody:   bodyStmts,
-		SourceLine: headerLine.num,
+		LoopBody:   body,
+		SourceLine: lineNum,
 	}
-
 	for i := len(vars) - 2; i >= 0; i-- {
 		stmt = BodyStatement{
 			Type:       StmtFor,
 			LoopVar:    vars[i],
 			LoopItems:  items[i],
 			LoopBody:   []BodyStatement{stmt},
-			SourceLine: headerLine.num,
+			SourceLine: lineNum,
 		}
 	}
-	return stmt, endIdx, nil
+	return stmt
 }
 
 func collectBodyLines(raw []rawLine, start int) ([]rawLine, int, error) {
@@ -1992,7 +1902,7 @@ func (p *Parser) parseCommand(idx int, line string, isDefault bool, lineNum int,
 		return 0, nil
 	}
 
-	commandName := parseCommandName(line)
+	commandName := ParseCommandName(line)
 	cloudAccessible := len(trimmedLine) >= 2 && trimmedLine[0] == '|'
 
 	commandArgs, err := parseArgumentList(extractArgumentString(line))
@@ -2013,7 +1923,6 @@ func (p *Parser) parseCommand(idx int, line string, isDefault bool, lineNum int,
 	var commandBody []BodyStatement
 	consumed := 1
 	if body, ok := singleLineBody(trimmedLine); ok {
-		// Self-contained header: `cmd { stmts }` or an empty `cmd { }`.
 		commandBody, err = p.parseBodyStatements(atLine(splitStatements(body), lineNum), commandName)
 		if err != nil {
 			return 0, err
@@ -2031,7 +1940,7 @@ func (p *Parser) parseCommand(idx int, line string, isDefault bool, lineNum int,
 	}
 
 	if commandName != "" {
-		p.Data.Commands = append(p.Data.Commands, &Command{
+		p.Data.addCommand(&Command{
 			Name:            commandName,
 			SourceFile:      p.InputFile,
 			SourceLine:      lineNum,
@@ -2200,8 +2109,10 @@ func (p *Parser) parseLines() error {
 			continue
 		}
 
-		isDefault := len(line) > 0 && line[0] == '_' &&
-			(len(line) == 1 || line[1] == ' ' || line[1] == '(' || line[1] == '<' || line[1] == '{')
+		cmdLine := strings.TrimSpace(line)
+		isDefault := strings.HasPrefix(cmdLine, "_") &&
+			(len(cmdLine) == 1 || cmdLine[1] == ' ' || cmdLine[1] == '\t' ||
+				cmdLine[1] == '(' || cmdLine[1] == '<' || cmdLine[1] == '{')
 
 		consumed, err := p.parseCommand(idx, line, isDefault, lineNum, strings.Join(pendingComment, "\n"))
 		if err != nil {
@@ -2295,12 +2206,14 @@ func (p *Parser) processImport(line string) error {
 		}
 	}
 
-	p.Data.Variables = append(p.Data.Variables, imported.Data.Variables...)
+	for _, v := range imported.Data.Variables {
+		p.Data.addVariable(v)
+	}
 	for _, cmd := range imported.Data.Commands {
 		if existing, err := p.Data.GetCommand(cmd.Name); err == nil && existing != nil {
 			return fmt.Errorf("duplicate command %q from import %q", cmd.Name, spec)
 		}
-		p.Data.Commands = append(p.Data.Commands, cmd)
+		p.Data.addCommand(cmd)
 	}
 	return nil
 }
@@ -2338,7 +2251,6 @@ func renameImportNamespace(data *ParsedData, ns string) {
 	}
 }
 
-// importRenameMaps builds the old->new name tables for commands and globals.
 func importRenameMaps(data *ParsedData, ns string) (commandNew, globalNew map[string]string) {
 	prefix := ns + "."
 	commandNew = make(map[string]string, len(data.Commands))
@@ -2518,7 +2430,7 @@ func (p *Parser) classifyPrereqs() error {
 			}
 			if _, err := p.Data.GetCommand(prereq); err == nil {
 				cmdDeps = append(cmdDeps, prereq)
-			} else if isFileDep(prereq) {
+			} else if IsFileDep(prereq) {
 				fileDeps = append(fileDeps, prereq)
 			} else {
 				return &MissingDependencyError{

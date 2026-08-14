@@ -244,7 +244,7 @@ func TestE2EFlame(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit %d: %s", code, out)
 	}
-	if !strings.Contains(out, "flame:") || !strings.Contains(out, "features:") {
+	if !strings.Contains(out, "flame ·") || !strings.Contains(out, "features:") {
 		t.Errorf("flame output = %q", out)
 	}
 }

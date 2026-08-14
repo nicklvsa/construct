@@ -12,12 +12,12 @@ import (
 
 func TestParseRepoFromRemote(t *testing.T) {
 	cases := map[string]string{
-		"https://github.com/owner/repo.git":     "owner/repo",
-		"https://github.com/owner/repo":         "owner/repo",
-		"git@github.com:owner/repo.git":         "owner/repo",
-		"git@github.com:owner/repo":             "owner/repo",
-		"ssh://git@github.com/owner/repo.git":   "owner/repo",
-		"http://github.com/a/b/c/repo.git":      "c/repo",
+		"https://github.com/owner/repo.git":   "owner/repo",
+		"https://github.com/owner/repo":       "owner/repo",
+		"git@github.com:owner/repo.git":       "owner/repo",
+		"git@github.com:owner/repo":           "owner/repo",
+		"ssh://git@github.com/owner/repo.git": "owner/repo",
+		"http://github.com/a/b/c/repo.git":    "c/repo",
 	}
 	for in, want := range cases {
 		got, err := ParseRepoFromRemote(in)

@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -57,14 +58,25 @@ func serve(in io.Reader, out io.Writer, srv *server) {
 			continue
 		}
 
+		isNotification := len(req.ID) == 0 || string(req.ID) == "null"
 		result, err := srv.dispatch(req.Method, req.Params)
 		if err != nil {
-			writeResponse(out, req.ID, nil, &rpcError{Code: -32603, Message: err.Error()})
+			if isNotification {
+				// Notifications get no response; unknown ones (exit, $/...) are routine.
+				if !errors.Is(err, errMethodNotFound) {
+					log.Printf("%s handler error: %v", req.Method, err)
+				}
+				continue
+			}
+			code := -32603 // internal error
+			if errors.Is(err, errMethodNotFound) {
+				code = -32601 // method not found
+			}
+			writeResponse(out, req.ID, nil, &rpcError{Code: code, Message: err.Error()})
 			continue
 		}
 
-		// Notifications (no id) don't get a response.
-		if len(req.ID) == 0 || string(req.ID) == "null" {
+		if isNotification {
 			continue
 		}
 
@@ -72,7 +84,6 @@ func serve(in io.Reader, out io.Writer, srv *server) {
 	}
 }
 
-// readMessage reads a single LSP message (Content-Length framed) from r.
 func readMessage(r *bufio.Reader) ([]byte, error) {
 	var contentLength int
 	for {
