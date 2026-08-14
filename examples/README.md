@@ -31,6 +31,7 @@ construct Constfile-<name> <command>    # run a command
 | `Constfile-builtins` | Any | Cross-platform builtin commands `cp`/`rm`/`mkdir`/`touch`/`download`/`extract`, error-tolerant builtins, `&last.exit` reporting |
 | `Constfile-state` | Any | Persistent `state` variables, `@state("name")` reads, runtime state expressions, `--resume`, `stats` |
 | `Constfile-cloud` (+ `example-cloud.json`) | Any | Cloud commands (`\|name\|`), `invoke` cloud fallback, pure cloud commands, `cloud list/pull/push` |
+| `Constfile-locks` | Any | Real-world `lock` usage: a release/rollback pipeline serialized on a shared named lock, composed with `confirm` and `onfail` |
 
 ## Feature Coverage
 
@@ -65,7 +66,7 @@ construct Constfile-<name> <command>    # run a command
 - **Builtin function library** — `Constfile-expressions`
 - **`switch`/`case`/`default`** — `Constfile-control-flow`
 - **Scoped workdir blocks (`in`)** — `Constfile-control-flow`
-- **`lock` mutual exclusion** — `Constfile-control-flow`
+- **`lock` mutual exclusion** — `Constfile-control-flow`, `Constfile-locks` (real-world release/rollback)
 - **`timeout` (command + statement)** — `Constfile-control-flow`
 - **`confirm`/`prompt`/`input` + `--yes`** — `Constfile-control-flow`
 - **`&last.exit`/`&last.output`** — `Constfile-control-flow`, `Constfile-builtins`
