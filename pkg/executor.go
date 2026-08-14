@@ -348,11 +348,6 @@ func (e *Executor) statePath() string {
 	return filepath.Join(e.cacheDirFor(), "state.json")
 }
 
-// runStatePath returns the run-records file location.
-func (e *Executor) runStatePath() string {
-	return filepath.Join(e.cacheDirFor(), "run-state.json")
-}
-
 func LoadRunHistory(dir string) map[string][]RunRecord {
 	data, err := os.ReadFile(filepath.Join(dir, "run-state.json"))
 	if err != nil {
@@ -782,7 +777,7 @@ func (e *Executor) cleanStatements(stmts []BodyStatement, cmd *Command, argFlags
 				Type:       StmtFor,
 				LoopVar:    stmt.LoopVar,
 				LoopIndex:  stmt.LoopIndex,
-				LoopItems:  e.cleanLoopItems(cmd, stmt.LoopItems, argFlags),
+				LoopItems:  e.cleanLoopItems(cmd, stmt.LoopItems),
 				LoopBody:   stmt.LoopBody,
 				SourceLine: stmt.SourceLine,
 			}
@@ -1814,9 +1809,7 @@ func envIsSet(ctx *execContext, name string) bool {
 	return ok
 }
 
-// cleanLoopItems resolves references in a `for ... in` item list. Lists join
-// with commas so item iteration stays intact, and values are not shell-escaped.
-func (e *Executor) cleanLoopItems(cmd *Command, line string, argFlags map[string]bool) string {
+func (e *Executor) cleanLoopItems(cmd *Command, line string) string {
 	line = strings.TrimSpace(line)
 	if line == "" {
 		return ""
@@ -1944,20 +1937,6 @@ func (p *linePrefixWriter) flush() {
 		p.w.Write(append([]byte(p.prefix), p.buf...))
 		p.buf = nil
 	}
-}
-
-func (e *Executor) streamOut(ctx *execContext, cmd *exec.Cmd) (*linePrefixWriter, bool) {
-	if e.quiet {
-		cmd.Stdout = io.Discard
-		return nil, false
-	}
-	if e.prefixOutput {
-		pw := &linePrefixWriter{w: os.Stdout, prefix: "[" + ctx.target.Name + "] "}
-		cmd.Stdout = pw
-		return pw, true
-	}
-	cmd.Stdout = os.Stdout
-	return nil, false
 }
 
 func (e *Executor) runShell(ctx *execContext, stmt BodyStatement) error {
