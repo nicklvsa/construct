@@ -1093,7 +1093,6 @@ func (p *Parser) parseBodyStatements(raw []rawLine, scope string) ([]BodyStateme
 			continue
 		}
 
-		// `state name = value` persists a variable across runs.
 		if strings.HasPrefix(line, "state ") || strings.HasPrefix(line, "state\t") {
 			inner := strings.TrimSpace(strings.TrimPrefix(line, "state"))
 			name, value, ok := strings.Cut(inner, "=")
@@ -1110,7 +1109,6 @@ func (p *Parser) parseBodyStatements(raw []rawLine, scope string) ([]BodyStateme
 			continue
 		}
 
-		// switch <expr> { case v1, v2 { ... } default { ... } }
 		if strings.HasPrefix(line, "switch ") && strings.Contains(line, "{") {
 			stmt, consumed, err := p.parseSwitchBlock(raw[i:], scope)
 			if err != nil {
@@ -1126,7 +1124,6 @@ func (p *Parser) parseBodyStatements(raw []rawLine, scope string) ([]BodyStateme
 			return nil, fmt.Errorf("'case'/'default' outside of a switch statement")
 		}
 
-		// in <dir> { ... } scoped workdir block.
 		if strings.HasPrefix(line, "in ") && strings.Contains(line, "{") {
 			stmt, consumed, err := p.parseInDirBlock(raw[i:], scope)
 			if err != nil {
@@ -1137,7 +1134,6 @@ func (p *Parser) parseBodyStatements(raw []rawLine, scope string) ([]BodyStateme
 			continue
 		}
 
-		// lock "name" { ... } mutual-exclusion block.
 		if strings.HasPrefix(line, "lock ") && strings.Contains(line, "{") {
 			stmt, consumed, err := p.parseLockBlock(raw[i:], scope)
 			if err != nil {
@@ -1188,7 +1184,6 @@ func (p *Parser) parseBodyStatements(raw []rawLine, scope string) ([]BodyStateme
 			continue
 		}
 
-		// `timeout 30s $ cmd` caps a statement's runtime.
 		timeoutDur := ""
 		if strings.HasPrefix(line, "timeout ") {
 			rest := strings.TrimSpace(strings.TrimPrefix(line, "timeout"))
@@ -1215,7 +1210,6 @@ func (p *Parser) parseBodyStatements(raw []rawLine, scope string) ([]BodyStateme
 			continue
 		}
 
-		// A dangling "else" can't be a shell statement; report it clearly.
 		if line == "else" || strings.HasPrefix(line, "else ") || strings.HasPrefix(line, "else{") {
 			return nil, fmt.Errorf("'else' without a matching 'if'")
 		}
@@ -1229,8 +1223,6 @@ func (p *Parser) parseBodyStatements(raw []rawLine, scope string) ([]BodyStateme
 
 var builtinCommands = []string{"cp", "rm", "mkdir", "touch", "download", "extract"}
 
-// parseBuiltinLine reports whether line is a bare builtin invocation and
-// returns the command name, arguments, and error-tolerance.
 func parseBuiltinLine(line string) (name, args string, tolerant bool, ok bool) {
 	rest := line
 	if strings.HasPrefix(rest, "!") {
@@ -1270,7 +1262,6 @@ func extractOutputName(line string) (shell, name string) {
 	return strings.TrimSpace(before), suffix
 }
 
-// isValidIdent reports a plain word (letters, digits, underscore; no dash).
 func isValidIdent(s string) bool {
 	if s == "" {
 		return false
@@ -1283,9 +1274,6 @@ func isValidIdent(s string) bool {
 	return true
 }
 
-// findBlockBounds finds the quote-aware '{' ... '}' pair enclosing the first
-// top-level block, tracking nested braces so single-line bodies with nested
-// blocks (e.g. `cmd { if x { } }`) resolve correctly.
 func findBlockBounds(line string) (open, close int, ok bool) {
 	inQuote := false
 	depth := 0
