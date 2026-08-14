@@ -14,7 +14,6 @@ import (
 	"time"
 )
 
-// GHRun mirrors the relevant fields of a GitHub Actions run.
 type GHRun struct {
 	ID         int64     `json:"id"`
 	Name       string    `json:"name"`
@@ -25,7 +24,6 @@ type GHRun struct {
 	HeadSHA    string    `json:"head_sha"`
 }
 
-// GHJob mirrors the relevant fields of a GitHub Actions job.
 type GHJob struct {
 	ID         int64  `json:"id"`
 	Name       string `json:"name"`
@@ -34,7 +32,6 @@ type GHJob struct {
 	HTMLURL    string `json:"html_url"`
 }
 
-// GHClient talks to the GitHub Actions API for one repository.
 type GHClient struct {
 	baseURL string
 	token   string
@@ -42,8 +39,6 @@ type GHClient struct {
 	http    *http.Client
 }
 
-// NewGHClient builds a client. apiBase defaults to https://api.github.com and
-// is overridable (CONSTRUCT_GITHUB_API) for tests and proxies.
 func NewGHClient(repo, token, apiBase string) *GHClient {
 	if apiBase == "" {
 		apiBase = "https://api.github.com"
@@ -56,8 +51,6 @@ func NewGHClient(repo, token, apiBase string) *GHClient {
 	}
 }
 
-// GHToken resolves the API token: CONSTRUCT_GITHUB_TOKEN, GITHUB_TOKEN, then
-// `gh auth token`.
 func GHToken() string {
 	if v := os.Getenv("CONSTRUCT_GITHUB_TOKEN"); v != "" {
 		return v
@@ -73,7 +66,6 @@ func GHToken() string {
 	return ""
 }
 
-// RepoFromGitRemote derives owner/repo from the origin remote.
 func RepoFromGitRemote() (string, error) {
 	out, err := exec.Command("git", "config", "--get", "remote.origin.url").Output()
 	if err != nil {
@@ -82,8 +74,6 @@ func RepoFromGitRemote() (string, error) {
 	return ParseRepoFromRemote(string(out))
 }
 
-// ParseRepoFromRemote normalizes any common GitHub remote form into
-// owner/repo.
 func ParseRepoFromRemote(remote string) (string, error) {
 	r := strings.TrimSuffix(strings.TrimSpace(remote), ".git")
 	switch {
@@ -149,21 +139,18 @@ func (c *GHClient) do(method, path string, body any, out any) (int, error) {
 	return resp.StatusCode, nil
 }
 
-// Dispatch submits a workflow_dispatch event.
 func (c *GHClient) Dispatch(workflow, ref string, inputs map[string]string) error {
 	path := "/repos/" + c.repo + "/actions/workflows/" + url.PathEscape(workflow) + "/dispatches"
 	_, err := c.do("POST", path, map[string]any{"ref": ref, "inputs": inputs}, nil)
 	return err
 }
 
-// Run fetches one run by ID.
 func (c *GHClient) Run(runID int64) (GHRun, error) {
 	var r GHRun
 	_, err := c.do("GET", fmt.Sprintf("/repos/%s/actions/runs/%d", c.repo, runID), nil, &r)
 	return r, err
 }
 
-// Jobs fetches the jobs of a run.
 func (c *GHClient) Jobs(runID int64) ([]GHJob, error) {
 	var res struct {
 		Jobs []GHJob `json:"jobs"`
@@ -172,7 +159,6 @@ func (c *GHClient) Jobs(runID int64) ([]GHJob, error) {
 	return res.Jobs, err
 }
 
-// JobLogs fetches the plain-text log blob for a job.
 func (c *GHClient) JobLogs(jobID int64) ([]byte, error) {
 	req, err := http.NewRequest(http.MethodGet, fmt.Sprintf("%s/repos/%s/actions/jobs/%d/logs", c.baseURL, c.repo, jobID), nil)
 	if err != nil {
@@ -192,14 +178,11 @@ func (c *GHClient) JobLogs(jobID int64) ([]byte, error) {
 	return io.ReadAll(resp.Body)
 }
 
-// Cancel requests cancellation of a run.
 func (c *GHClient) Cancel(runID int64) error {
 	_, err := c.do("POST", fmt.Sprintf("/repos/%s/actions/runs/%d/cancel", c.repo, runID), nil, nil)
 	return err
 }
 
-// LatestDispatchRun returns the newest workflow_dispatch run created at or
-// after since (the dispatch we just submitted).
 func (c *GHClient) LatestDispatchRun(workflow string, since time.Time) (GHRun, error) {
 	q := url.Values{}
 	q.Set("event", "workflow_dispatch")
@@ -226,7 +209,6 @@ func (c *GHClient) LatestDispatchRun(workflow string, since time.Time) (GHRun, e
 	return best, nil
 }
 
-// RunConclusionToExit maps a GitHub run conclusion to an exit code.
 func RunConclusionToExit(c string) int {
 	if c == "success" || c == "skipped" || c == "neutral" {
 		return 0
@@ -234,16 +216,12 @@ func RunConclusionToExit(c string) int {
 	return 1
 }
 
-// ---- secret redaction ----
-
 var secretKeyRe = regexp.MustCompile(`(?i)(secret|token|password|passwd|api[_-]?key|auth|credential|private[_-]?key)`)
 
-// IsSecretName reports whether an env key looks like it holds a secret.
 func IsSecretName(key string) bool {
 	return secretKeyRe.MatchString(key)
 }
 
-// RedactValues replaces occurrences of the given values in s.
 func RedactValues(s string, values []string) string {
 	for _, v := range values {
 		if len(v) >= 3 {

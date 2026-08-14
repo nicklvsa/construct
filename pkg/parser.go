@@ -15,8 +15,8 @@ import (
 )
 
 type ParsedData struct {
-	Variables []*Variable `json:"variables"`
-	Commands  []*Command  `json:"commands"`
+	Variables  []*Variable `json:"variables"`
+	Commands   []*Command  `json:"commands"`
 	StateDecls []*Variable `json:"state,omitempty"`
 
 	SourceFiles []string `json:"source_files,omitempty"`
@@ -287,28 +287,28 @@ type SwitchCase struct {
 }
 
 type BodyStatement struct {
-	Type       string          `json:"type"` // one of the Stmt* constants
-	Shell      string          `json:"shell,omitempty"`
-	OutputName string          `json:"output_name,omitempty"`
-	Cond       string          `json:"cond,omitempty"`
-	ThenBody   []BodyStatement `json:"then,omitempty"`
-	ElseBody   []BodyStatement `json:"else,omitempty"`
-	LoopVar    string          `json:"loop_var,omitempty"`
-	LoopIndex  string          `json:"loop_index,omitempty"`
-	LoopItems  string          `json:"loop_items,omitempty"`
-	LoopBody   []BodyStatement `json:"loop_body,omitempty"`
-	Env        []string        `json:"env,omitempty"`
-	Message    string          `json:"message,omitempty"`
-	OnFailBody []BodyStatement `json:"onfail,omitempty"`
-	InvokeArgs []string        `json:"invoke_args,omitempty"`
-	Retry      int             `json:"retry,omitempty"`
-	Timeout    string          `json:"timeout,omitempty"`
-	SwitchExpr string          `json:"switch_expr,omitempty"`
-	Cases      []SwitchCase    `json:"cases,omitempty"`
-	Dir        string          `json:"dir,omitempty"`
-	BuiltinArgs string         `json:"builtin_args,omitempty"`
-	Tolerant   bool            `json:"tolerant,omitempty"`
-	SourceLine int             `json:"source_line,omitempty"`
+	Type        string          `json:"type"` // one of the Stmt* constants
+	Shell       string          `json:"shell,omitempty"`
+	OutputName  string          `json:"output_name,omitempty"`
+	Cond        string          `json:"cond,omitempty"`
+	ThenBody    []BodyStatement `json:"then,omitempty"`
+	ElseBody    []BodyStatement `json:"else,omitempty"`
+	LoopVar     string          `json:"loop_var,omitempty"`
+	LoopIndex   string          `json:"loop_index,omitempty"`
+	LoopItems   string          `json:"loop_items,omitempty"`
+	LoopBody    []BodyStatement `json:"loop_body,omitempty"`
+	Env         []string        `json:"env,omitempty"`
+	Message     string          `json:"message,omitempty"`
+	OnFailBody  []BodyStatement `json:"onfail,omitempty"`
+	InvokeArgs  []string        `json:"invoke_args,omitempty"`
+	Retry       int             `json:"retry,omitempty"`
+	Timeout     string          `json:"timeout,omitempty"`
+	SwitchExpr  string          `json:"switch_expr,omitempty"`
+	Cases       []SwitchCase    `json:"cases,omitempty"`
+	Dir         string          `json:"dir,omitempty"`
+	BuiltinArgs string          `json:"builtin_args,omitempty"`
+	Tolerant    bool            `json:"tolerant,omitempty"`
+	SourceLine  int             `json:"source_line,omitempty"`
 }
 
 type Command struct {
@@ -1356,7 +1356,6 @@ func splitSingleLineIf(line string) (string, string, bool) {
 	return "", "", false
 }
 
-// atLine tags each statement string with the source line it came from.
 func atLine(texts []string, num int) []rawLine {
 	out := make([]rawLine, len(texts))
 	for i, t := range texts {
