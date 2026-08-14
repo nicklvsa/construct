@@ -1,0 +1,21 @@
+var app = myapp
+
+# Builds the binary
+build produces target/release/&app < src/**, Cargo.toml, Cargo.lock {
+    $ cargo build --release
+}
+
+# Runs the test suite
+test {
+    $ cargo test
+}
+
+# Format and lint checks
+check {
+    $ cargo fmt --check
+    $ cargo clippy -- -D warnings
+}
+
+_ < test, check {
+    $ echo "all checks passed"
+}

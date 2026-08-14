@@ -1,0 +1,60 @@
+# switch, scoped workdirs, locks, timeouts, confirmations, and &last.*.
+#
+#   construct Constfile-control-flow --dry-run deploy
+#   construct Constfile-control-flow test
+#   construct Constfile-control-flow migrate
+#   construct Constfile-control-flow --yes deploy
+
+var env = prod
+
+# switch dispatches on the first matching case; default runs when nothing matches.
+deploy {
+    switch "&env" {
+        case "prod", "staging" {
+            $ echo "deploying to &env"
+        }
+        case "dev" {
+            $ echo "deploying to the dev sandbox"
+        }
+        default {
+            $ echo "unknown environment &env"
+        }
+    }
+    confirm "push to production?"
+    $ echo "deployed"
+}
+
+# in <dir> scopes the working directory (created if missing).
+test {
+    in api {
+        $ echo "testing api from $(pwd)"
+    }
+    in web {
+        $ echo "testing web from $(pwd)"
+    }
+}
+
+# lock serializes concurrent construct processes on the same name.
+migrate {
+    lock "db-migrations" {
+        $ echo "running migrations"
+    }
+}
+
+# timeout caps a whole command or a single statement (exit 124 on a hit).
+bench timeout 30s {
+    $ echo "benchmarking..."
+    timeout 5s $ sleep 10
+}
+
+# &last.exit / &last.output report the previous statement's outcome.
+tolerant {
+    ! $ echo "optional step"
+    $ echo "exit code was &last.exit"
+}
+
+# input reads a line from stdin into a variable.
+whoami {
+    input name "what's your name?"
+    $ echo "hello &name"
+}

@@ -578,6 +578,27 @@ func (s *server) handleHover(params json.RawMessage) (interface{}, error) {
 				Contents: markupContent{Kind: "markdown", Value: msg},
 			}, nil
 		}
+
+		// &last.* refs are set by the previous shell statement.
+		if msg, ok := lastResultHover(name); ok {
+			return hoverResult{
+				Contents: markupContent{Kind: "markdown", Value: msg},
+			}, nil
+		}
+	}
+
+	// Hover over statement keywords and builtins.
+	if word, ok := wordAtPosition(line, char); ok {
+		if msg, found := keywordHover(word); found {
+			return hoverResult{
+				Contents: markupContent{Kind: "markdown", Value: msg},
+			}, nil
+		}
+		if msg, found := functionHover(word); found {
+			return hoverResult{
+				Contents: markupContent{Kind: "markdown", Value: msg},
+			}, nil
+		}
 	}
 
 	// Hover over the `onfail` keyword itself.
@@ -777,6 +798,28 @@ func (s *server) handleDefinition(params json.RawMessage) (interface{}, error) {
 	line := lines[p.Position.Line]
 	char := p.Position.Character
 
+	if name, ok := stateRefAtPosition(line, char); ok {
+		for i, l := range lines {
+			trimmed := strings.TrimSpace(l)
+			if !strings.HasPrefix(trimmed, "state ") {
+				continue
+			}
+			s := strings.TrimSpace(strings.TrimPrefix(trimmed, "state"))
+			declName, _, _ := strings.Cut(s, "=")
+			declName = strings.TrimSpace(declName)
+			if declName == name {
+				col := strings.Index(l, declName)
+				return location{
+					URI: p.TextDocument.URI,
+					Range: range_{
+						Start: position{Line: i, Character: max(col, 0)},
+						End:   position{Line: i, Character: max(col, 0) + len(declName)},
+					},
+				}, nil
+			}
+		}
+	}
+
 	if _, name := refAtPosition(line, char); name != "" {
 		// Find the declaration line ("var name ...") anywhere in the doc.
 		for i, l := range lines {
@@ -936,7 +979,80 @@ func (s *server) handleCompletion(params json.RawMessage) (any, error) {
 		return completionList{Items: items}, nil
 	}
 
+	if word, atStart := lineStartWord(line, p.Position.Character); atStart {
+		for _, kw := range statementKeywords {
+			if strings.HasPrefix(kw, word) {
+				items = append(items, completionItem{Label: kw, Kind: 14}) // Keyword
+			}
+		}
+		return completionList{Items: items}, nil
+	}
+
+	if strings.HasPrefix(leadTrim, "var ") || strings.HasPrefix(leadTrim, "state ") ||
+		strings.HasPrefix(leadTrim, "global ") || strings.HasPrefix(leadTrim, "env ") {
+		if word, _ := wordAtPosition(line, p.Position.Character); word != "" {
+			for _, fn := range builtinFunctions {
+				if strings.HasPrefix(fn, word) {
+					items = append(items, completionItem{Label: fn + "()", FilterText: fn, Kind: 3}) // Function
+				}
+			}
+		}
+	}
+
 	return completionList{Items: items}, nil
+}
+
+var statementKeywords = []string{
+	"switch", "case", "default", "in", "lock", "state",
+	"confirm", "prompt", "input", "timeout",
+	"cp", "rm", "mkdir", "touch", "download", "extract",
+	"for", "if", "matrix", "env", "invoke", "fail", "global",
+	"require_env", "retry", "onfail", "continue", "break",
+}
+
+var builtinFunctions = []string{
+	"exists", "missing", "glob", "require", "file", "lines", "sha256",
+	"basename", "dirname", "ext", "stem", "upper", "lower", "trim",
+	"replace", "sprintf", "length", "abs", "min", "max", "date", "uuid",
+	"len", "sort", "uniq", "join", "split", "env", "state",
+}
+
+// lineStartWord returns the word being typed at the start of a line (only
+// whitespace before it).
+func lineStartWord(line string, char int) (string, bool) {
+	if char > len(line) {
+		char = len(line)
+	}
+	prefix := line[:char]
+	trimmed := strings.TrimLeft(prefix, " \t")
+	if trimmed == "" {
+		return "", true
+	}
+	for _, r := range trimmed {
+		if !isIdentRune(r) {
+			return "", false
+		}
+	}
+	return trimmed, true
+}
+
+func wordAtPosition(line string, char int) (string, bool) {
+	runes := []rune(line)
+	if char > len(runes) {
+		char = len(runes)
+	}
+	start := char
+	for start > 0 && isIdentRune(runes[start-1]) {
+		start--
+	}
+	end := char
+	for end < len(runes) && isIdentRune(runes[end]) {
+		end++
+	}
+	if start == end {
+		return "", false
+	}
+	return string(runes[start:end]), true
 }
 
 type documentSymbol struct {
@@ -1003,6 +1119,33 @@ func (s *server) handleDocumentSymbol(params json.RawMessage) (interface{}, erro
 			Detail:         detail,
 			Range:          range_{Start: position{Line: cmd.SourceLine - 1, Character: 0}, End: position{Line: endLine, Character: len(lines[endLine])}},
 			SelectionRange: selection,
+		})
+	}
+
+	for i, l := range lines {
+		trimmed := strings.TrimSpace(l)
+		if !strings.HasPrefix(trimmed, "state ") {
+			continue
+		}
+		s := strings.TrimSpace(strings.TrimPrefix(trimmed, "state"))
+		name, _, ok := strings.Cut(s, "=")
+		if !ok {
+			continue
+		}
+		name = strings.TrimSpace(name)
+		if !isIdentRune(rune(name[0])) {
+			continue
+		}
+		col := strings.Index(l, name)
+		if col < 0 {
+			continue
+		}
+		symbols = append(symbols, documentSymbol{
+			Name:           name,
+			Kind:           13, // Variable
+			Detail:         "persisted state",
+			Range:          range_{Start: position{Line: i, Character: 0}, End: position{Line: i, Character: len(l)}},
+			SelectionRange: range_{Start: position{Line: i, Character: col}, End: position{Line: i, Character: col + len(name)}},
 		})
 	}
 	if symbols == nil {
@@ -1250,8 +1393,7 @@ func refAtPosition(line string, char int) (string, string) {
 	return string(runes[idx : idx+1+len(full)]), full
 }
 
-func envRefAtPosition(line string, char int) (string, bool) {
-	runes := []rune(line)
+func envRefAtPosition(line string, char int) (string, bool) {	runes := []rune(line)
 	idx := -1
 	for i, r := range runes {
 		if i <= char && r == '@' {
@@ -1277,6 +1419,37 @@ func envRefAtPosition(line string, char int) (string, bool) {
 	return name.String(), true
 }
 
+// stateRefAtPosition finds a state("name") or @state("name") reference
+// covering char.
+func stateRefAtPosition(line string, char int) (string, bool) {
+	for _, marker := range []string{"@state(", "state("} {
+		idx := 0
+		for {
+			rel := strings.Index(line[idx:], marker)
+			if rel < 0 {
+				break
+			}
+			start := idx + rel
+			quote := strings.IndexByte(line[start+len(marker):], '"')
+			if quote < 0 {
+				break
+			}
+			open := start + len(marker) + quote + 1
+			closeQ := strings.IndexByte(line[open:], '"')
+			if closeQ < 0 {
+				break
+			}
+			name := line[open : open+closeQ]
+			end := open + closeQ + 1
+			if char >= start && char <= end {
+				return name, true
+			}
+			idx = end + 1
+		}
+	}
+	return "", false
+}
+
 func isIdentRune(r rune) bool {
 	return r == '_' || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z')
 }
@@ -1298,6 +1471,7 @@ func commandNameAtLine(line string) (string, bool) {
 	}
 
 	inIdx := strings.Index(trimmed, " in ")
+	timeoutIdx := strings.Index(trimmed, " timeout ")
 	endIdx := len(trimmed)
 	for i, r := range trimmed {
 		if r == '(' || r == '<' || r == '{' {
@@ -1307,6 +1481,9 @@ func commandNameAtLine(line string) (string, bool) {
 	}
 	if inIdx >= 0 && inIdx < endIdx {
 		endIdx = inIdx
+	}
+	if timeoutIdx >= 0 && timeoutIdx < endIdx {
+		endIdx = timeoutIdx
 	}
 	name := strings.TrimSpace(trimmed[:endIdx])
 	if name == "" {
@@ -1598,6 +1775,15 @@ func completionVarItems(data *pkg.ParsedData, lines []string, lineIdx int, prefi
 		}
 	}
 
+	// &last.* context refs are set by every shell statement.
+	if strings.HasPrefix(prefix, "last.") {
+		for _, l := range []string{"last.exit", "last.output"} {
+			if strings.HasPrefix(l, prefix) {
+				add(l, strings.TrimPrefix(l, "last."), 6) // Variable
+			}
+		}
+	}
+
 	// Inside an onfail block, &fail.* context refs are available.
 	if strings.HasPrefix(prefix, "fail.") && inOnFailBlock(lines, lineIdx) {
 		for _, f := range []string{"fail.message", "fail.line", "fail.exit"} {
@@ -1635,7 +1821,7 @@ func isPrereqListLine(line string) bool {
 	if strings.HasPrefix(trimmed, "$") {
 		return false
 	}
-	for _, kw := range []string{"if ", "for ", "matrix ", "env ", "invoke ", "onfail ", "fail ", "global ", "require_env ", "retry ", "else", "continue", "break"} {
+	for _, kw := range []string{"if ", "for ", "matrix ", "env ", "invoke ", "onfail ", "fail ", "global ", "require_env ", "retry ", "else", "continue", "break", "switch ", "case ", "default", "in ", "lock ", "state ", "confirm ", "prompt ", "input ", "timeout ", "cp ", "rm ", "mkdir ", "touch ", "download ", "extract "} {
 		if strings.HasPrefix(trimmed, kw) {
 			return false
 		}
@@ -1672,6 +1858,113 @@ func failContextHover(lines []string, lineIdx int, name string) (string, bool) {
 		return "`&fail.line` — the source line of the failing statement (empty when unknown)", true
 	case "fail.exit":
 		return "`&fail.exit` — the exit code of the failed command (only set for non-zero exits)", true
+	}
+	return "", false
+}
+
+func lastResultHover(name string) (string, bool) {
+	switch name {
+	case "last.exit":
+		return "`&last.exit` — the exit code of the most recently executed shell statement (0 on success)\n\nSet after every statement; most useful after an `!` error-tolerant statement.", true
+	case "last.output":
+		return "`&last.output` — the captured output of the most recently executed shell statement", true
+	}
+	return "", false
+}
+
+func keywordHover(word string) (string, bool) {
+	switch word {
+	case "switch":
+		return "`switch <expr> { case v { } ... default { } }`\n\nRuns the first case whose value equals the expression; `default` runs when nothing matches.", true
+	case "case":
+		return "`case v1, v2 { ... }`\n\nRuns its body when the switch expression equals one of the comma-separated values.", true
+	case "default":
+		return "`default { ... }`\n\nRuns when no case value matched the switch expression.", true
+	case "in":
+		return "`in <dir> { ... }`\n\nRuns the block with the working directory set to `<dir>`, resolved against the Constfile directory.", true
+	case "lock":
+		return "`lock \"name\" { ... }`\n\nHolds an exclusive lock (in `.construct-cache/locks/`) while the block runs; other construct processes wait for it.", true
+	case "state":
+		return "`state name = value`\n\nPersists a variable across runs in `.construct-cache/state.json`. Read it back with `state(\"name\")` or `@state(\"name\")`.", true
+	case "confirm":
+		return "`confirm \"message\"`\n\nAsks for y/N confirmation and aborts the command when declined. `--yes` auto-approves.", true
+	case "prompt":
+		return "`prompt \"message\"`\n\nPrints the message and waits for Enter (skips the wait when stdin is not a TTY or `--yes` is set).", true
+	case "input":
+		return "`input name \"question\"`\n\nReads a line from stdin into the variable `name`.", true
+	case "timeout":
+		return "`timeout 30s $ cmd` or `cmd timeout 30s { ... }`\n\nCaps the statement (or whole command) at the duration; a hit is reported as exit 124.", true
+	case "cp":
+		return "builtin: `cp <src> <dst>`\n\nCopies a file or directory recursively, cross-platform. Prefix with `$` to use the shell's cp instead.", true
+	case "rm":
+		return "builtin: `rm <path>`\n\nRemoves a file or directory recursively; refuses to remove the base directory or its ancestors.", true
+	case "mkdir":
+		return "builtin: `mkdir <path>`\n\nCreates a directory (and its parents).", true
+	case "touch":
+		return "builtin: `touch <path>`\n\nCreates the file if missing, otherwise updates its mtime.", true
+	case "download":
+		return "builtin: `download <url> <dst>`\n\nDownloads a URL to a file with a progress bar on TTYs.", true
+	case "extract":
+		return "builtin: `extract <archive> <dir>`\n\nExtracts `.zip`, `.tar`, `.tar.gz`/`.tgz` or `.tar.bz2` archives; entries escaping the destination are refused.", true
+	}
+	return "", false
+}
+
+func functionHover(word string) (string, bool) {
+	switch word {
+	case "basename", "dirname", "ext", "stem":
+		return fmt.Sprintf("`%s(path)` — path helper returning %s", word, map[string]string{
+			"basename": "the final path element",
+			"dirname":  "the parent directory",
+			"ext":      "the file extension (with dot)",
+			"stem":     "the basename without its extension",
+		}[word]), true
+	case "upper", "lower", "trim":
+		return fmt.Sprintf("`%s(s)` — string helper: %s", word, map[string]string{
+			"upper": "uppercases",
+			"lower": "lowercases",
+			"trim":  "strips surrounding whitespace",
+		}[word]), true
+	case "replace":
+		return "`replace(s, old, new)` — replaces every occurrence of `old` with `new`", true
+	case "sprintf":
+		return "`sprintf(format, args...)` — printf-style formatting", true
+	case "length", "len":
+		return "`len(value)` — the number of list items, or the rune length of a string", true
+	case "abs":
+		return "`abs(n)` — the absolute value of a number", true
+	case "min", "max":
+		return fmt.Sprintf("`%s(a, b, ...)` — the %s of the arguments", word, word), true
+	case "date":
+		return "`date(\"2006-01-02\")` — the current time formatted (Go layout); defaults to YYYY-MM-DD", true
+	case "uuid":
+		return "`uuid()` — a random v4 UUID", true
+	case "file":
+		return "`file(path)` — the file's contents as a string", true
+	case "lines":
+		return "`lines(path)` — the file's non-empty lines as a list", true
+	case "sha256":
+		return "`sha256(path)` — the SHA-256 hex digest of a file", true
+	case "glob":
+		return "`glob(pattern)` — files matching a glob as a list", true
+	case "sort":
+		return "`sort(list)` — the list sorted lexicographically", true
+	case "uniq":
+		return "`uniq(list)` — the list with duplicates removed, order preserved", true
+	case "join":
+		return "`join(list, sep)` — the list joined into a string", true
+	case "split":
+		return "`split(s, sep)` — the string split into a list", true
+	case "exists":
+		return "`exists(path)` — \"true\" when the file exists (usable in conditions)", true
+	case "missing":
+		return "`missing(path)` — \"true\" when the file does not exist (usable in conditions)", true
+	case "require":
+		return "`require(tool)` — \"true\" when the tool is on PATH (usable in conditions)", true
+	case "env":
+		return "`env(name)` — the environment variable's value", true
+	case "state":
+		return "`state(\"name\")` or `@state(\"name\")` — a value persisted by a `state` declaration", true
 	}
 	return "", false
 }

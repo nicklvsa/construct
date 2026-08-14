@@ -1,0 +1,22 @@
+var app = myapp
+var version = 0.1.0
+
+# Builds the binary
+build produces dist/&app < src/**, go.mod, go.sum {
+    $ go build -o dist/&app .
+}
+
+# Runs the test suite
+test {
+    $ go test ./...
+}
+
+# Vet and format checks
+check {
+    $ go vet ./...
+    $ gofmt -l .
+}
+
+_ < test, check {
+    $ echo "all checks passed"
+}

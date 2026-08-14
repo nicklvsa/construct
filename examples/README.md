@@ -26,6 +26,11 @@ construct Constfile-<name> <command>    # run a command
 | `Constfile-modern-features` (+ `Constfile-shared-lib`, `Constfile-shared-other`) | Multi-file | Namespaced imports (`import ... as ns`), doc comments (`--list`), per-command `env { }` blocks, `invoke` with output capture |
 | `Constfile-robustness` | Any | `@ENV:-default` env defaults, `fail "message"` guards, `onfail { }` cleanup blocks, `invoke` with arguments, `-k/--keep-going`, `--no-cache`, `--shell` |
 | `Constfile-modern-flags` | Any | `require_env`, `global` writes, `retry N`, `starts_with`/`ends_with`/`matches`, `onchange` watch globs, bare `key=value` overrides, `--explain`, `--quiet`, `--list --json`, `--jobs auto`, concurrent output prefixing, SIGINT cleanup |
+| `Constfile-expressions` | Any | List values (`[...]`), arithmetic (`+ - * / %`), ternaries, `in` membership, builtin function library (`sort`, `join`, `len`, `upper`, `replace`, `basename`, `lines`, `date`, ...) |
+| `Constfile-control-flow` | Any | `switch`/`case`/`default`, `in <dir> { }` scoped workdirs, `lock`, `timeout` (command + statement), `confirm`/`prompt`/`input`, `&last.exit`/`&last.output` |
+| `Constfile-builtins` | Any | Cross-platform builtin commands `cp`/`rm`/`mkdir`/`touch`/`download`/`extract`, error-tolerant builtins, `&last.exit` reporting |
+| `Constfile-state` | Any | Persistent `state` variables, `@state("name")` reads, runtime state expressions, `--resume`, `stats` |
+| `Constfile-cloud` (+ `example-cloud.json`) | Any | Cloud commands (`\|name\|`), `invoke` cloud fallback, pure cloud commands, `cloud list/pull/push` |
 
 ## Feature Coverage
 
@@ -55,3 +60,18 @@ construct Constfile-<name> <command>    # run a command
 - **`invoke` with output capture** — `Constfile-modern-features`
 - **Error tolerance (`!`)** — `Constfile-advanced-control`
 - **DAG-parallel prerequisites** — `Constfile-parallel-build`
+- **List values + list operators** — `Constfile-expressions`
+- **Arithmetic + ternaries** — `Constfile-expressions`
+- **Builtin function library** — `Constfile-expressions`
+- **`switch`/`case`/`default`** — `Constfile-control-flow`
+- **Scoped workdir blocks (`in`)** — `Constfile-control-flow`
+- **`lock` mutual exclusion** — `Constfile-control-flow`
+- **`timeout` (command + statement)** — `Constfile-control-flow`
+- **`confirm`/`prompt`/`input` + `--yes`** — `Constfile-control-flow`
+- **`&last.exit`/`&last.output`** — `Constfile-control-flow`, `Constfile-builtins`
+- **Builtin commands (`cp`/`rm`/`mkdir`/`touch`/`download`/`extract`)** — `Constfile-builtins`
+- **Persistent `state` variables** — `Constfile-state`
+- **`--resume` / `--only-failed`** — `Constfile-state`
+- **`--repeat`, `--flame`, `--github-actions`** — `Constfile-state`, any example
+- **Cloud commands (`|name|`, `invoke` fallback)** — `Constfile-cloud`
+- **`init`/`doctor`/`stats`/`cloud` subcommands** — any example

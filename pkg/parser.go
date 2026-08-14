@@ -10,12 +10,14 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 	"unicode"
 )
 
 type ParsedData struct {
 	Variables []*Variable `json:"variables"`
 	Commands  []*Command  `json:"commands"`
+	StateDecls []*Variable `json:"state,omitempty"`
 
 	SourceFiles []string `json:"source_files,omitempty"`
 
@@ -191,9 +193,62 @@ type Argument struct {
 }
 
 type Variable struct {
-	Name  string `json:"name"`
-	Value string `json:"value"`
-	Scope string `json:"scope"`
+	Name   string   `json:"name"`
+	Value  string   `json:"value"`
+	Scope  string   `json:"scope"`
+	IsList bool     `json:"is_list,omitempty"`
+	List   []string `json:"list,omitempty"`
+}
+
+// SetVariableValue stores a value (string or list) into the variable map.
+func (p *ParsedData) SetVariableValue(name, scope string, v Value) {
+	if v.IsList {
+		p.SetVariableList(name, scope, v.L)
+		return
+	}
+	p.SetVariable(name, scope, v.S)
+}
+
+// SetVariableList stores a list value; Value becomes the comma-joined form.
+func (p *ParsedData) SetVariableList(name, scope string, items []string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	value := strings.Join(items, ", ")
+	if p.variableMap != nil {
+		key := scope + "." + name
+		if v, ok := p.variableMap[key]; ok {
+			v.Value = value
+			v.IsList = true
+			v.List = items
+			return
+		}
+		v := &Variable{Name: name, Value: value, Scope: scope, IsList: true, List: items}
+		p.Variables = append(p.Variables, v)
+		p.variableMap[key] = v
+		return
+	}
+	for _, v := range p.Variables {
+		if v.Name == name && v.Scope == scope {
+			v.Value = value
+			v.IsList = true
+			v.List = items
+			return
+		}
+	}
+	p.Variables = append(p.Variables, &Variable{Name: name, Value: value, Scope: scope, IsList: true, List: items})
+}
+
+// LookupVariableValue returns the variable as a typed Value, resolving list
+// variables into their item lists.
+func (p *ParsedData) LookupVariableValue(name, scope string) (Value, bool) {
+	v, err := p.GetVariable(name, scope)
+	if err != nil || v == nil {
+		return Value{}, false
+	}
+	if v.IsList {
+		return ListValue(v.List), true
+	}
+	return StringValue(v.Value), true
 }
 
 type LazyOutput struct {
@@ -213,7 +268,23 @@ const (
 	StmtFail       = "fail"
 	StmtOnFail     = "onfail"
 	StmtRequireEnv = "require_env"
+	StmtSwitch     = "switch"
+	StmtInDir      = "in"
+	StmtLock       = "lock"
+	StmtState      = "state"
+	StmtBuiltin    = "builtin"
+	StmtConfirm    = "confirm"
+	StmtPrompt     = "prompt"
+	StmtInput      = "input"
 )
+
+// SwitchCase is one `case` arm of a switch statement.
+type SwitchCase struct {
+	Values     []string        `json:"values,omitempty"`
+	IsDefault  bool            `json:"is_default,omitempty"`
+	Body       []BodyStatement `json:"body,omitempty"`
+	SourceLine int             `json:"source_line,omitempty"`
+}
 
 type BodyStatement struct {
 	Type       string          `json:"type"` // one of the Stmt* constants
@@ -231,6 +302,12 @@ type BodyStatement struct {
 	OnFailBody []BodyStatement `json:"onfail,omitempty"`
 	InvokeArgs []string        `json:"invoke_args,omitempty"`
 	Retry      int             `json:"retry,omitempty"`
+	Timeout    string          `json:"timeout,omitempty"`
+	SwitchExpr string          `json:"switch_expr,omitempty"`
+	Cases      []SwitchCase    `json:"cases,omitempty"`
+	Dir        string          `json:"dir,omitempty"`
+	BuiltinArgs string         `json:"builtin_args,omitempty"`
+	Tolerant   bool            `json:"tolerant,omitempty"`
 	SourceLine int             `json:"source_line,omitempty"`
 }
 
@@ -251,6 +328,7 @@ type Command struct {
 	OnChange        []string          `json:"onchange,omitempty"`
 	PrereqCmds      []*Command        `json:"prereq_cmds"`
 	WorkDir         string            `json:"work_dir"`
+	Timeout         string            `json:"timeout,omitempty"`
 	Body            []BodyStatement   `json:"body"`
 	SourceLine      int               `json:"source_line,omitempty"`
 	Description     string            `json:"description,omitempty"`
@@ -291,8 +369,18 @@ func (p *Parser) findVariable(varName string, scope *string) (*Variable, error) 
 	return nil, fmt.Errorf("cannot find %s", varName)
 }
 
+func (p *Parser) stateDeclLookup(name string) (string, bool) {
+	for _, d := range p.Data.StateDecls {
+		if d.Name == name {
+			return d.Value, true
+		}
+	}
+	return "", false
+}
+
 func (p *Parser) tryEvalExpression(expression string, varName *string, varScope *string, lineNum int) string {
 	expression = strings.TrimSpace(expression)
+	expression = resolveStateRefsWith(expression, p.stateDeclLookup)
 
 	var result strings.Builder
 	runes := []rune(expression)
@@ -358,7 +446,11 @@ func (p *Parser) tryEvalExpression(expression string, varName *string, varScope 
 					scope = *varScope
 				}
 				if variable, err := p.findVariable(refName.String(), &scope); err == nil {
-					result.WriteString(variable.Value)
+					if variable.IsList {
+						result.WriteString(strings.Join(variable.List, ", "))
+					} else {
+						result.WriteString(variable.Value)
+					}
 				}
 				i = j
 				continue
@@ -385,6 +477,56 @@ func (p *Parser) tryEvalExpression(expression string, varName *string, varScope 
 	return result.String()
 }
 
+// parserEvalContext resolves expression names against parser state.
+type parserEvalContext struct {
+	p     *Parser
+	scope string
+}
+
+func (c parserEvalContext) LookupVar(name string) (Value, bool) {
+	return LookupVariableIndexed(c.p.Data, name, c.scope)
+}
+
+func (c parserEvalContext) LookupEnv(name string) (string, bool) {
+	return os.LookupEnv(name)
+}
+
+func (c parserEvalContext) LookupState(name string) (string, bool) {
+	return c.p.stateDeclLookup(name)
+}
+
+func (c parserEvalContext) BaseDir() string {
+	return importBaseDir(c.p.InputFile)
+}
+
+// evalVarValue evaluates a variable value, returning the string form plus
+// list metadata when the value is a list.
+func (p *Parser) evalVarValue(value string, varName *string, varScope *string, lineNum int) (string, bool, []string, error) {
+	value = strings.TrimSpace(value)
+	ctx := parserEvalContext{p: p, scope: *varScope}
+	if v, ok, err := evalValueExpr(value, ctx); ok {
+		if err != nil {
+			return "", false, nil, err
+		}
+		if v.IsList {
+			return v.String(), true, v.L, nil
+		}
+		return v.S, false, nil, nil
+	}
+	// Fall back to literal substitution, resolving refs with list/index
+	// support before the legacy substitution pass.
+	if strings.IndexByte(value, '&') >= 0 {
+		value = resolveVarRefs(value, func(name string) (string, bool) {
+			v, ok := LookupVariableIndexed(p.Data, name, *varScope)
+			if !ok {
+				return "", false
+			}
+			return v.String(), true
+		})
+	}
+	return p.tryEvalExpression(value, varName, varScope, lineNum), false, nil, nil
+}
+
 func (p *Parser) parseVar(line string, scope string, lineNum int) error {
 	pieces := strings.SplitN(line, "=", 2)
 
@@ -394,14 +536,22 @@ func (p *Parser) parseVar(line string, scope string, lineNum int) error {
 	}
 
 	var variableValue string
+	var isList bool
+	var list []string
 	if len(pieces) > 1 {
-		variableValue = p.tryEvalExpression(pieces[1], &variableName, &scope, lineNum)
+		var err error
+		variableValue, isList, list, err = p.evalVarValue(pieces[1], &variableName, &scope, lineNum)
+		if err != nil {
+			return fmt.Errorf("variable %q: %w", variableName, err)
+		}
 	}
 
 	p.Data.Variables = append(p.Data.Variables, &Variable{
-		Name:  variableName,
-		Value: variableValue,
-		Scope: scope,
+		Name:   variableName,
+		Value:  variableValue,
+		Scope:  scope,
+		IsList: isList,
+		List:   list,
 	})
 
 	return nil
@@ -425,6 +575,7 @@ func parseCommandName(line string) string {
 	inIdx := strings.Index(line, " in ")
 	prodIdx := findProducesIdx(line)
 	ocIdx := findTopLevelKeyword(line, " onchange ")
+	timeoutIdx := findTopLevelKeyword(line, " timeout ")
 	terminators := []rune{'(', '<', '{'}
 	endIdx := len(line)
 	for i, r := range line {
@@ -442,6 +593,9 @@ func parseCommandName(line string) string {
 	}
 	if ocIdx >= 0 && ocIdx < endIdx {
 		endIdx = ocIdx
+	}
+	if timeoutIdx >= 0 && timeoutIdx < endIdx {
+		endIdx = timeoutIdx
 	}
 	return strings.TrimSpace(line[:endIdx])
 }
@@ -524,6 +678,35 @@ func extractOnChange(line string) []string {
 		}
 	}
 	return out
+}
+
+// extractTimeout parses the `timeout <duration>` header modifier.
+func extractTimeout(line string) string {
+	idx := findTopLevelKeyword(line, " timeout ")
+	if idx < 0 {
+		return ""
+	}
+	segment := line[idx+len(" timeout "):]
+	if lt := strings.IndexByte(segment, '<'); lt >= 0 {
+		segment = segment[:lt]
+	}
+	if brace := strings.IndexByte(segment, '{'); brace >= 0 {
+		segment = segment[:brace]
+	}
+	if inIdx := strings.Index(segment, " in "); inIdx >= 0 {
+		segment = segment[:inIdx]
+	}
+	if prod := findTopLevelKeyword(segment, " produces "); prod >= 0 {
+		segment = segment[:prod]
+	}
+	if oc := findTopLevelKeyword(segment, " onchange "); oc >= 0 {
+		segment = segment[:oc]
+	}
+	segment = strings.TrimSpace(segment)
+	if _, err := time.ParseDuration(segment); err != nil {
+		return ""
+	}
+	return segment
 }
 
 func extractArgumentString(line string) string {
@@ -910,16 +1093,163 @@ func (p *Parser) parseBodyStatements(raw []rawLine, scope string) ([]BodyStateme
 			continue
 		}
 
+		// `state name = value` persists a variable across runs.
+		if strings.HasPrefix(line, "state ") || strings.HasPrefix(line, "state\t") {
+			inner := strings.TrimSpace(strings.TrimPrefix(line, "state"))
+			name, value, ok := strings.Cut(inner, "=")
+			if !ok || strings.TrimSpace(name) == "" {
+				return nil, fmt.Errorf("state declaration requires a name and a value (state name = value)")
+			}
+			stmts = append(stmts, BodyStatement{
+				Type:       StmtState,
+				Shell:      strings.TrimSpace(name),
+				Message:    strings.TrimSpace(value),
+				SourceLine: lineNum,
+			})
+			i++
+			continue
+		}
+
+		// switch <expr> { case v1, v2 { ... } default { ... } }
+		if strings.HasPrefix(line, "switch ") && strings.Contains(line, "{") {
+			stmt, consumed, err := p.parseSwitchBlock(raw[i:], scope)
+			if err != nil {
+				return nil, err
+			}
+			stmts = append(stmts, stmt)
+			i += consumed
+			continue
+		}
+
+		if strings.HasPrefix(line, "case ") || line == "case{" ||
+			strings.HasPrefix(line, "default ") || line == "default{" {
+			return nil, fmt.Errorf("'case'/'default' outside of a switch statement")
+		}
+
+		// in <dir> { ... } scoped workdir block.
+		if strings.HasPrefix(line, "in ") && strings.Contains(line, "{") {
+			stmt, consumed, err := p.parseInDirBlock(raw[i:], scope)
+			if err != nil {
+				return nil, err
+			}
+			stmts = append(stmts, stmt)
+			i += consumed
+			continue
+		}
+
+		// lock "name" { ... } mutual-exclusion block.
+		if strings.HasPrefix(line, "lock ") && strings.Contains(line, "{") {
+			stmt, consumed, err := p.parseLockBlock(raw[i:], scope)
+			if err != nil {
+				return nil, err
+			}
+			stmts = append(stmts, stmt)
+			i += consumed
+			continue
+		}
+
+		if strings.HasPrefix(line, "confirm ") {
+			stmts = append(stmts, BodyStatement{
+				Type:       StmtConfirm,
+				Message:    trimQuoted(strings.TrimSpace(strings.TrimPrefix(line, "confirm"))),
+				SourceLine: lineNum,
+			})
+			i++
+			continue
+		}
+
+		if strings.HasPrefix(line, "prompt ") {
+			stmts = append(stmts, BodyStatement{
+				Type:       StmtPrompt,
+				Message:    trimQuoted(strings.TrimSpace(strings.TrimPrefix(line, "prompt"))),
+				SourceLine: lineNum,
+			})
+			i++
+			continue
+		}
+
+		if strings.HasPrefix(line, "input ") {
+			rest := strings.TrimSpace(strings.TrimPrefix(line, "input"))
+			name, msg := rest, ""
+			if idx := strings.IndexAny(rest, " \t"); idx >= 0 {
+				name, msg = rest[:idx], strings.TrimSpace(rest[idx:])
+			}
+			name = strings.Trim(name, `"`)
+			if name == "" || !isValidIdent(name) {
+				return nil, fmt.Errorf("input requires a variable name")
+			}
+			stmts = append(stmts, BodyStatement{
+				Type:       StmtInput,
+				Shell:      name,
+				Message:    trimQuoted(msg),
+				SourceLine: lineNum,
+			})
+			i++
+			continue
+		}
+
+		// `timeout 30s $ cmd` caps a statement's runtime.
+		timeoutDur := ""
+		if strings.HasPrefix(line, "timeout ") {
+			rest := strings.TrimSpace(strings.TrimPrefix(line, "timeout"))
+			if sp := strings.IndexAny(rest, " \t"); sp > 0 {
+				dur := rest[:sp]
+				if _, err := time.ParseDuration(dur); err == nil {
+					timeoutDur = dur
+					line = strings.TrimSpace(rest[sp:])
+				}
+			}
+		}
+
+		// Builtin cross-platform commands (bare names; use `$` for the shell).
+		if builtinName, args, tolerant, ok := parseBuiltinLine(line); ok {
+			stmts = append(stmts, BodyStatement{
+				Type:        StmtBuiltin,
+				Shell:       builtinName,
+				BuiltinArgs: args,
+				Tolerant:    tolerant,
+				Timeout:     timeoutDur,
+				SourceLine:  lineNum,
+			})
+			i++
+			continue
+		}
+
 		// A dangling "else" can't be a shell statement; report it clearly.
 		if line == "else" || strings.HasPrefix(line, "else ") || strings.HasPrefix(line, "else{") {
 			return nil, fmt.Errorf("'else' without a matching 'if'")
 		}
 
 		shell, outputName := extractOutputName(line)
-		stmts = append(stmts, BodyStatement{Type: StmtShell, Shell: shell, OutputName: outputName, SourceLine: lineNum})
+		stmts = append(stmts, BodyStatement{Type: StmtShell, Shell: shell, OutputName: outputName, Timeout: timeoutDur, SourceLine: lineNum})
 		i++
 	}
 	return stmts, nil
+}
+
+var builtinCommands = []string{"cp", "rm", "mkdir", "touch", "download", "extract"}
+
+// parseBuiltinLine reports whether line is a bare builtin invocation and
+// returns the command name, arguments, and error-tolerance.
+func parseBuiltinLine(line string) (name, args string, tolerant bool, ok bool) {
+	rest := line
+	if strings.HasPrefix(rest, "!") {
+		tolerant = true
+		rest = strings.TrimSpace(rest[1:])
+	}
+	for _, b := range builtinCommands {
+		if strings.HasPrefix(rest, b+" ") || rest == b {
+			return b, strings.TrimSpace(rest[len(b):]), tolerant, true
+		}
+	}
+	return "", "", false, false
+}
+
+func trimQuoted(s string) string {
+	if len(s) >= 2 && s[0] == '"' && s[len(s)-1] == '"' {
+		return s[1 : len(s)-1]
+	}
+	return s
 }
 
 func extractOutputName(line string) (shell, name string) {
@@ -1261,6 +1591,152 @@ func (p *Parser) parseOnFailBlock(raw []rawLine, scope string) (BodyStatement, i
 	return stmt, endIdx, nil
 }
 
+func (p *Parser) parseSwitchBlock(raw []rawLine, scope string) (BodyStatement, int, error) {
+	headerLine := raw[0]
+	header := strings.TrimSpace(headerLine.text)
+	header = strings.TrimPrefix(header, "switch")
+
+	before, _, ok := strings.Cut(header, "{")
+	if !ok {
+		return BodyStatement{}, 0, fmt.Errorf("malformed switch: missing '{'")
+	}
+	expr := strings.TrimSpace(before)
+	if expr == "" {
+		return BodyStatement{}, 0, fmt.Errorf("switch requires an expression")
+	}
+
+	lines, endIdx, err := collectBodyLines(raw, 1)
+	if err != nil {
+		return BodyStatement{}, 0, fmt.Errorf("unclosed switch block (missing '}')")
+	}
+
+	stmt := BodyStatement{Type: StmtSwitch, SwitchExpr: expr, SourceLine: headerLine.num}
+	seen := make(map[string]bool)
+	j := 0
+	for j < len(lines) {
+		l := lines[j]
+		trimmed := strings.TrimSpace(l.text)
+		var caseStmt SwitchCase
+		switch {
+		case strings.HasPrefix(trimmed, "case "):
+			rest := strings.TrimSpace(strings.TrimPrefix(trimmed, "case"))
+			before, _, ok := strings.Cut(rest, "{")
+			if !ok {
+				return BodyStatement{}, 0, fmt.Errorf("malformed case: missing '{'")
+			}
+			for _, v := range strings.Split(before, ",") {
+				v = trimQuoted(strings.TrimSpace(v))
+				if v == "" {
+					continue
+				}
+				if seen[v] {
+					return BodyStatement{}, 0, fmt.Errorf("duplicate case value %q", v)
+				}
+				seen[v] = true
+				caseStmt.Values = append(caseStmt.Values, v)
+			}
+			caseStmt.SourceLine = l.num
+		case strings.HasPrefix(trimmed, "default"):
+			if !strings.Contains(trimmed, "{") {
+				return BodyStatement{}, 0, fmt.Errorf("malformed default: missing '{'")
+			}
+			caseStmt.IsDefault = true
+			caseStmt.SourceLine = l.num
+		default:
+			return BodyStatement{}, 0, fmt.Errorf("expected 'case' or 'default' in switch, got %q", trimmed)
+		}
+
+		var bodyLines []rawLine
+		if body, ok := singleLineBody(l.text); ok {
+			bodyLines = atLine(splitStatements(body), l.num)
+			j++
+		} else {
+			var err error
+			bodyLines, j, err = collectBodyLines(lines, j+1)
+			if err != nil {
+				return BodyStatement{}, 0, fmt.Errorf("unclosed case body (missing '}')")
+			}
+		}
+		bodyStmts, err := p.parseBodyStatements(bodyLines, scope)
+		if err != nil {
+			return BodyStatement{}, 0, err
+		}
+		caseStmt.Body = bodyStmts
+		stmt.Cases = append(stmt.Cases, caseStmt)
+	}
+
+	if len(stmt.Cases) == 0 {
+		return BodyStatement{}, 0, fmt.Errorf("switch requires at least one case")
+	}
+	return stmt, endIdx, nil
+}
+
+func (p *Parser) parseInDirBlock(raw []rawLine, scope string) (BodyStatement, int, error) {
+	headerLine := raw[0]
+	header := strings.TrimSpace(headerLine.text)
+	header = strings.TrimPrefix(header, "in")
+
+	before, _, ok := strings.Cut(header, "{")
+	if !ok {
+		return BodyStatement{}, 0, fmt.Errorf("malformed 'in' block: missing '{'")
+	}
+	dir := strings.TrimSpace(before)
+	if dir == "" {
+		return BodyStatement{}, 0, fmt.Errorf("'in' block requires a directory")
+	}
+
+	if body, ok := singleLineBody(raw[0].text); ok {
+		bodyStmts, err := p.parseBodyStatements(atLine(splitStatements(body), headerLine.num), scope)
+		if err != nil {
+			return BodyStatement{}, 0, err
+		}
+		return BodyStatement{Type: StmtInDir, Shell: dir, ThenBody: bodyStmts, SourceLine: headerLine.num}, 1, nil
+	}
+
+	bodyLines, endIdx, err := collectBodyLines(raw, 1)
+	if err != nil {
+		return BodyStatement{}, 0, fmt.Errorf("unclosed 'in' block (missing '}')")
+	}
+	bodyStmts, err := p.parseBodyStatements(bodyLines, scope)
+	if err != nil {
+		return BodyStatement{}, 0, err
+	}
+	return BodyStatement{Type: StmtInDir, Shell: dir, ThenBody: bodyStmts, SourceLine: headerLine.num}, endIdx, nil
+}
+
+func (p *Parser) parseLockBlock(raw []rawLine, scope string) (BodyStatement, int, error) {
+	headerLine := raw[0]
+	header := strings.TrimSpace(headerLine.text)
+	header = strings.TrimPrefix(header, "lock")
+
+	before, _, ok := strings.Cut(header, "{")
+	if !ok {
+		return BodyStatement{}, 0, fmt.Errorf("malformed lock: missing '{'")
+	}
+	name := trimQuoted(strings.TrimSpace(before))
+	if name == "" {
+		return BodyStatement{}, 0, fmt.Errorf("lock requires a name")
+	}
+
+	if body, ok := singleLineBody(raw[0].text); ok {
+		bodyStmts, err := p.parseBodyStatements(atLine(splitStatements(body), headerLine.num), scope)
+		if err != nil {
+			return BodyStatement{}, 0, err
+		}
+		return BodyStatement{Type: StmtLock, Shell: name, ThenBody: bodyStmts, SourceLine: headerLine.num}, 1, nil
+	}
+
+	bodyLines, endIdx, err := collectBodyLines(raw, 1)
+	if err != nil {
+		return BodyStatement{}, 0, fmt.Errorf("unclosed lock block (missing '}')")
+	}
+	bodyStmts, err := p.parseBodyStatements(bodyLines, scope)
+	if err != nil {
+		return BodyStatement{}, 0, err
+	}
+	return BodyStatement{Type: StmtLock, Shell: name, ThenBody: bodyStmts, SourceLine: headerLine.num}, endIdx, nil
+}
+
 func parseInvokeArgs(s string) (name string, args []string) {
 	s = strings.TrimSpace(s)
 	if s == "" {
@@ -1484,7 +1960,10 @@ func collectBodyLines(raw []rawLine, start int) ([]rawLine, int, error) {
 
 func isNestedBlockHeader(t string) bool {
 	return (strings.HasPrefix(t, "if ") || strings.HasPrefix(t, "for ") || strings.HasPrefix(t, "matrix ") ||
-		strings.HasPrefix(t, "env ") || strings.HasPrefix(t, "onfail ")) && strings.Contains(t, "{")
+		strings.HasPrefix(t, "env ") || strings.HasPrefix(t, "onfail ") ||
+		strings.HasPrefix(t, "switch ") || strings.HasPrefix(t, "case ") ||
+		strings.HasPrefix(t, "default") || strings.HasPrefix(t, "in ") ||
+		strings.HasPrefix(t, "lock ") || strings.HasPrefix(t, "case{")) && strings.Contains(t, "{")
 }
 
 func extractIfCondition(line string) string {
@@ -1531,6 +2010,7 @@ func (p *Parser) parseCommand(idx int, line string, isDefault bool, lineNum int,
 	}
 
 	workDir := extractWorkDir(line)
+	timeout := extractTimeout(line)
 	produces := extractProduces(line)
 	onChange := extractOnChange(line)
 
@@ -1556,6 +2036,7 @@ func (p *Parser) parseCommand(idx int, line string, isDefault bool, lineNum int,
 			Prereqs:         prereqs,
 			PrereqDirs:      prereqDirs,
 			WorkDir:         workDir,
+			Timeout:         timeout,
 			Produces:        produces,
 			OnChange:        onChange,
 			Body:            commandBody,
@@ -1689,6 +2170,25 @@ func (p *Parser) parseLines() error {
 			if err := p.parseVar(line, "global", lineNum); err != nil {
 				return p.parseErr(lineNum, err, line)
 			}
+			pendingComment = nil
+			idx++
+			continue
+		}
+
+		if strings.HasPrefix(line, "state ") {
+			inner := strings.TrimSpace(strings.TrimPrefix(line, "state"))
+			name, value, ok := strings.Cut(inner, "=")
+			if !ok || strings.TrimSpace(name) == "" {
+				return p.parseErr(lineNum, fmt.Errorf("state declaration requires a name and a value (state name = value)"), line)
+			}
+			name = strings.TrimSpace(name)
+			scope := "global"
+			val, isList, list, err := p.evalVarValue(strings.TrimSpace(value), &name, &scope, lineNum)
+			if err != nil {
+				return p.parseErr(lineNum, err, line)
+			}
+			val = trimQuoted(val)
+			p.Data.StateDecls = append(p.Data.StateDecls, &Variable{Name: name, Value: val, Scope: "global", IsList: isList, List: list})
 			pendingComment = nil
 			idx++
 			continue
@@ -1916,6 +2416,9 @@ func renameCommandRefs(c *Command, commandNew, globalNew map[string]string, shad
 		if n, ok := globalNew[full]; ok {
 			return "&" + n, true
 		}
+		if n, ok := globalNew[seg]; ok {
+			return "&" + n + full[len(seg):], true
+		}
 		if n, ok := commandNew[seg]; ok {
 			return "&" + n + full[len(seg):], true
 		}
@@ -1936,6 +2439,12 @@ func collectLoopVars(stmts []BodyStatement, out map[string]bool) {
 		case StmtIf:
 			collectLoopVars(stmt.ThenBody, out)
 			collectLoopVars(stmt.ElseBody, out)
+		case StmtSwitch:
+			for _, c := range stmt.Cases {
+				collectLoopVars(c.Body, out)
+			}
+		case StmtInDir, StmtLock:
+			collectLoopVars(stmt.ThenBody, out)
 		}
 	}
 }
@@ -1957,6 +2466,21 @@ func renameBodyRefs(stmts []BodyStatement, rename func(string) (string, bool)) {
 					stmts[i].Shell = strings.TrimPrefix(rewritten, "&")
 				}
 			}
+		case StmtSwitch:
+			stmts[i].SwitchExpr = renameVarRefs(stmts[i].SwitchExpr, rename)
+			for j := range stmts[i].Cases {
+				for k := range stmts[i].Cases[j].Values {
+					stmts[i].Cases[j].Values[k] = renameVarRefs(stmts[i].Cases[j].Values[k], rename)
+				}
+				renameBodyRefs(stmts[i].Cases[j].Body, rename)
+			}
+		case StmtInDir, StmtLock:
+			stmts[i].Shell = renameVarRefs(stmts[i].Shell, rename)
+			renameBodyRefs(stmts[i].ThenBody, rename)
+		case StmtBuiltin:
+			stmts[i].BuiltinArgs = renameVarRefs(stmts[i].BuiltinArgs, rename)
+		case StmtState, StmtConfirm, StmtPrompt:
+			stmts[i].Message = renameVarRefs(stmts[i].Message, rename)
 		default:
 			stmts[i].Shell = renameVarRefs(stmts[i].Shell, rename)
 		}

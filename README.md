@@ -21,6 +21,13 @@ construct [options] [Constfile] [commands...]
 | Command | Description |
 |---------|-------------|
 | `list` | List all available commands |
+| `init [template]` | Scaffold a Constfile (`minimal`, `go`, `python`, `node`, `rust`, `monorepo`; `--force` to overwrite) |
+| `doctor` | Diagnose the environment, Constfile, tools, and cloud file |
+| `stats` | Show per-command timing history from `.construct-cache/run-state.json` |
+| `cloud list\|pull\|push` | Manage cloud command definitions (see Cloud Commands) |
+| `cloud submit [targets...]` | Dispatch a build to GitHub Actions (`--wait` follows it) |
+| `cloud status\|logs\|cancel <run-id>` | Inspect or cancel a dispatched run |
+| `cloud init-actions` | Create `.github/workflows/construct.yml` |
 
 ### Options
 
@@ -43,6 +50,12 @@ construct [options] [Constfile] [commands...]
 | `--dry-run` | Show commands without executing them |
 | `--list` | List all available commands |
 | `--env-file PATH` | Load environment variables from a dotenv-style file |
+| `--resume`, `--only-failed` | Rerun only the commands that failed in the last run |
+| `--repeat N` | Run the whole build N times (flaky detection) |
+| `--flame` | Print a per-statement flame graph after the run |
+| `--github-actions` | GitHub Actions native output (auto-enabled under `GITHUB_ACTIONS`) |
+| `--yes` | Auto-approve `confirm` statements |
+| `--force`, `-f` | Overwrite files (`init`) |
 
 ### Examples
 
@@ -69,6 +82,78 @@ var ref = &otherVar              # Reference another variable
 
 `@ENV:-default` also works in shell lines and conditions: an unset variable
 expands to the default instead of staying literal or becoming empty.
+
+#### Lists and Expressions
+
+A variable can hold a list of values, created with `[...]`:
+
+```
+var platforms = [linux, windows]
+var more = &platforms + [macos]      # list concatenation
+var first = &platforms.0             # index into a list
+var count = len(&platforms)          # list length
+var sorted = sort([b, a, c])         # sort and uniq
+var joined = join(&platforms, "+")   # join/split
+```
+
+- In shell lines a list expands space-joined (`&platforms` → `linux windows`);
+  in `for` loops, `in` conditions, and variable values it behaves as a list.
+- `for x in &platforms` iterates the items; `"&x" in &platforms` tests
+  membership.
+
+Variable values are evaluated as expressions when they contain operators:
+
+```
+var total = &count * 2 + 1           # arithmetic: + - * / %
+var tag = &count >= 5 ? "big" : "small"   # ternary
+var combined = &a + &b               # numbers add, strings concatenate
+var ok = &env == "prod" && &count > 0    # logical operators
+```
+
+Values without operators keep the literal substitution behavior.
+
+#### Builtin Functions
+
+Available in variable values, `env` blocks, `switch` expressions, and
+`for ... in` item lists (use them in conditions where `exists`/`missing`/
+`glob`/`require` already work):
+
+| Function | Returns |
+|----------|---------|
+| `upper(s)`, `lower(s)`, `trim(s)`, `replace(s, old, new)` | string helpers |
+| `sprintf(fmt, args...)` | printf-style formatting |
+| `basename(s)`, `dirname(s)`, `ext(s)`, `stem(s)` | path helpers |
+| `length(s)`, `len(x)` | rune count or list length |
+| `abs(n)`, `min(a, b, ...)`, `max(a, b, ...)` | numeric helpers |
+| `date("2006-01-02")` | current time (Go layout; defaults to `2006-01-02`) |
+| `uuid()` | a random v4 UUID |
+| `file(path)` | the file's contents (trailing newline trimmed) |
+| `lines(path)` | the file's non-empty lines as a list |
+| `sha256(path)` | hex digest of a file |
+| `glob(pattern)` | matching files as a list |
+| `sort(list)`, `uniq(list)`, `join(list, sep)`, `split(s, sep)` | list helpers |
+| `env("NAME")` | an environment variable's value |
+| `state("name")` / `@state("name")` | a value persisted by a `state` declaration |
+| `exists(path)`, `missing(path)`, `require(tool)` | "true"/"false" checks |
+
+Paths resolve relative to the Constfile's directory.
+
+#### Persistent State
+
+`state name = value` declares a variable that persists across runs in
+`.construct-cache/state.json`:
+
+```
+state last_release = "0.0.0"
+
+release {
+    $ echo "previous: @state("last_release")"
+    state last_release = "1.0.0"   # written to state.json
+}
+```
+
+`state` declarations may appear at the top level or inside command bodies;
+`@state("name")` and `state("name")` read the persisted value.
 
 ### Commands
 
@@ -362,7 +447,6 @@ build {
     }
 }
 ```
-
 Conditions support the comparison operators `==`, `!=`, `>`, `>=`, `<`, `<=`
 (numeric when both sides are integers, otherwise lexicographic), plus the
 string operators `contains`, `starts_with`, `ends_with`, and `matches` (regular
@@ -498,6 +582,183 @@ Bare `continue` (skip the rest of this iteration) and `break` (exit the loop)
 work inside any `for` or `matrix` body, including nested in `if` blocks. Use
 `$ continue` if you actually need the shell builtin.
 
+### Switch
+
+Multi-arm dispatch over an expression; the first matching case runs:
+
+```
+deploy {
+    switch "&env" {
+        case "prod", "staging" {
+            $ aws deploy
+        }
+        case "dev" {
+            $ local-deploy
+        }
+        default {
+            $ echo "unknown env &env"
+        }
+    }
+}
+```
+
+Case values are comma-separated and matched exactly; `default` runs when
+nothing matches. `case`/`default` outside a `switch` is a parse error.
+
+### Scoped Working Directories
+
+`in <dir> { ... }` runs a block with its working directory set (created if
+missing), returning afterwards:
+
+```
+test {
+    in api {
+        $ go test ./...
+    }
+    in web {
+        $ npm test
+    }
+}
+```
+
+### Locks
+
+`lock "name" { ... }` holds an exclusive advisory lock (stored in
+`.construct-cache/locks/`) while the block runs. Concurrent `construct`
+processes wait for it:
+
+```
+deploy {
+    lock "deploy" {
+        $ aws deploy
+    }
+}
+```
+
+### Confirmations and Input
+
+- `confirm "deploy to prod?"` — asks y/N and aborts the command when declined.
+  `--yes` auto-approves; non-TTY stdin aborts unless `--yes` is given.
+- `prompt "press enter"` — prints the message and waits for Enter on a TTY
+  (skips the wait otherwise).
+- `input name "question?"` — reads a line from stdin into the variable `name`.
+
+### Timeouts
+
+A command or a single statement can be capped with a duration:
+
+```
+build timeout 120s {
+    $ go build
+    timeout 30s $ go test
+}
+```
+
+A hit kills the statement's process group and reports
+`command '...' timed out after 30s (exit 124)`.
+
+### Builtin Commands
+
+Bare lines starting with a builtin name run cross-platform (use `$ cp ...` to
+force the shell version):
+
+```
+provision {
+    mkdir dist
+    cp src/app dist/app
+    touch dist/version.txt
+    download "https://example.com/data.zip" dist/data.zip
+    extract dist/data.zip dist/data
+    rm -rf dist/tmp
+}
+```
+
+- `cp src dst` — copies a file or directory (recursive)
+- `rm path...` — removes recursively; refuses to remove the base directory or
+  its ancestors
+- `mkdir path...`, `touch path...` — directory/file helpers
+- `download url dst` — fetches with a progress bar on TTYs
+- `extract archive dir` — `.zip`, `.tar`, `.tar.gz`/`.tgz`, `.tar.bz2`
+  (path-traversal entries are refused)
+
+A leading `!` makes a builtin error-tolerant, and `&last.exit` reports the
+result.
+
+### Statement Results: &last.exit and &last.output
+
+After every shell or builtin statement, `&last.exit` and `&last.output` hold
+the previous statement's exit code and captured output — most useful after an
+error-tolerant `!` statement:
+
+```
+deploy {
+    ! $ aws cloudfront create-invalidation
+    if "&last.exit" != "0" {
+        $ echo "invalidation failed, continuing anyway"
+    }
+}
+```
+
+### Cloud Commands
+
+Commands marked `|name|` can fetch their body from a cloud definitions file
+(JSON map of name → command). The file comes from `$CONSTRUCT_CLOUD_FILE`,
+or `construct-cloud.json` next to the Constfile:
+
+```
+|deploy| {
+    $ echo "local fallback body"
+}
+
+use {
+    invoke deploy          # uses the remote body when the local body is empty
+}
+```
+
+- A cloud-accessible command with an empty local body runs the remote
+  definition; `invoke` falls back to the cloud when the command isn't local;
+  running `construct name` also works for pure cloud commands.
+- `construct cloud list` — list definitions.
+- `construct cloud pull [names...]` — write definitions into
+  `construct-cloud.json` (auto-loaded).
+- `construct cloud push [names...]` — upload local (cloud-accessible) bodies
+  into the cloud file (`--file` to choose the target).
+
+### Cloud Jobs (GitHub Actions)
+
+`construct cloud submit` runs a build on GitHub Actions instead of locally:
+
+```bash
+construct cloud submit build                     # dispatch
+construct cloud submit --wait test               # dispatch + follow logs
+construct cloud submit --wait -e CI=true deploy --deploy:env=prod
+construct cloud status 12345
+construct cloud logs 12345
+construct cloud cancel 12345
+```
+
+- The repository is inferred from `git remote get-url origin` (override with
+  `--repo owner/repo`), the branch from the current checkout (`--ref` to
+  override), and the workflow defaults to `.github/workflows/construct.yml`.
+- If the workflow file doesn't exist, `cloud submit` creates it (a
+  `workflow_dispatch`-driven runner that installs construct, restores the
+  previous `.construct-cache` artifact, runs the targets, and uploads the new
+  state). Commit and push it, then re-submit.
+- Authentication: `GITHUB_TOKEN` (or `CONSTRUCT_GITHUB_TOKEN`), falling back
+  to `gh auth token`. The API base is overridable with
+  `CONSTRUCT_GITHUB_API`.
+- `-e KEY=value` overrides travel to the runner as workflow inputs. Keys that
+  look like secrets (token, password, api_key, ...) are warned about and
+  their values are redacted from locally streamed logs — but workflow inputs
+  are visible to repo collaborators, so prefer GitHub repo secrets for real
+  secrets.
+- `--wait` polls the run, streams new job logs with secrets redacted, and
+  exits non-zero when the run fails. `--json` prints machine-readable
+  dispatch/status output.
+- Run records, `--resume`, `--repeat`, and `--flame` all behave the same on
+  the runner as locally; the runner's `.construct-cache` is uploaded as an
+  artifact between runs.
+
 ## Example Constfile
 
 ```
@@ -538,7 +799,7 @@ Construct runs each command body through a shell. The shell is chosen automatica
 | Env var | Default | Purpose |
 |---------|---------|---------|
 | `CONSTRUCT_SHELL` | platform default | Override the shell binary used to run command bodies (e.g. `bash`, `/usr/local/bin/zsh`) |
-| `CONSTRUCT_CLOUD_FILE` | `fakecloud.json` | Path to the JSON file holding cloud-accessible command definitions |
+| `CONSTRUCT_CLOUD_FILE` | `construct-cloud.json` | Path to the JSON file holding cloud-accessible command definitions |
 | `SHELL` | (system) | Used as the non-Windows shell when `CONSTRUCT_SHELL` is unset |
 
 ## Error Detection
@@ -547,7 +808,20 @@ Construct validates:
 - Circular dependencies in prerequisites
 - Missing prerequisite commands
 - Unclosed command blocks
+- `case`/`default` outside a `switch`, duplicate case values, switches without cases
 
 Failures are reported with their source location, e.g.
 `Constfile:42: command '...' failed (exit 1)` — the file and line of the
 failing statement — and parse errors include the offending line.
+
+## Editor Support
+
+The VSCode extension (`editor/vscode`) ships a language server with hover
+(variables, arguments, prereq outputs, keywords, builtins, functions, and
+`&fail.*`/`&last.*` context refs), go-to-definition (variables, commands,
+prereqs, file deps, workdirs, and `state("...")` refs), completions
+(variables, command names, statement keywords, builtins, and functions),
+document symbols (commands and state declarations), and diagnostics
+(parse errors, duplicate prereqs, out-of-range output indexes, named-output
+hints). The TextMate grammar highlights all statements, blocks, list
+literals, and expressions.

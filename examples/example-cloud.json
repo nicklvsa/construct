@@ -1,0 +1,14 @@
+{
+  "gen": {
+    "name": "gen",
+    "body": [
+      { "type": "shell", "shell": "echo \"generated from cloud\"" }
+    ]
+  },
+  "healthcheck": {
+    "name": "healthcheck",
+    "body": [
+      { "type": "shell", "shell": "echo \"remote healthcheck\"" }
+    ]
+  }
+}

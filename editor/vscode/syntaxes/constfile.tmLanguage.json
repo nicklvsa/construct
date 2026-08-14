@@ -3,6 +3,7 @@
 	"name": "Constfile",
 	"patterns": [
 		{ "include": "#comments" },
+		{ "include": "#state-declaration" },
 		{ "include": "#variable-declaration" },
 		{ "include": "#command-header" },
 		{ "include": "#body-content" }
@@ -39,7 +40,53 @@
 			"patterns": [
 				{
 					"name": "keyword.control.constfile",
-					"match": "\\b(opt|if|else|for|matrix|in|contains|starts_with|ends_with|matches|import|continue|break|exists|missing|glob|require|produces|env|invoke|fail|onfail|global|require_env|retry|onchange)\\b"
+					"match": "\\b(opt|if|else|for|matrix|in|contains|starts_with|ends_with|matches|import|continue|break|exists|missing|glob|require|produces|env|invoke|fail|onfail|global|require_env|retry|onchange|switch|case|default|lock|state|confirm|prompt|input|timeout)\\b"
+				},
+				{
+					"comment": "Builtin cross-platform commands (bare names in bodies)",
+					"name": "support.function.builtin.constfile",
+					"match": "^\\s*(?:(?:!)\\s*)?(cp|rm|mkdir|touch|download|extract)(?=\\s|$)"
+				},
+				{
+					"comment": "Expression function calls (var values, conditions)",
+					"name": "support.function.constfile",
+					"match": "\\b(basename|dirname|ext|stem|upper|lower|trim|replace|sprintf|length|abs|min|max|date|uuid|file|lines|sha256|len|sort|uniq|join|split|env|state)\\s*(?=\\()"
+				}
+			]
+		},
+		"state-ref": {
+			"patterns": [
+				{
+					"name": "support.variable.state.constfile",
+					"match": "(?:@state|state)\\s*\\(\\s*\"([^\"]+)\"\\s*\\)",
+					"captures": {
+						"1": { "name": "string.quoted.double.constfile" }
+					}
+				}
+			]
+		},
+		"list-literal": {
+			"name": "meta.list.constfile",
+			"begin": "\\[",
+			"beginCaptures": {
+				"0": { "name": "punctuation.definition.list.begin.constfile" }
+			},
+			"end": "\\]",
+			"endCaptures": {
+				"0": { "name": "punctuation.definition.list.end.constfile" }
+			},
+			"patterns": [
+				{ "include": "#var-ref" },
+				{ "include": "#env-ref" },
+				{ "include": "#strings" },
+				{ "include": "#numbers" },
+				{
+					"name": "punctuation.separator.comma.constfile",
+					"match": "(,)"
+				},
+				{
+					"name": "string.interpolated.constfile",
+					"match": "[^\\],]*"
 				}
 			]
 		},
@@ -57,6 +104,10 @@
 		},
 		"var-ref": {
 			"patterns": [
+				{
+					"name": "variable.other.readwrite.constfile",
+					"match": "&[A-Za-z_][A-Za-z0-9_-]*(?:\\.[A-Za-z0-9_-]+)+"
+				},
 				{
 					"name": "variable.other.readwrite.constfile",
 					"match": "&[A-Za-z_][A-Za-z0-9_]*\\.\\d+"
@@ -82,6 +133,14 @@
 					"match": "(&&|\\|\\||==|!=|>=|<=|>|<|!)"
 				},
 				{
+					"name": "keyword.operator.arithmetic.constfile",
+					"match": "([+\\-*/%])"
+				},
+				{
+					"name": "keyword.operator.ternary.constfile",
+					"match": "(\\?|:)"
+				},
+				{
 					"name": "keyword.operator.assignment.constfile",
 					"match": "(=)"
 				},
@@ -97,6 +156,21 @@
 					"name": "punctuation.accessor.constfile",
 					"match": "(\\.)"
 				}
+			]
+		},
+		"state-declaration": {
+			"begin": "^\\s*(state)\\s+",
+			"beginCaptures": {
+				"1": { "name": "keyword.control.state.constfile" }
+			},
+			"end": "$",
+			"patterns": [
+				{
+					"name": "entity.name.function.constfile",
+					"match": "([A-Za-z_][A-Za-z0-9_]*)"
+				},
+				{ "include": "#operators" },
+				{ "include": "#value-content" }
 			]
 		},
 		"variable-declaration": {
@@ -127,14 +201,14 @@
 				},
 				{
 					"comment": "Default command: _ (args) < prereqs in dir {",
-					"match": "^(_)(?=\\s*[(<{]|\\s+in\\s)",
+					"match": "^(_)(?=\\s*[(<{]|\\s+in\\s|\\s+timeout\\s)",
 					"captures": {
 						"1": { "name": "entity.name.function.default.constfile" }
 					}
 				},
 				{
 					"comment": "Regular command: name (args) produces files < prereqs in dir {",
-					"match": "^([A-Za-z_][A-Za-z0-9_-]*)(?=\\s*[(<{]|\\s+in\\s|\\s+produces\\s)",
+					"match": "^([A-Za-z_][A-Za-z0-9_-]*)(?=\\s*[(<{]|\\s+in\\s|\\s+produces\\s|\\s+timeout\\s)",
 					"captures": {
 						"1": { "name": "entity.name.function.constfile" }
 					}
@@ -206,6 +280,84 @@
 			"patterns": [
 				{ "include": "#variable-declaration" },
 				{
+					"comment": "switch <expr> { case v { } default { } } — keyword plus block",
+					"name": "meta.block.switch.constfile",
+					"begin": "^\\s*(switch)\\s+([^{]+)(\\{)",
+					"beginCaptures": {
+						"1": { "name": "keyword.control.constfile" },
+						"2": { "name": "string.interpolated.constfile" },
+						"3": { "name": "punctuation.definition.block.constfile" }
+					},
+					"end": "\\}",
+					"endCaptures": {
+						"0": { "name": "punctuation.definition.block.constfile" }
+					},
+					"patterns": [
+						{
+							"comment": "case v1, v2 {",
+							"match": "^\\s*(case)\\s+([^{]+)(\\{)",
+							"captures": {
+								"1": { "name": "keyword.control.constfile" },
+								"2": { "name": "string.interpolated.constfile" },
+								"3": { "name": "punctuation.definition.block.constfile" }
+							}
+						},
+						{
+							"comment": "default {",
+							"match": "^\\s*(default)(\\s*)(\\{)",
+							"captures": {
+								"1": { "name": "keyword.control.constfile" },
+								"3": { "name": "punctuation.definition.block.constfile" }
+							}
+						},
+						{ "include": "#body-content" }
+					]
+				},
+				{
+					"comment": "in <dir> { ... } scoped workdir block",
+					"name": "meta.block.in.constfile",
+					"begin": "^\\s*(in)\\s+([^{]+)(\\{)",
+					"beginCaptures": {
+						"1": { "name": "keyword.control.constfile" },
+						"2": { "name": "string.interpolated.constfile" },
+						"3": { "name": "punctuation.definition.block.constfile" }
+					},
+					"end": "\\}",
+					"endCaptures": {
+						"0": { "name": "punctuation.definition.block.constfile" }
+					},
+					"patterns": [
+						{ "include": "#body-content" }
+					]
+				},
+				{
+					"comment": "lock \"name\" { ... } mutual exclusion block",
+					"name": "meta.block.lock.constfile",
+					"begin": "^\\s*(lock)\\s+([^{]+)(\\{)",
+					"beginCaptures": {
+						"1": { "name": "keyword.control.constfile" },
+						"2": { "name": "string.interpolated.constfile" },
+						"3": { "name": "punctuation.definition.block.constfile" }
+					},
+					"end": "\\}",
+					"endCaptures": {
+						"0": { "name": "punctuation.definition.block.constfile" }
+					},
+					"patterns": [
+						{ "include": "#body-content" }
+					]
+				},
+				{
+					"comment": "state name = value inside a body",
+					"match": "^\\s*(state)\\s+([A-Za-z_][A-Za-z0-9_]*)\\s*(=)(.*)$",
+					"captures": {
+						"1": { "name": "keyword.control.constfile" },
+						"2": { "name": "entity.name.function.constfile" },
+						"3": { "name": "keyword.operator.assignment.constfile" },
+						"4": { "name": "string.interpolated.constfile" }
+					}
+				},
+				{
 					"comment": "as <name> output tag — must precede keywords so 'as' is claimed here",
 					"match": "(\\s+)(as)(\\s+)([A-Za-z_][A-Za-z0-9_]*)\\s*$",
 					"captures": {
@@ -275,6 +427,8 @@
 				{ "include": "#strings" },
 				{ "include": "#var-ref" },
 				{ "include": "#env-ref" },
+				{ "include": "#state-ref" },
+				{ "include": "#list-literal" },
 				{ "include": "#numbers" },
 				{
 					"name": "punctuation.definition.block.constfile",
@@ -291,13 +445,17 @@
 			"patterns": [
 				{ "include": "#env-ref" },
 				{ "include": "#var-ref" },
+				{ "include": "#state-ref" },
+				{ "include": "#list-literal" },
+				{ "include": "#keywords" },
 				{
 					"comment": "$ prefix in a variable value creates a lazy command.",
 					"name": "keyword.operator.shell.constfile",
 					"match": "(\\$)"
 				},
 				{ "include": "#strings" },
-				{ "include": "#numbers" }
+				{ "include": "#numbers" },
+				{ "include": "#operators" }
 			]
 		}
 	},
