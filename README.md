@@ -28,6 +28,11 @@ construct [options] [Constfile] [commands...]
 | `cloud submit [targets...]` | Dispatch a build to GitHub Actions (`--wait` follows it) |
 | `cloud status\|logs\|cancel <run-id>` | Inspect or cancel a dispatched run |
 | `cloud init-actions` | Create `.github/workflows/construct.yml` |
+| `clean [targets...]` | Remove files declared in `produces` (`--cache` also removes `.construct-cache`; respects `--dry-run`) |
+| `lint [file]` | Static checks shared with the editor (`--strict` fails on warnings, `--json` for tools) |
+| `graph [targets...]` | Print the dependency tree (`--dot` for Graphviz, `--json` for tools) |
+| `completion <shell>` | Emit bash/zsh/fish completion (flags + your Constfile's commands) |
+| `fmt [files...]` | Canonicalize Constfile indentation (`--check` for CI) |
 
 ### Options
 
@@ -56,6 +61,11 @@ construct [options] [Constfile] [commands...]
 | `--github-actions` | GitHub Actions native output (auto-enabled under `GITHUB_ACTIONS`) |
 | `--yes` | Auto-approve `confirm` statements |
 | `--force`, `-f` | Overwrite files (`init`) |
+| `--notify` | Desktop notification when the run finishes (works with `--watch` and `--repeat`) |
+| `--strict` | `lint`: fail on warnings too |
+| `--cache` | `clean`: also remove `.construct-cache` |
+| `--dot` | `graph`: emit Graphviz DOT |
+| `--check` | `fmt`: exit 1 when files are not formatted |
 
 ### Examples
 
@@ -658,6 +668,64 @@ build timeout 120s {
 
 A hit kills the statement's process group and reports
 `command '...' timed out after 30s (exit 124)`.
+
+### Container Isolation
+
+A command can run its shell statements inside a container image (docker, or
+podman when docker is absent):
+
+```
+build container "golang:1.26" < **.go {
+    $ go build ./...
+    $ go test ./...
+}
+```
+
+The Constfile's directory is mounted at `/work` and statements run there with
+`/bin/sh`; the environment is passed through via `--env-file`, and the
+command's `in <dir>` workdir maps under `/work`. Builtins (`cp`, `rm`,
+`download`, ...) still run on the host. Statement timeouts kill the container
+CLI; the container itself is removed via `--rm`.
+
+### Linting
+
+`construct lint` runs the same checks the editor shows inline: out-of-bounds
+`&cmd.N` indexes, unknown named outputs, duplicate prerequisites, missing
+file dependencies, unused globals, and unreferenced commands. Exit code 1 on
+errors (or warnings with `--strict`); `--json` emits machine-readable
+issues — both are CI-friendly.
+
+### Cleaning
+
+`construct clean [targets...]` deletes the files a command declares in
+`produces` (globs expand, `--dry-run` previews) and refuses to delete
+directories or anything outside the Constfile's directory. Add `--cache` to
+also drop `.construct-cache` (file-dep hashes, run state, locks).
+
+### Dependency Graph
+
+`construct graph [targets...]` prints the transitive prerequisite tree with
+file dependencies marked; `--dot` emits Graphviz DOT for
+`construct graph --dot | dot -Tsvg -o graph.svg`, and `--json` for tooling.
+
+### Formatting
+
+`construct fmt` re-indents Constfiles to four spaces per nesting level,
+trims trailing whitespace, and normalizes the trailing newline — statement
+text (shell lines especially) is preserved byte-for-byte. `construct fmt
+--check` exits non-zero on unformatted files for CI.
+
+### Shell Completions
+
+`construct completion bash|zsh|fish` prints a completion script that
+completes flags and your Constfile's command names (via a hidden
+`construct __targets` helper). Source it from your shell profile.
+
+### Notifications
+
+`--notify` sends a desktop notification (macOS Notification Center, Linux
+`notify-send`, Windows balloon tips) when a run finishes — including each
+`--watch` rerun — with the duration or the first line of the failure.
 
 ### Builtin Commands
 

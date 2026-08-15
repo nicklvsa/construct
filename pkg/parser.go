@@ -305,6 +305,7 @@ type Command struct {
 	OnChange          []string          `json:"onchange,omitempty"`
 	PrereqCmds        []*Command        `json:"prereq_cmds"`
 	WorkDir           string            `json:"work_dir"`
+	Container         string            `json:"container,omitempty"`
 	Timeout           string            `json:"timeout,omitempty"`
 	Body              []BodyStatement   `json:"body"`
 	SourceLine        int               `json:"source_line,omitempty"`
@@ -537,6 +538,7 @@ func ParseCommandName(line string) string {
 	prodIdx := findProducesIdx(line)
 	ocIdx := findTopLevelKeyword(line, " onchange ")
 	timeoutIdx := findTopLevelKeyword(line, " timeout ")
+	contIdx := findTopLevelKeyword(line, " container ")
 	endIdx := len(line)
 	for _, c := range [3]byte{'(', '<', '{'} {
 		if i := strings.IndexByte(line, c); i >= 0 && i < endIdx {
@@ -554,6 +556,9 @@ func ParseCommandName(line string) string {
 	}
 	if timeoutIdx >= 0 && timeoutIdx < endIdx {
 		endIdx = timeoutIdx
+	}
+	if contIdx >= 0 && contIdx < endIdx {
+		endIdx = contIdx
 	}
 	return strings.TrimSpace(line[:endIdx])
 }
@@ -600,7 +605,7 @@ func headerSegmentAfter(line, kw string) string {
 	if brace := strings.IndexByte(segment, '{'); brace >= 0 {
 		segment = segment[:brace]
 	}
-	for _, other := range []string{" in ", " produces ", " onchange ", " timeout "} {
+	for _, other := range []string{" in ", " produces ", " onchange ", " timeout ", " container "} {
 		if other == kw {
 			continue
 		}
@@ -628,6 +633,11 @@ func extractProduces(line string) []string {
 
 func extractOnChange(line string) []string {
 	return splitListSegment(headerSegmentAfter(line, " onchange "))
+}
+
+// extractContainer parses the `container "image"` header modifier.
+func extractContainer(line string) string {
+	return trimQuoted(strings.TrimSpace(headerSegmentAfter(line, " container ")))
 }
 
 func extractTimeout(line string) string {
@@ -1126,7 +1136,6 @@ func (p *Parser) parseBodyStatements(raw []rawLine, scope string) ([]BodyStateme
 			}
 		}
 
-		// Builtin cross-platform commands (bare names; use `$` for the shell).
 		if builtinName, args, tolerant, ok := parseBuiltinLine(line); ok {
 			stmts = append(stmts, BodyStatement{
 				Type:        StmtBuiltin,
@@ -1785,12 +1794,12 @@ func (p *Parser) parseMatrixBlock(raw []rawLine, scope string) (BodyStatement, i
 	var vars, items []string
 	for _, clause := range strings.Split(headerPart, ";") {
 		clause = strings.TrimSpace(clause)
-		inIdx := strings.Index(clause, " in ")
-		if inIdx < 0 {
+		before, after, ok := strings.Cut(clause, " in ")
+		if !ok {
 			return BodyStatement{}, 0, fmt.Errorf("malformed matrix clause %q: missing 'in'", clause)
 		}
-		v := strings.TrimSpace(clause[:inIdx])
-		it := strings.TrimSpace(clause[inIdx+len(" in "):])
+		v := strings.TrimSpace(before)
+		it := strings.TrimSpace(after)
 		if v == "" || it == "" {
 			return BodyStatement{}, 0, fmt.Errorf("malformed matrix clause %q", clause)
 		}
@@ -1818,7 +1827,6 @@ func (p *Parser) parseMatrixBlock(raw []rawLine, scope string) (BodyStatement, i
 	return nestMatrixLoops(vars, items, bodyStmts, headerLine.num), endIdx, nil
 }
 
-// nestMatrixLoops wraps body in one nested for-loop per matrix clause.
 func nestMatrixLoops(vars, items []string, body []BodyStatement, lineNum int) BodyStatement {
 	stmt := BodyStatement{
 		Type:       StmtFor,
@@ -1921,6 +1929,7 @@ func (p *Parser) parseCommand(idx int, line string, isDefault bool, lineNum int,
 	}
 
 	workDir := extractWorkDir(line)
+	container := extractContainer(line)
 	timeout := extractTimeout(line)
 	produces := extractProduces(line)
 	onChange := extractOnChange(line)
@@ -1956,6 +1965,7 @@ func (p *Parser) parseCommand(idx int, line string, isDefault bool, lineNum int,
 			Prereqs:         prereqs,
 			PrereqDirs:      prereqDirs,
 			WorkDir:         workDir,
+			Container:       container,
 			Timeout:         timeout,
 			Produces:        produces,
 			OnChange:        onChange,

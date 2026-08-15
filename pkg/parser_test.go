@@ -1434,3 +1434,28 @@ func BenchmarkParse(b *testing.B) {
 		}
 	}
 }
+
+func TestParseContainerHeader(t *testing.T) {
+	p := NewParserFromContent("Constfile", `build container "golang:1.26" < src/main.go {
+    $ go build ./...
+}
+mixed container "alpine" produces out.txt timeout 5s in dir {
+    $ echo hi
+}
+`)
+	data, err := p.Parse()
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	c, _ := data.GetCommand("build")
+	if c.Container != "golang:1.26" {
+		t.Errorf("build.Container = %q", c.Container)
+	}
+	if got := ParseCommandName(`mixed container "alpine" produces out.txt timeout 5s in dir {`); got != "mixed" {
+		t.Errorf("ParseCommandName with container = %q, want mixed", got)
+	}
+	m, _ := data.GetCommand("mixed")
+	if m.Container != "alpine" || len(m.Produces) != 1 || m.Timeout != "5s" || m.WorkDir != "dir" {
+		t.Errorf("mixed modifiers: container=%q produces=%v timeout=%q workdir=%q", m.Container, m.Produces, m.Timeout, m.WorkDir)
+	}
+}

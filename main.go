@@ -72,6 +72,11 @@ type options struct {
 	ref         string
 	workflow    string
 	noInit      bool
+	notify      bool
+	strict      bool
+	cleanCache  bool
+	dotGraph    bool
+	checkFormat bool
 	jobsStr     string
 	jobs        int
 	envFile     string
@@ -84,13 +89,18 @@ func printUsage() {
 
 Usage:
   construct [options] [Constfile] [commands...]
-  construct <init|doctor|stats|cloud> [args...]
+  construct <init|doctor|stats|cloud|clean|lint|graph|fmt|completion> [args...]
 
 Commands:
   list              List all available commands
   init [template]   Scaffold a Constfile (minimal, go, python, node, rust, monorepo)
   doctor            Diagnose the environment, Constfile, tools, and cloud file
   stats             Show per-command timing history
+  clean [targets]   Remove files declared in produces (--cache drops .construct-cache)
+  lint [file]       Static checks shared with the editor (--strict, --json)
+  graph [targets]   Print the dependency tree (--dot, --json)
+  fmt [files]       Canonicalize Constfile indentation (--check for CI)
+  completion SHELL  Emit bash/zsh/fish completions
   cloud             Manage cloud commands and GitHub Actions jobs (see below)
 
 Options:
@@ -121,6 +131,7 @@ Options:
   --repo OWNER/REPO GitHub repository for cloud jobs (default: git remote)
   --ref BRANCH      Git ref to dispatch cloud jobs on (default: current branch)
   --wait            Follow a cloud job and stream its logs
+  --notify          Desktop notification when the run finishes
 
 Cloud subcommands:
   cloud list|pull|push                    cloud command definitions
@@ -372,6 +383,11 @@ func defineFlags(fs *flag.FlagSet, o *options) {
 	fs.StringVar(&o.ref, "ref", "", "Git ref to dispatch on (cloud submit)")
 	fs.StringVar(&o.workflow, "workflow", "", "Workflow file name (cloud submit)")
 	fs.BoolVar(&o.noInit, "no-init", false, "Do not create the workflow file (cloud submit)")
+	fs.BoolVar(&o.notify, "notify", false, "Send a desktop notification when the run finishes")
+	fs.BoolVar(&o.strict, "strict", false, "lint: fail on warnings too")
+	fs.BoolVar(&o.cleanCache, "cache", false, "clean: also remove the .construct-cache directory")
+	fs.BoolVar(&o.dotGraph, "dot", false, "graph: emit Graphviz DOT instead of a tree")
+	fs.BoolVar(&o.checkFormat, "check", false, "fmt: exit 1 when files are not formatted")
 	fs.StringVar(&o.jobsStr, "jobs", "", "Max parallel commands (0 = unlimited, auto = CPU count)")
 	fs.StringVar(&o.envFile, "env-file", "", "Load environment from file")
 	fs.StringVar(&o.shell, "shell", "", "Shell to run statements with (default: $SHELL)")
@@ -923,6 +939,29 @@ func exitAt(code int, format string, args ...any) error {
 	return &exitCodeError{err: fmt.Errorf(format, args...), code: code}
 }
 
+func notifySummary(inputs *ConstructInput, err error, d time.Duration) {
+	summary := fmt.Sprintf("%s in %s", targetLabelFor(inputs), trimDuration(d))
+	if err != nil {
+		first := strings.SplitN(err.Error(), "\n", 2)[0]
+		if len(first) > 120 {
+			first = first[:120] + "…"
+		}
+		summary = fmt.Sprintf("%s failed in %s: %s", targetLabelFor(inputs), trimDuration(d), first)
+	}
+	notifyResult(err == nil, summary)
+}
+
+func targetLabelFor(inputs *ConstructInput) string {
+	if len(inputs.Commands) == 0 {
+		return "default target"
+	}
+	return strings.Join(inputs.Commands, " ")
+}
+
+func trimDuration(d time.Duration) string {
+	return d.Round(100 * time.Millisecond).String()
+}
+
 func exitError(err error) {
 	if msg := err.Error(); msg != "" {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -936,7 +975,7 @@ func exitError(err error) {
 //go:embed init-templates/*
 var initTemplates embed.FS
 
-var subcommandNames = []string{"init", "doctor", "stats", "cloud"}
+var subcommandNames = []string{"init", "doctor", "stats", "cloud", "clean", "lint", "graph", "completion", "fmt"}
 
 func isSubcommandName(s string) bool {
 	return slices.Contains(subcommandNames, s)
@@ -1419,6 +1458,13 @@ func main() {
 		}
 	}
 
+	if len(positionals) > 0 && positionals[0] == "__targets" {
+		if err := runTargets(); err != nil {
+			exitError(err)
+		}
+		return
+	}
+
 	// --doctor is the doctor subcommand with an optional Constfile path.
 	if o.doctor {
 		if err := runDoctor(&o, determineInputs(positionals)); err != nil {
@@ -1442,6 +1488,16 @@ func main() {
 			err = runStats(&o, inputs)
 		case "cloud":
 			err = runCloud(positionals[1:], &o, inputs)
+		case "clean":
+			err = runClean(positionals[1:], &o)
+		case "lint":
+			err = runLint(positionals[1:], &o)
+		case "graph":
+			err = runGraph(positionals[1:], &o)
+		case "completion":
+			err = runCompletion(positionals[1:], &o)
+		case "fmt":
+			err = runFmt(positionals[1:], &o)
 		}
 		if err != nil {
 			exitError(err)
@@ -1521,7 +1577,11 @@ func main() {
 
 	if o.watch && !o.showList && !o.dryRun {
 		for {
+			runStart := time.Now()
 			files, err := executeBuild(inputs, &o, runCtx)
+			if files != nil && o.notify {
+				notifySummary(inputs, err, time.Since(runStart))
+			}
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				files = []string{inputs.FileName}
@@ -1533,6 +1593,7 @@ func main() {
 	}
 
 	if o.repeat > 0 {
+		runStart := time.Now()
 		failures := 0
 		for i := 1; i <= o.repeat; i++ {
 			fmt.Printf("(run %d/%d)\n", i, o.repeat)
@@ -1541,6 +1602,9 @@ func main() {
 				failures++
 				fmt.Fprintf(os.Stderr, "run %d/%d failed: %v\n", i, o.repeat, err)
 			}
+		}
+		if o.notify {
+			notifySummary(inputs, fmt.Errorf("%d of %d run(s) failed", failures, o.repeat), time.Since(runStart))
 		}
 		if failures > 0 {
 			exitError(fmt.Errorf("%d of %d run(s) failed", failures, o.repeat))
@@ -1552,7 +1616,11 @@ func main() {
 		return
 	}
 
-	_, err := executeBuild(inputs, &o, runCtx)
+	runStart := time.Now()
+	files, err := executeBuild(inputs, &o, runCtx)
+	if files != nil && o.notify {
+		notifySummary(inputs, err, time.Since(runStart))
+	}
 	if err != nil {
 		if interrupted.Load() {
 			fmt.Fprintln(os.Stderr, "interrupted")

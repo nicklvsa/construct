@@ -18,7 +18,7 @@ main < gen in subdir, gen in other {
     echo done
 }`
 	data := parseForTest(t, text)
-	diags := duplicatePrereqWarnings(strings.Split(text, "\n"), data)
+	diags := lintIssuesWith(t, strings.Split(text, "\n"), data, "duplicate prerequisite")
 	if len(diags) != 1 {
 		t.Fatalf("expected 1 duplicate warning, got %d: %v", len(diags), diags)
 	}
@@ -38,7 +38,7 @@ main < gen in subdir {
     echo done
 }`
 	data := parseForTest(t, text)
-	diags := duplicatePrereqWarnings(strings.Split(text, "\n"), data)
+	diags := lintIssuesWith(t, strings.Split(text, "\n"), data, "duplicate prerequisite")
 	if len(diags) != 0 {
 		t.Fatalf("expected no duplicate warnings, got %v", diags)
 	}
@@ -708,17 +708,17 @@ _ < gen {
 	if err != nil {
 		t.Fatalf("gen missing: %v", err)
 	}
-	if countShellLines(gen.Body) != 2 {
-		t.Errorf("countShellLines = %d, want 2", countShellLines(gen.Body))
+	if len(pkg.ShellStatements(gen.Body)) != 2 {
+		t.Errorf("shell statements = %d, want 2", len(pkg.ShellStatements(gen.Body)))
 	}
-	if !hasNamedOutput(gen.Body, "out") {
-		t.Error("hasNamedOutput should find `out` inside the for loop")
+	if !pkg.HasNamedOutput(gen.Body, "out") {
+		t.Error("HasNamedOutput should find `out` inside the for loop")
 	}
 	if hint := namedOutputAt(data, "gen", 1); hint != "gen.out" {
 		t.Errorf("namedOutputAt(gen, 1) = %q, want gen.out", hint)
 	}
 
-	diags := namedOutputHints(strings.Split(text, "\n"), data)
+	diags := lintIssues(t, strings.Split(text, "\n"), data)
 	for _, d := range diags {
 		if d.Severity == sevError {
 			t.Errorf("unexpected error diagnostic: %q", d.Message)
@@ -739,7 +739,7 @@ _ < log, ls {
 }
 `
 	data := parseForTest(t, text)
-	diags := namedOutputHints(strings.Split(text, "\n"), data)
+	diags := lintIssues(t, strings.Split(text, "\n"), data)
 	found := false
 	for _, d := range diags {
 		if strings.Contains(d.Message, "result") {
@@ -1011,4 +1011,35 @@ func TestCompletionFailContext(t *testing.T) {
 			t.Errorf("outside onfail should not suggest fail.*: %v", l)
 		}
 	}
+}
+
+// lintIssues runs the shared lint rules and converts them to diagnostics.
+func lintIssues(t *testing.T, lines []string, data *pkg.ParsedData) []diagnostic {
+	t.Helper()
+	return lintDiagnostics(pkg.Lint(lines, data, t.TempDir()), lines)
+}
+
+// lintIssuesWith filters lint output to messages containing substr.
+func lintIssuesWith(t *testing.T, lines []string, data *pkg.ParsedData, substr string) []diagnostic {
+	t.Helper()
+	var out []diagnostic
+	for _, d := range lintIssues(t, lines, data) {
+		if strings.Contains(d.Message, substr) {
+			out = append(out, d)
+		}
+	}
+	return out
+}
+
+func namedOutputAt(data *pkg.ParsedData, cmdName string, idx int) string {
+	cmd, err := data.GetCommand(cmdName)
+	if err != nil {
+		return ""
+	}
+	for shellIdx, stmt := range pkg.ShellStatements(cmd.Body) {
+		if stmt.OutputName != "" && shellIdx == idx {
+			return cmdName + "." + stmt.OutputName
+		}
+	}
+	return ""
 }

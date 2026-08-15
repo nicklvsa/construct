@@ -1271,3 +1271,95 @@ func TestCacheGlobalsClosureThroughVariables(t *testing.T) {
 		t.Errorf("cacheGlobals = %v, want base and derived via closure", cmd.cacheGlobals)
 	}
 }
+
+func TestProducesValidationWarning(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "src.txt"), []byte("x"), 0644)
+	data := &ParsedData{
+		Commands: []*Command{
+			{Name: "bad", Produces: []string{"ghost.txt"}, FileDeps: []string{"src.txt"}, Body: shellBody("echo hi")},
+		},
+	}
+	data.buildIndexMaps()
+	e := NewExecutor(data, false, false)
+	e.SetBaseDir(dir)
+
+	stderr := captureStderr(t, func() {
+		if err := e.Execute([]string{"bad"}); err != nil {
+			t.Fatalf("execute: %v", err)
+		}
+	})
+	if !strings.Contains(stderr, "declares produces") || !strings.Contains(stderr, "ghost.txt") {
+		t.Errorf("missing produces warning, stderr = %q", stderr)
+	}
+}
+
+func TestMissingFileDepWarning(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "src.txt"), []byte("x"), 0644)
+	data := &ParsedData{
+		Commands: []*Command{
+			{Name: "bogus", FileDeps: []string{"missing.txt"}, Body: shellBody("echo ran")},
+		},
+	}
+	data.buildIndexMaps()
+	e := NewExecutor(data, false, false)
+	e.SetBaseDir(dir)
+	e.SetNoCache(true)
+
+	stderr := captureStderr(t, func() {
+		if err := e.Execute([]string{"bogus"}); err != nil {
+			t.Fatalf("execute: %v", err)
+		}
+	})
+	if !strings.Contains(stderr, "file dependency") || !strings.Contains(stderr, "missing.txt") {
+		t.Errorf("missing dep warning absent, stderr = %q", stderr)
+	}
+}
+
+func TestContainerArgs(t *testing.T) {
+	dir, _ := filepath.Abs(t.TempDir())
+	data := &ParsedData{}
+	data.buildIndexMaps()
+	e := NewExecutor(data, false, false)
+	e.SetBaseDir(dir)
+	env := []string{"HOME=/tmp", "PATH=/usr/bin"}
+
+	// Plain shell mode.
+	shCtx := &execContext{target: &Command{Name: "x"}, env: &env}
+	argv, display := e.shellArgsFor(shCtx, "echo hi")
+	if argv[0] != e.shellName || display == "" {
+		t.Errorf("plain argv = %v display = %q", argv, display)
+	}
+	if argv[len(argv)-1] != "echo hi" {
+		t.Errorf("script not last arg: %v", argv)
+	}
+
+	// Container mode via a stubbed runtime path.
+	e.containerRT = "docker"
+	f, _ := os.CreateTemp(t.TempDir(), "env")
+	f.Close()
+	cCtx := &execContext{target: &Command{Name: "x"}, env: &env, container: "docker alpine:latest", envFile: f.Name(), workDir: "sub"}
+	argv, display = e.shellArgsFor(cCtx, "echo hi")
+	joined := strings.Join(argv, " ")
+	for _, want := range []string{"docker run --rm", "--env-file", "-v " + dir + ":/work", "-w /work/sub", "alpine:latest", "/bin/sh -c", "echo hi"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("container argv missing %q: %s", want, joined)
+		}
+	}
+	if !strings.HasPrefix(display, "docker run alpine:latest") {
+		t.Errorf("display = %q", display)
+	}
+}
+
+func captureStderr(t *testing.T, fn func()) string {
+	t.Helper()
+	old := os.Stderr
+	r, w, _ := os.Pipe()
+	os.Stderr = w
+	fn()
+	w.Close()
+	os.Stderr = old
+	out, _ := io.ReadAll(r)
+	return string(out)
+}

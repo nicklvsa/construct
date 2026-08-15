@@ -2,6 +2,9 @@ package main
 
 import (
 	flag "github.com/spf13/pflag"
+	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -165,4 +168,107 @@ func TestNewFlagsParsing(t *testing.T) {
 	if len(o.overrides) != 1 || o.overrides[0] != "X=1" {
 		t.Errorf("overrides = %v", o.overrides)
 	}
+}
+
+func TestRunClean(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "src.txt"), []byte("x"), 0644)
+	os.WriteFile(filepath.Join(dir, "out.txt"), []byte("y"), 0644)
+	os.WriteFile(filepath.Join(dir, "Constfile"), []byte("build produces out.txt < src.txt {\n  cp src.txt out.txt\n}\n"), 0644)
+	old, _ := os.Getwd()
+	os.Chdir(dir)
+	defer os.Chdir(old)
+
+	if err := runClean(nil, &options{}); err != nil {
+		t.Fatalf("clean: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "out.txt")); !os.IsNotExist(err) {
+		t.Error("produced file still exists after clean")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "src.txt")); err != nil {
+		t.Error("source dependency was removed by clean")
+	}
+}
+
+func TestRunCleanRefusesOutsidePaths(t *testing.T) {
+	dir := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "precious.txt")
+	os.WriteFile(outside, []byte("keep me"), 0644)
+	os.WriteFile(filepath.Join(dir, "Constfile"), []byte("build produces ../"+filepath.Base(filepath.Dir(outside))+"/"+filepath.Base(outside)+" {\n  $ echo hi\n}\n"), 0644)
+	old, _ := os.Getwd()
+	os.Chdir(dir)
+	defer os.Chdir(old)
+
+	if err := runClean(nil, &options{}); err != nil {
+		t.Fatalf("clean: %v", err)
+	}
+	if _, err := os.Stat(outside); err != nil {
+		t.Error("clean removed a file outside the Constfile directory")
+	}
+}
+
+func TestRunGraph(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "Constfile"), []byte("gen {\n  $ echo hi\n}\nmain < gen, src.txt {\n  $ echo done\n}\n"), 0644)
+	old, _ := os.Getwd()
+	os.Chdir(dir)
+	defer os.Chdir(old)
+
+	out := captureMainStdout(t, func() {
+		if err := runGraph(nil, &options{}); err != nil {
+			t.Errorf("graph: %v", err)
+		}
+	})
+	for _, want := range []string{"main", "├── gen", "└── src.txt (file)"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("graph output missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestRunFmtCheck(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "Constfile")
+	os.WriteFile(file, []byte("cmd {\n  $ echo hi\n}\n"), 0644)
+	if err := runFmt([]string{file}, &options{checkFormat: true}); err == nil {
+		t.Error("fmt --check should fail on unformatted file")
+	}
+	if err := runFmt([]string{file}, &options{}); err != nil {
+		t.Fatalf("fmt: %v", err)
+	}
+	content, _ := os.ReadFile(file)
+	if string(content) != "cmd {\n    $ echo hi\n}\n" {
+		t.Errorf("formatted content = %q", content)
+	}
+	if err := runFmt([]string{file}, &options{checkFormat: true}); err != nil {
+		t.Errorf("fmt --check should pass after formatting: %v", err)
+	}
+}
+
+func TestRunCompletion(t *testing.T) {
+	for _, shell := range []string{"bash", "zsh", "fish"} {
+		out := captureMainStdout(t, func() {
+			if err := runCompletion([]string{shell}, &options{}); err != nil {
+				t.Errorf("completion %s: %v", shell, err)
+			}
+		})
+		if !strings.Contains(out, "construct") || !strings.Contains(out, "__targets") {
+			t.Errorf("completion %s missing dynamic command hook:\n%s", shell, out)
+		}
+	}
+	if err := runCompletion([]string{"tcsh"}, &options{}); err == nil {
+		t.Error("unknown shell should fail")
+	}
+}
+
+func captureMainStdout(t *testing.T, fn func()) string {
+	t.Helper()
+	old := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+	fn()
+	w.Close()
+	os.Stdout = old
+	out, _ := io.ReadAll(r)
+	return string(out)
 }

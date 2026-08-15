@@ -50,7 +50,7 @@
 			"patterns": [
 				{
 					"name": "keyword.control.constfile",
-					"match": "\\b(opt|if|else|for|matrix|in|contains|starts_with|ends_with|matches|import|continue|break|exists|missing|glob|require|produces|env|invoke|fail|onfail|global|require_env|retry|onchange|switch|case|default|lock|state|confirm|prompt|input|timeout)\\b"
+					"match": "\\b(opt|if|else|for|matrix|in|contains|starts_with|ends_with|matches|import|continue|break|exists|missing|glob|require|produces|container|env|invoke|fail|onfail|global|require_env|retry|onchange|switch|case|default|lock|state|confirm|prompt|input|timeout)\\b"
 				},
 				{
 					"comment": "Builtin cross-platform commands (bare names in bodies)",
@@ -250,7 +250,7 @@
 				},
 				{
 					"comment": "Default command: _ (args) < prereqs in dir {",
-					"match": "^(_)(?=\\s*[(<{]|\\s+in\\s|\\s+produces\\s|\\s+onchange\\s|\\s+timeout\\s)",
+					"match": "^(_)(?=\\s*[(<{]|\\s+in\\s|\\s+produces\\s|\\s+onchange\\s|\\s+container\\s|\\s+timeout\\s)",
 					"captures": {
 						"1": {
 							"name": "entity.name.function.default.constfile"
@@ -259,7 +259,7 @@
 				},
 				{
 					"comment": "Regular command: name (args) produces files < prereqs in dir {",
-					"match": "^([A-Za-z_][A-Za-z0-9_-]*)(?=\\s*[(<{]|\\s+in\\s|\\s+produces\\s|\\s+onchange\\s|\\s+timeout\\s)",
+					"match": "^([A-Za-z_][A-Za-z0-9_-]*)(?=\\s*[(<{]|\\s+in\\s|\\s+produces\\s|\\s+onchange\\s|\\s+container\\s|\\s+timeout\\s)",
 					"captures": {
 						"1": {
 							"name": "entity.name.function.constfile"

@@ -389,14 +389,14 @@ use {
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
-	diags := namedOutputHints(strings.Split(text, "\n"), data)
+	diags := lintIssues(t, strings.Split(text, "\n"), data)
 	for _, d := range diags {
 		if strings.Contains(d.Message, "unknown named output") || strings.Contains(d.Message, "out of bounds") {
 			t.Errorf("false diagnostic: %s", d.Message)
 		}
 	}
-	if n := countShellLines(mustCommand(t, data, "src").Body); n != 3 {
-		t.Errorf("countShellLines = %d, want 3 (switch case, onfail, and in-sub statements)", n)
+	if n := len(pkg.ShellStatements(mustCommand(t, data, "src").Body)); n != 3 {
+		t.Errorf("shell statements = %d, want 3 (switch case, onfail, and in-sub statements)", n)
 	}
 }
 

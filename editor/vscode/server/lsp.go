@@ -223,9 +223,7 @@ func (s *server) updateDoc(uri, text string) {
 	}
 
 	s.docs[uri] = &docState{text: text, lines: lines, data: data}
-	diags := namedOutputHints(lines, data)
-	diags = append(diags, duplicatePrereqWarnings(lines, data)...)
-	s.publishDiagnostics(uri, diags)
+	s.publishDiagnostics(uri, lintDiagnostics(pkg.Lint(lines, data, uriToPathDir(uri)), lines))
 }
 
 func (s *server) publishDiagnostics(uri string, diags []diagnostic) {
@@ -293,6 +291,46 @@ func parseErrorToDiagnostics(err error, uri string, lines []string) []diagnostic
 	}}
 }
 
+// lintDiagnostics renders pkg.Lint issues as LSP diagnostics. Token-range
+// issues (EndCol > 0) underline the reference; others cover their line;
+// file-wide issues cover the whole document.
+func lintDiagnostics(issues []pkg.LintIssue, lines []string) []diagnostic {
+	sevMap := map[int]int{pkg.LintError: sevError, pkg.LintWarning: sevWarning, pkg.LintInfo: sevWarning}
+	diags := []diagnostic{}
+	for _, is := range issues {
+		rng := fullRange(lines)
+		if is.EndCol > 0 {
+			rng = range_{
+				Start: position{Line: is.Line, Character: is.Col},
+				End:   position{Line: is.Line, Character: is.EndCol},
+			}
+		} else if is.Line >= 0 {
+			end := 0
+			if is.Line < len(lines) {
+				end = len(lines[is.Line])
+			}
+			rng = range_{
+				Start: position{Line: is.Line, Character: 0},
+				End:   position{Line: is.Line, Character: end},
+			}
+		}
+		diags = append(diags, diagnostic{
+			Range:    rng,
+			Severity: sevMap[is.Severity],
+			Source:   "constfile",
+			Message:  is.Message,
+		})
+	}
+	return diags
+}
+
+func uriToPathDir(uri string) string {
+	if p := uriToPath(uri); p != "" {
+		return filepath.Dir(p)
+	}
+	return "."
+}
+
 func fullRange(lines []string) range_ {
 	endLine := max(len(lines)-1, 0)
 	endChar := len(lines[endLine])
@@ -300,244 +338,6 @@ func fullRange(lines []string) range_ {
 		Start: position{Line: 0, Character: 0},
 		End:   position{Line: endLine, Character: endChar},
 	}
-}
-
-func duplicatePrereqWarnings(lines []string, data *pkg.ParsedData) []diagnostic {
-	diags := []diagnostic{}
-	for lineIdx, line := range lines {
-		lt := strings.IndexByte(line, '<')
-		if lt < 0 {
-			continue
-		}
-
-		brace := strings.IndexByte(line[lt:], '{')
-		if brace < 0 {
-			continue
-		}
-
-		segment := line[lt+1 : lt+brace]
-
-		seen := map[string]bool{}
-		searchPos := 0
-		for part := range strings.SplitSeq(segment, ",") {
-			part = strings.TrimSpace(part)
-			if part == "" {
-				continue
-			}
-
-			if part == "in" || strings.HasPrefix(part, "in ") {
-				searchPos += len(part) + 1
-				continue
-			}
-
-			name := part
-			if inIdx := strings.Index(name, " in "); inIdx >= 0 {
-				name = strings.TrimSpace(name[:inIdx])
-			}
-			if name == "" || strings.ContainsAny(name, "/\\") {
-				searchPos += len(part) + 1
-				continue
-			}
-
-			if _, err := data.GetCommand(name); err != nil {
-				searchPos += len(part) + 1
-				continue
-			}
-
-			if seen[name] {
-				absCol := strings.Index(line[searchPos:], name)
-				if absCol >= 0 {
-					absCol += searchPos
-				} else {
-					absCol = strings.LastIndex(line, name)
-				}
-				if absCol < 0 {
-					absCol = 0
-				}
-				diags = append(diags, diagnostic{
-					Range:    refRange(lineIdx, absCol, len(name)),
-					Severity: sevWarning,
-					Source:   "constfile",
-					Message:  fmt.Sprintf("duplicate prerequisite `%s`", name),
-				})
-			}
-			seen[name] = true
-			idx := strings.Index(line[searchPos:], name)
-			if idx >= 0 {
-				searchPos += idx + len(name)
-			} else {
-				searchPos += len(part) + 1
-			}
-		}
-	}
-	return diags
-}
-
-func namedOutputHints(lines []string, data *pkg.ParsedData) []diagnostic {
-	diags := []diagnostic{}
-	for lineIdx, line := range lines {
-		searchFrom := 0
-		for {
-			ampIdx := strings.IndexByte(line[searchFrom:], '&')
-			if ampIdx < 0 {
-				break
-			}
-			absIdx := searchFrom + ampIdx
-			name := extractRefName(line[absIdx:])
-			if name == "" {
-				searchFrom = absIdx + 1
-				continue
-			}
-			searchFrom = absIdx + 1 + len(name)
-			refLen := len(name) + 1
-
-			cmdName, suffix, ok := splitCommandRef(data, name)
-			if !ok {
-				continue // plain &var, not a prereq output ref
-			}
-
-			cmd, err := data.GetCommand(cmdName)
-			if err != nil || cmd == nil {
-				continue
-			}
-
-			shellCount := countShellLines(cmd.Body)
-
-			if idx, err := strconv.Atoi(suffix); err == nil {
-				if idx < 0 || idx >= shellCount {
-					diags = append(diags, diagnostic{
-						Range:    refRange(lineIdx, absIdx, refLen),
-						Severity: sevError,
-						Source:   "constfile",
-						Message:  fmt.Sprintf("index %d out of bounds: `%s` has %d output line(s)", idx, cmdName, shellCount),
-					})
-					continue
-				}
-
-				if hint := namedOutputAt(data, cmdName, idx); hint != "" {
-					diags = append(diags, diagnostic{
-						Range:    refRange(lineIdx, absIdx, refLen),
-						Severity: sevWarning,
-						Source:   "constfile",
-						Message:  fmt.Sprintf("💡 named output available: use &%s instead of &%s", hint, name),
-					})
-				}
-			} else if hasInvokeCapture(cmd.Body, suffix) {
-				diags = append(diags, diagnostic{
-					Range:    refRange(lineIdx, absIdx, refLen),
-					Severity: sevWarning,
-					Source:   "constfile",
-					Message:  fmt.Sprintf("`%s` is captured by `invoke ... as %s` — visible only inside `%s`", suffix, suffix, cmdName),
-				})
-			} else if !hasNamedOutput(cmd.Body, suffix) {
-				diags = append(diags, diagnostic{
-					Range:    refRange(lineIdx, absIdx, refLen),
-					Severity: sevError,
-					Source:   "constfile",
-					Message:  fmt.Sprintf("unknown named output `%s` on command `%s`", suffix, cmdName),
-				})
-			}
-		}
-	}
-	return diags
-}
-
-func refRange(line, col, length int) range_ {
-	return range_{
-		Start: position{Line: line, Character: col},
-		End:   position{Line: line, Character: col + length},
-	}
-}
-
-func shellStatements(body []pkg.BodyStatement) []pkg.BodyStatement {
-	var out []pkg.BodyStatement
-	for _, stmt := range body {
-		switch stmt.Type {
-		case pkg.StmtShell:
-			out = append(out, stmt)
-		case pkg.StmtIf:
-			out = append(out, shellStatements(stmt.ThenBody)...)
-			out = append(out, shellStatements(stmt.ElseBody)...)
-		case pkg.StmtFor:
-			out = append(out, shellStatements(stmt.LoopBody)...)
-		case pkg.StmtOnFail:
-			out = append(out, shellStatements(stmt.OnFailBody)...)
-		case pkg.StmtSwitch:
-			for _, c := range stmt.Cases {
-				out = append(out, shellStatements(c.Body)...)
-			}
-		case pkg.StmtInDir, pkg.StmtLock:
-			out = append(out, shellStatements(stmt.ThenBody)...)
-		}
-	}
-	return out
-}
-
-func countShellLines(body []pkg.BodyStatement) int {
-	return len(shellStatements(body))
-}
-
-func hasNamedOutput(body []pkg.BodyStatement, name string) bool {
-	for _, stmt := range body {
-		if stmt.OutputName == name {
-			return true
-		}
-		switch stmt.Type {
-		case pkg.StmtIf:
-			if hasNamedOutput(stmt.ThenBody, name) || hasNamedOutput(stmt.ElseBody, name) {
-				return true
-			}
-		case pkg.StmtFor:
-			if hasNamedOutput(stmt.LoopBody, name) {
-				return true
-			}
-		case pkg.StmtOnFail:
-			if hasNamedOutput(stmt.OnFailBody, name) {
-				return true
-			}
-		case pkg.StmtSwitch:
-			for _, c := range stmt.Cases {
-				if hasNamedOutput(c.Body, name) {
-					return true
-				}
-			}
-		case pkg.StmtInDir, pkg.StmtLock:
-			if hasNamedOutput(stmt.ThenBody, name) {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-func hasInvokeCapture(body []pkg.BodyStatement, name string) bool {
-	_, _, found := invokeCaptureHint(body, name)
-	return found
-}
-
-func namedOutputAt(data *pkg.ParsedData, cmdName string, idx int) string {
-	cmd, err := data.GetCommand(cmdName)
-	if err != nil || cmd == nil {
-		return ""
-	}
-	for shellIdx, stmt := range shellStatements(cmd.Body) {
-		if stmt.OutputName != "" && shellIdx == idx {
-			return cmdName + "." + stmt.OutputName
-		}
-	}
-	return ""
-}
-
-// extractRefName extracts the &reference at the start of s with the canonical charset.
-func extractRefName(s string) string {
-	if len(s) < 2 || s[0] != '&' {
-		return ""
-	}
-	names := pkg.VarRefNames(s)
-	if len(names) == 0 || !strings.HasPrefix(s[1:], names[0]) {
-		return ""
-	}
-	return names[0]
 }
 
 func (s *server) handleHover(params json.RawMessage) (interface{}, error) {
@@ -581,7 +381,7 @@ func (s *server) handleHover(params json.RawMessage) (interface{}, error) {
 				}
 			}
 
-			if invoked, ln, found := invokeCaptureHint(cmd.Body, name); found {
+			if invoked, ln, found := pkg.InvokeCaptureHint(cmd.Body, name); found {
 				loc := "unknown line"
 				if ln > 0 {
 					loc = fmt.Sprintf("line %d", ln)
@@ -812,24 +612,8 @@ func commandHover(c *pkg.Command) string {
 	return b.String()
 }
 
-func splitCommandRef(data *pkg.ParsedData, name string) (cmdName, suffix string, ok bool) {
-	parts := strings.Split(name, ".")
-	for i := len(parts); i >= 1; i-- {
-		candidate := strings.Join(parts[:i], ".")
-		if _, err := data.GetCommand(candidate); err != nil {
-			continue
-		}
-		suffix := strings.Join(parts[i:], ".")
-		if suffix == "" {
-			continue // whole-output ref (&cmd) is not a command+suffix ref
-		}
-		return candidate, suffix, true
-	}
-	return "", "", false
-}
-
 func varHoverMessage(name string, data *pkg.ParsedData) string {
-	cmdName, suffix, ok := splitCommandRef(data, name)
+	cmdName, suffix, ok := pkg.SplitCommandRef(data, name)
 	if !ok {
 		v, err := data.GetVariable(name, "")
 		if err != nil {
@@ -851,7 +635,7 @@ func varHoverMessage(name string, data *pkg.ParsedData) string {
 		return ""
 	}
 
-	for shellIdx, stmt := range shellStatements(cmd.Body) {
+	for shellIdx, stmt := range pkg.ShellStatements(cmd.Body) {
 		matches := false
 		var namedHint string
 		if idx, err := strconv.Atoi(suffix); err == nil {
@@ -938,7 +722,7 @@ func (s *server) handleDefinition(params json.RawMessage) (interface{}, error) {
 		}
 
 		if cmd := enclosingCommand(lines, p.Position.Line, doc.data); cmd != nil {
-			if _, ln, found := invokeCaptureHint(cmd.Body, name); found && ln > 0 {
+			if _, ln, found := pkg.InvokeCaptureHint(cmd.Body, name); found && ln > 0 {
 				invokeLine := lines[ln-1]
 				col := max(strings.Index(invokeLine, "as "+name), 0)
 				return location{
@@ -1386,7 +1170,7 @@ func (s *server) findCommandLocation(doc *docState, name, docURI string) (locati
 }
 
 func outputStmtLocation(doc *docState, ref, docURI string) (location, bool) {
-	cmdName, suffix, ok := splitCommandRef(doc.data, ref)
+	cmdName, suffix, ok := pkg.SplitCommandRef(doc.data, ref)
 	if !ok {
 		return location{}, false
 	}
@@ -1395,7 +1179,7 @@ func outputStmtLocation(doc *docState, ref, docURI string) (location, bool) {
 		return location{}, false
 	}
 
-	stmts := shellStatements(cmd.Body)
+	stmts := pkg.ShellStatements(cmd.Body)
 	var hit *pkg.BodyStatement
 	for i := range stmts {
 		stmt := &stmts[i]
@@ -1472,43 +1256,6 @@ func invokeNameAtPosition(line string, char int) (string, int, int, bool) {
 		return "", 0, 0, false
 	}
 	return name, start, end, true
-}
-
-func invokeCaptureHint(body []pkg.BodyStatement, name string) (invoked string, line int, found bool) {
-	for _, stmt := range body {
-		switch stmt.Type {
-		case pkg.StmtInvoke:
-			if stmt.OutputName == name {
-				return stmt.Shell, stmt.SourceLine, true
-			}
-		case pkg.StmtIf:
-			if inv, ln, f := invokeCaptureHint(stmt.ThenBody, name); f {
-				return inv, ln, f
-			}
-			if inv, ln, f := invokeCaptureHint(stmt.ElseBody, name); f {
-				return inv, ln, f
-			}
-		case pkg.StmtFor:
-			if inv, ln, f := invokeCaptureHint(stmt.LoopBody, name); f {
-				return inv, ln, f
-			}
-		case pkg.StmtOnFail:
-			if inv, ln, f := invokeCaptureHint(stmt.OnFailBody, name); f {
-				return inv, ln, f
-			}
-		case pkg.StmtSwitch:
-			for _, c := range stmt.Cases {
-				if inv, ln, f := invokeCaptureHint(c.Body, name); f {
-					return inv, ln, f
-				}
-			}
-		case pkg.StmtInDir, pkg.StmtLock:
-			if inv, ln, f := invokeCaptureHint(stmt.ThenBody, name); f {
-				return inv, ln, f
-			}
-		}
-	}
-	return "", 0, false
 }
 
 func refAtPosition(line string, char int) (string, string) {
@@ -1810,7 +1557,7 @@ func completionVarItems(data *pkg.ParsedData, lines []string, lineIdx int, prefi
 		if c := resolveCommandRef(data, prefix[:dot]); c != nil {
 			named := 0
 			shellIdx := 0
-			for _, stmt := range shellStatements(c.Body) {
+			for _, stmt := range pkg.ShellStatements(c.Body) {
 				if stmt.OutputName != "" {
 					add(c.Name+"."+stmt.OutputName, stmt.OutputName, 6) // Variable
 					named++
@@ -1862,7 +1609,7 @@ func completionVarItems(data *pkg.ParsedData, lines []string, lineIdx int, prefi
 
 // resolveCommandRef finds name itself or its longest command prefix.
 func resolveCommandRef(data *pkg.ParsedData, name string) *pkg.Command {
-	if cmdName, _, ok := splitCommandRef(data, name); ok {
+	if cmdName, _, ok := pkg.SplitCommandRef(data, name); ok {
 		name = cmdName
 	}
 	if cmd, err := data.GetCommand(name); err == nil {
@@ -2023,6 +1770,8 @@ func keywordHover(word string) (string, bool) {
 		return "`import \"lib.constfile\" as lib`\n\nMerges another file's commands and variables, optionally under a namespace (`lib.cmd`, `&lib.var`).", true
 	case "produces":
 		return "`produces <files>`\n\nDeclares the command's outputs. While the artifacts exist and are newer than the command's file dependencies, the command is skipped as up to date.", true
+	case "container":
+		return "`container \"image\"`\n\nRuns the command's shell statements inside the image via docker/podman, with the workspace mounted at `/work`. Builtins (`cp`, `rm`, …) still run on the host.", true
 	case "onchange":
 		return "`onchange <globs>`\n\nExtra file patterns that rerun this command in `--watch` mode.", true
 	}

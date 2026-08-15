@@ -105,6 +105,7 @@ type Executor struct {
 	runRecords      map[string]RunRecord
 	state           map[string]string
 	stateLoaded     bool
+	containerRT     string
 }
 
 type FlameRow struct {
@@ -458,9 +459,9 @@ func (e *Executor) saveRunRecords() {
 	SaveRunHistory(dir, hist)
 }
 
-func (e *Executor) command(ctx *execContext, args []string) *exec.Cmd {
+func (e *Executor) command(ctx *execContext, argv []string) *exec.Cmd {
 	runCtx := e.effectiveRunCtx(ctx)
-	cmd := exec.CommandContext(runCtx, e.shellName, args...)
+	cmd := exec.CommandContext(runCtx, argv[0], argv[1:]...)
 	prepareProcessGroup(cmd)
 	cmd.Cancel = func() error {
 		return killProcessGroup(cmd)
@@ -526,12 +527,67 @@ func (e *Executor) resolveWorkDir(dir string) string {
 }
 
 // EvaluateCommand runs command as a top-level target.
+// containerRuntime resolves the container CLI once: docker, else podman.
+func (e *Executor) containerRuntime() string {
+	if e.containerRT == "" {
+		e.containerRT = "docker"
+		if _, err := exec.LookPath("docker"); err != nil {
+			if _, err := exec.LookPath("podman"); err == nil {
+				e.containerRT = "podman"
+			} else {
+				e.containerRT = "none"
+			}
+		}
+	}
+	return e.containerRT
+}
+
+func (e *Executor) resolveContainer(image string) string {
+	if image == "" {
+		return ""
+	}
+	switch e.containerRuntime() {
+	case "none":
+		return image // reported as an error at run time
+	default:
+		return e.containerRT + " " + image
+	}
+}
+
+func (e *Executor) shellArgsFor(ctx *execContext, script string) (argv []string, display string) {
+	if ctx.container == "" {
+		argv = append([]string{e.shellName}, slices.Clone(e.shellArgs)...)
+		argv = append(argv, script)
+		return argv, e.shellName + " " + strings.Join(argv[1:], " ")
+	}
+	fields := strings.Fields(ctx.container)
+	if len(fields) != 2 {
+		return nil, ctx.container
+	}
+	rt, image := fields[0], fields[1]
+	if rt == "none" {
+		return nil, image
+	}
+	argv = []string{rt, "run", "--rm"}
+	if ctx.envFile != "" {
+		argv = append(argv, "--env-file", ctx.envFile)
+	}
+	if e.baseDir != "" {
+		if abs, err := filepath.Abs(e.baseDir); err == nil {
+			argv = append(argv, "-v", abs+":/work", "-w", "/work")
+		}
+	}
+	if ctx.workDir != "" && !filepath.IsAbs(ctx.workDir) {
+		argv = append(argv, "-w", "/work/"+filepath.ToSlash(ctx.workDir))
+	}
+	argv = append(argv, image, "/bin/sh", "-c", script)
+	return argv, rt + " run " + image + " /bin/sh -c " + script
+}
+
 func (e *Executor) EvaluateCommand(command *Command) error {
 	return e.evaluate(command, "", false)
 }
 
-// evaluate runs command once per Execute call; prereqDir/isPrereq describe
-// how the first caller reached it, so the shared Command is never mutated.
 func (e *Executor) evaluate(command *Command, prereqDir string, isPrereq bool) error {
 	if e.runs == nil {
 		return e.executeCommand(command, prereqDir, isPrereq)
@@ -596,11 +652,20 @@ func (e *Executor) executeCommand(command *Command, prereqDir string, isPrereq b
 		}
 	}
 
+	if len(command.FileDeps) > 0 && !isPrereq {
+		for _, dep := range expandFileDeps(command.FileDeps, e.workDirFor(command, resolveValue, workDir)) {
+			if _, err := os.Stat(dep); err != nil {
+				fmt.Fprintf(os.Stderr, "warning: %s: file dependency %q does not exist\n", command.Name, dep)
+			}
+		}
+	}
+
 	ctx := &execContext{
-		target:   command,
-		isPrereq: isPrereq,
-		workDir:  workDir,
-		srcFile:  command.SourceFile,
+		target:    command,
+		isPrereq:  isPrereq,
+		workDir:   workDir,
+		srcFile:   command.SourceFile,
+		container: e.resolveContainer(resolveValue(command.Container, command.Name)),
 	}
 	var ctxCancel context.CancelFunc
 	if command.Timeout != "" {
@@ -613,6 +678,16 @@ func (e *Executor) executeCommand(command *Command, prereqDir string, isPrereq b
 	}
 	cmdEnv := slices.Clone(e.env)
 	ctx.env = &cmdEnv
+	if ctx.container != "" {
+		if f, err := os.CreateTemp("", "construct-env-"); err == nil {
+			for _, kv := range cmdEnv {
+				fmt.Fprintln(f, kv)
+			}
+			f.Close()
+			ctx.envFile = f.Name()
+			defer os.Remove(ctx.envFile)
+		}
+	}
 
 	var prereqCmds []*Command
 	var prereqDirs []string
@@ -684,6 +759,14 @@ func (e *Executor) executeCommand(command *Command, prereqDir string, isPrereq b
 		}
 		e.recordRun(command.Name, RunRecord{Status: "failed", Exit: exitCodeOfErr(bodyErr), DurationMs: time.Since(start).Milliseconds(), End: time.Now(), Error: bodyErr.Error()})
 		return bodyErr
+	}
+
+	if len(command.Produces) > 0 && !isPrereq {
+		for _, artifact := range expandFileDeps(command.Produces, e.workDirFor(command, resolveValue, workDir)) {
+			if _, err := os.Stat(artifact); err != nil {
+				fmt.Fprintf(os.Stderr, "warning: %s declares produces %q but it does not exist\n", command.Name, artifact)
+			}
+		}
 	}
 
 	if len(command.FileDeps) > 0 && !isPrereq && len(command.Produces) == 0 && !e.noCache {
@@ -844,8 +927,6 @@ func (e *Executor) cleanShellLine(cmd *Command, line string, argFlags map[string
 		line = strings.ReplaceAll(line, "&"+arg.Name, escapeShellValue(v))
 	}
 
-	// @state("name") references resolve at execution time so body state
-	// writes are visible to later statements.
 	return resolveEnvRefsKeepUnset(line)
 }
 
@@ -1004,8 +1085,6 @@ func resolveVarRefs(line string, lookup func(string) (string, bool)) string {
 	return scanRefs(line, '&', isVarIdentRune, isPlainRune, lookup, true)
 }
 
-// VarRefNames returns the &variable names in s, using runtime resolution's
-// character classes.
 func VarRefNames(s string) []string {
 	if strings.IndexByte(s, '&') < 0 {
 		return nil
@@ -1294,8 +1373,6 @@ func compare[T ~int | ~string](l, r T, op string) bool {
 	return false
 }
 
-// bodyFor returns the command's body with any cloud definition appended. It
-// never mutates cmd, so concurrent prereq/invoke paths cannot race on cmd.Body.
 func (e *Executor) bodyFor(cmd *Command) []BodyStatement {
 	if !cmd.CloudAccessible {
 		return cmd.Body
@@ -1311,6 +1388,8 @@ type execContext struct {
 	target    *Command
 	isPrereq  bool
 	workDir   string
+	container string
+	envFile   string
 	srcFile   string
 	out       io.Writer
 	env       *[]string
@@ -1320,7 +1399,6 @@ type execContext struct {
 	onFailRun bool
 }
 
-// targetLabel shows lazy-evaluation commands as `name (lazy)`, not __lazy_.
 func (ctx *execContext) targetLabel() string {
 	if ctx.target != nil && ctx.target.LazyEval != nil {
 		return ctx.target.LazyEval.VarName + " (lazy)"
@@ -1706,7 +1784,6 @@ func (e *Executor) runOnFails(ctx *execContext, cause error) error {
 		e.StructuredParse.SetVariable("fail.exit", ctx.target.Name, strconv.Itoa(cmdErr.ExitCode))
 	}
 
-	// Onfail bodies are cleaned at failure time so &fail.* refs resolve.
 	for _, body := range snapshot {
 		cleaned := e.cleanStatements([]BodyStatement{body}, ctx.target, e.argFlags(ctx.target))
 		if err := e.execBody(ctx, cleaned); err != nil {
@@ -1896,8 +1973,11 @@ func (e *Executor) runShellBatch(ctx *execContext, stmts []BodyStatement) error 
 		if supportsPipefail(e.shellName) {
 			script = "set -o pipefail\n" + script
 		}
-		args := append(slices.Clone(e.shellArgs), script)
-		cmd := e.command(ctx, args)
+		argv, fullCommand := e.shellArgsFor(ctx, script)
+		if argv == nil {
+			return fmt.Errorf("command %q needs container runtime but neither docker nor podman was found", ctx.target.Name)
+		}
+		cmd := e.command(ctx, argv)
 
 		var buf bytes.Buffer
 		sink := io.Writer(os.Stdout)
@@ -1909,7 +1989,7 @@ func (e *Executor) runShellBatch(ctx *execContext, stmts []BodyStatement) error 
 		cmd.Stdout = io.MultiWriter(sink, &buf)
 		cmd.Stderr = os.Stderr
 
-		e.debugf("Running command %s (batched): %s\n", ctx.target.Name, e.shellName+" "+strings.Join(args, " "))
+		e.debugf("Running command %s (batched): %s\n", ctx.target.Name, fullCommand)
 
 		release := e.acquire()
 		err := cmd.Run()
@@ -1919,7 +1999,7 @@ func (e *Executor) runShellBatch(ctx *execContext, stmts []BodyStatement) error 
 		}
 		e.setLastResult(ctx, exitCodeOf(err), buf.String())
 		if err != nil {
-			return e.commandError(e.shellName+" "+strings.Join(args, " "), ctx, BodyStatement{SourceLine: g.sourceLn}, err, "")
+			return e.commandError(fullCommand, ctx, BodyStatement{SourceLine: g.sourceLn}, err, "")
 		}
 	}
 	return nil
@@ -1989,10 +2069,11 @@ func (e *Executor) runShellOnce(ctx *execContext, stmt BodyStatement) error {
 
 	stmtCtx, cancel := e.statementCtx(ctx, stmt.Timeout)
 	defer cancel()
-	args := append(slices.Clone(e.shellArgs), cmdLine)
-	cmd := e.command(stmtCtx, args)
-
-	fullCommand := e.shellName + " " + strings.Join(args, " ")
+	argv, fullCommand := e.shellArgsFor(ctx, cmdLine)
+	if argv == nil {
+		return fmt.Errorf("command %q needs container runtime but neither docker nor podman was found", ctx.target.Name)
+	}
+	cmd := e.command(stmtCtx, argv)
 	if e.debug {
 		switch {
 		case ctx.isPrereq:
