@@ -169,21 +169,18 @@ func TestLintHeaderInvalidTimeout(t *testing.T) {
 }
 
 func TestLintStatementPrefixMisuse(t *testing.T) {
-	issues := lintText(t, "build {\n    timeout 30x $ go test\n    retry 0 $ go test\n}\n")
-	timeouts, retries := 0, 0
+	issues := lintText(t, "build {\n    timeout 30x $ go test\n}\n")
+	timeouts := 0
 	for _, is := range issues {
 		if is.Severity == LintError && strings.Contains(is.Message, "invalid timeout duration") {
 			timeouts++
 		}
-		if is.Severity == LintError && strings.Contains(is.Message, "retry expects a positive integer") {
-			retries++
-		}
 	}
-	if timeouts != 1 || retries != 1 {
-		t.Errorf("timeouts=%d retries=%d, want 1 and 1: %v", timeouts, retries, issues)
+	if timeouts != 1 {
+		t.Errorf("timeouts=%d, want 1: %v", timeouts, issues)
 	}
 
-	for _, is := range lintText(t, "build {\n    timeout 5 ./server\n    retry 3 $ go test\n}\n") {
+	for _, is := range lintText(t, "build {\n    timeout 5 ./server\n    retry<3> $ go test\n}\n") {
 		if strings.Contains(is.Message, "runs as a plain shell line") {
 			t.Errorf("false positive: %v", is)
 		}

@@ -294,11 +294,10 @@ func lintStatementPrefixes(lines []string) []LintIssue {
 	var issues []LintIssue
 	for lineIdx, raw := range lines {
 		line := strings.TrimSpace(raw)
-		if !strings.HasPrefix(line, "timeout ") && !strings.HasPrefix(line, "retry ") {
+		if !strings.HasPrefix(line, "timeout ") {
 			continue
 		}
-		kw := line[:strings.IndexByte(line, ' ')]
-		rest := strings.TrimSpace(line[len(kw):])
+		rest := strings.TrimSpace(line[len("timeout"):])
 		sp := strings.IndexAny(rest, " \t")
 		if sp <= 0 {
 			continue
@@ -311,22 +310,12 @@ func lintStatementPrefixes(lines []string) []LintIssue {
 		if col < 0 {
 			col = 0
 		}
-		if kw == "timeout" {
-			if _, err := time.ParseDuration(value); err != nil {
-				issues = append(issues, LintIssue{
-					Line: lineIdx, Col: col, EndCol: col + len(value),
-					Severity: LintError,
-					Message:  fmt.Sprintf("invalid timeout duration %q — the statement runs as a plain shell line (expected e.g. `timeout 30s $ cmd`)", value),
-				})
-			}
-		} else {
-			if n, err := strconv.Atoi(value); err != nil || n <= 0 {
-				issues = append(issues, LintIssue{
-					Line: lineIdx, Col: col, EndCol: col + len(value),
-					Severity: LintError,
-					Message:  fmt.Sprintf("retry expects a positive integer, got %q — the statement runs as a plain shell line (e.g. `retry 3 $ cmd`)", value),
-				})
-			}
+		if _, err := time.ParseDuration(value); err != nil {
+			issues = append(issues, LintIssue{
+				Line: lineIdx, Col: col, EndCol: col + len(value),
+				Severity: LintError,
+				Message:  fmt.Sprintf("invalid timeout duration %q — the statement runs as a plain shell line (expected e.g. `timeout 30s $ cmd`)", value),
+			})
 		}
 	}
 	return issues

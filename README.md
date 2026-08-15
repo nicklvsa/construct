@@ -347,7 +347,9 @@ deploy {
 - `fail "message"` aborts the command with a readable error (`fail: message (file:line)`).
 - `require_env KEY "message"` fails the command when an environment variable is unset.
 - `global name = value` writes a global variable from inside a command body.
-- `retry 3 $ cmd` reruns a statement up to 3 extra times before failing.
+- `retry<3> $ cmd` reruns a statement up to 3 extra times before failing.
+  `retry<3, 2s>` also waits between attempts, doubling each time
+  (2s, 4s, 8s, ...).
 - `onfail { ... }` registers a block that runs once if any later statement in
   the command fails — handy for cleanup and rollback. It runs after the
   failure; the original error is still reported. Inside the block,
@@ -599,8 +601,10 @@ build_matrix {
 }
 ```
 
-The `<...>` modifier slot is reserved for keyword modifiers — future
-keywords may adopt it (e.g. a wait timeout on `lock`).
+The `<...>` modifier slot is shared by keyword modifiers: `parallel<N>`
+(iteration cap), `lock<5m>` (bounded lock wait), `retry<3, 2s>` (retry
+count plus optional backoff base), and `switch<strict>` (fail on no
+match).
 
 ### Build Matrices
 
@@ -658,7 +662,9 @@ deploy {
 ```
 
 Case values are comma-separated and matched exactly; `default` runs when
-nothing matches. `case`/`default` outside a `switch` is a parse error.
+nothing matches. `switch<strict>` fails the command when nothing matches
+and there is no `default` — useful when a missing case is a configuration
+error. `case`/`default` outside a `switch` is a parse error.
 
 ### Scoped Working Directories
 
@@ -685,6 +691,17 @@ processes wait for it:
 ```
 deploy {
     lock "deploy" {
+        $ aws deploy
+    }
+}
+```
+
+The wait can be bounded with a duration modifier — when it expires, the
+command fails instead of hanging:
+
+```
+deploy {
+    lock<5m> "deploy" {
         $ aws deploy
     }
 }
@@ -738,8 +755,7 @@ file dependencies, unused globals, and unreferenced commands. It also flags
 misused keywords before they silently misparse: `produces`/`container`/
 `timeout` written after the prerequisite list (where they are treated as
 prerequisites instead of modifiers), header or statement `timeout` values
-that are not valid durations, `retry` counts that are not positive
-integers, `break`/`continue` outside a loop, `break` inside a `parallel`
+that are not valid durations, `break`/`continue` outside a loop, `break` inside a `parallel`
 loop (it cannot stop concurrent iterations), references like `&svc-`
 whose trailing `-` is swallowed into the name, `&name` references that
 resolve to nothing (typos — they substitute to empty silently), `case`

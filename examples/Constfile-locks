@@ -13,6 +13,9 @@
 # The second process prints:
 #   (release waiting for lock "release-migrations"...)
 # and proceeds only after the first one finishes.
+#
+# `rollback` bounds its lock wait with a duration modifier: if a release is
+# stuck mid-migration, the rollback fails after 5s instead of hanging.
 
 var app = webapp
 var region = us-east-1
@@ -37,9 +40,10 @@ build {
     $ echo "building &app"
 }
 
-# Reuses the same lock so it waits for any in-flight release before reverting.
+# Reuses the same lock so it waits for any in-flight release before
+# reverting — but only up to 5 seconds.
 rollback {
-    lock "release-migrations" {
+    lock<5s> "release-migrations" {
         $ sleep 2
         $ echo "reverting schema for &app"
     }

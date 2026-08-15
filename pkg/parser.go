@@ -322,6 +322,7 @@ type BodyStatement struct {
 	Tolerant     bool            `json:"tolerant,omitempty"`
 	Parallel     bool            `json:"parallel,omitempty"`
 	ParallelJobs int             `json:"parallel_jobs,omitempty"`
+	Modifier     string          `json:"modifier,omitempty"`
 	SourceLine   int             `json:"source_line,omitempty"`
 }
 
@@ -1026,25 +1027,31 @@ func (p *Parser) parseBodyStatements(raw []rawLine, scope string) ([]BodyStateme
 			continue
 		}
 
-		// `retry N $ cmd` reruns a statement up to N extra times on failure.
-		if strings.HasPrefix(line, "retry ") {
+		// `retry<N> $ cmd` / `retry<N, 2s> $ cmd` rerun a statement up to N extra times.
+		if strings.HasPrefix(line, "retry ") || strings.HasPrefix(line, "retry\t") {
+			return nil, NewParseError(p.InputFile, lineNum, 1, "the positional retry form was removed — use retry<3> $ cmd, or retry<3, 2s> to back off between attempts (prefix with $ to run a shell command)", line)
+		}
+		if strings.HasPrefix(line, "retry<") {
 			rest := strings.TrimSpace(strings.TrimPrefix(line, "retry"))
-			space := strings.IndexAny(rest, " \t")
-			if space > 0 {
-				n, err := strconv.Atoi(rest[:space])
-				if err == nil && n > 0 {
-					shell, outputName := extractOutputName(strings.TrimSpace(rest[space:]))
-					stmts = append(stmts, BodyStatement{
-						Type:       StmtShell,
-						Shell:      shell,
-						OutputName: outputName,
-						Retry:      n,
-						SourceLine: lineNum,
-					})
-					i++
-					continue
-				}
+			r, mod, _, err := peelModifier(rest)
+			if err != nil {
+				return nil, NewParseError(p.InputFile, lineNum, 1, fmt.Sprintf("malformed retry modifier: %v", err), line)
 			}
+			count, backoff, ok := parseRetryModifier(mod)
+			if !ok {
+				return nil, NewParseError(p.InputFile, lineNum, 1, fmt.Sprintf("invalid retry modifier %q: expected <N> or <N, duration>", mod), line)
+			}
+			shell, outputName := extractOutputName(strings.TrimSpace(r))
+			stmts = append(stmts, BodyStatement{
+				Type:       StmtShell,
+				Shell:      shell,
+				OutputName: outputName,
+				Retry:      count,
+				Modifier:   backoff,
+				SourceLine: lineNum,
+			})
+			i++
+			continue
 		}
 
 		if strings.HasPrefix(line, "onfail ") || line == "onfail{" {
@@ -1107,7 +1114,7 @@ func (p *Parser) parseBodyStatements(raw []rawLine, scope string) ([]BodyStateme
 			continue
 		}
 
-		if strings.HasPrefix(line, "switch ") && strings.Contains(line, "{") {
+		if (strings.HasPrefix(line, "switch ") || strings.HasPrefix(line, "switch<")) && strings.Contains(line, "{") {
 			stmt, consumed, err := p.parseSwitchBlock(raw[i:], scope)
 			if err != nil {
 				return nil, err
@@ -1132,7 +1139,7 @@ func (p *Parser) parseBodyStatements(raw []rawLine, scope string) ([]BodyStateme
 			continue
 		}
 
-		if strings.HasPrefix(line, "lock ") && strings.Contains(line, "{") {
+		if (strings.HasPrefix(line, "lock ") || strings.HasPrefix(line, "lock<")) && strings.Contains(line, "{") {
 			stmt, consumed, err := p.parseLockBlock(raw[i:], scope)
 			if err != nil {
 				return nil, err
@@ -1597,6 +1604,18 @@ func (p *Parser) parseSwitchBlock(raw []rawLine, scope string) (BodyStatement, i
 	header := strings.TrimSpace(headerLine.text)
 	header = strings.TrimPrefix(header, "switch")
 
+	modifier := ""
+	if rest, mod, has, err := peelModifier(header); has || err != nil {
+		if err != nil {
+			return BodyStatement{}, 0, fmt.Errorf("malformed switch modifier: %v", err)
+		}
+		if mod != "strict" {
+			return BodyStatement{}, 0, fmt.Errorf("unknown switch modifier %q (only \"strict\" is allowed)", mod)
+		}
+		modifier = mod
+		header = rest
+	}
+
 	before, _, ok := strings.Cut(header, "{")
 	if !ok {
 		return BodyStatement{}, 0, fmt.Errorf("malformed switch: missing '{'")
@@ -1611,7 +1630,7 @@ func (p *Parser) parseSwitchBlock(raw []rawLine, scope string) (BodyStatement, i
 		return BodyStatement{}, 0, fmt.Errorf("unclosed switch block (missing '}')")
 	}
 
-	stmt := BodyStatement{Type: StmtSwitch, SwitchExpr: expr, SourceLine: headerLine.num}
+	stmt := BodyStatement{Type: StmtSwitch, SwitchExpr: expr, Modifier: modifier, SourceLine: headerLine.num}
 	seen := make(map[string]bool)
 	j := 0
 	for j < len(lines) {
@@ -1710,6 +1729,18 @@ func (p *Parser) parseLockBlock(raw []rawLine, scope string) (BodyStatement, int
 	header := strings.TrimSpace(headerLine.text)
 	header = strings.TrimPrefix(header, "lock")
 
+	modifier := ""
+	if rest, mod, has, err := peelModifier(header); has || err != nil {
+		if err != nil {
+			return BodyStatement{}, 0, fmt.Errorf("malformed lock modifier: %v", err)
+		}
+		if _, derr := parseModifierDuration("lock", mod); derr != nil {
+			return BodyStatement{}, 0, derr
+		}
+		modifier = mod
+		header = rest
+	}
+
 	before, _, ok := strings.Cut(header, "{")
 	if !ok {
 		return BodyStatement{}, 0, fmt.Errorf("malformed lock: missing '{'")
@@ -1724,7 +1755,7 @@ func (p *Parser) parseLockBlock(raw []rawLine, scope string) (BodyStatement, int
 		if err != nil {
 			return BodyStatement{}, 0, err
 		}
-		return BodyStatement{Type: StmtLock, Shell: name, ThenBody: bodyStmts, SourceLine: headerLine.num}, 1, nil
+		return BodyStatement{Type: StmtLock, Shell: name, Modifier: modifier, ThenBody: bodyStmts, SourceLine: headerLine.num}, 1, nil
 	}
 
 	bodyLines, endIdx, err := collectBodyLines(raw, 1)
@@ -1735,7 +1766,7 @@ func (p *Parser) parseLockBlock(raw []rawLine, scope string) (BodyStatement, int
 	if err != nil {
 		return BodyStatement{}, 0, err
 	}
-	return BodyStatement{Type: StmtLock, Shell: name, ThenBody: bodyStmts, SourceLine: headerLine.num}, endIdx, nil
+	return BodyStatement{Type: StmtLock, Shell: name, Modifier: modifier, ThenBody: bodyStmts, SourceLine: headerLine.num}, endIdx, nil
 }
 
 func parseInvokeArgs(s string) (name string, args []string) {
@@ -1828,6 +1859,46 @@ func (p *Parser) parseParallelBlock(line string, raw []rawLine, scope string, li
 	stmt.Parallel = true
 	stmt.ParallelJobs = jobs
 	return stmt, consumed, true, nil
+}
+
+// peelModifier strips a leading "<...>" keyword modifier.
+func peelModifier(rest string) (rest2, mod string, ok bool, err error) {
+	if !strings.HasPrefix(rest, "<") {
+		return rest, "", false, nil
+	}
+	end := strings.IndexByte(rest, '>')
+	if end < 0 {
+		return "", "", true, fmt.Errorf("missing '>'")
+	}
+	mod = rest[1:end]
+	if mod == "" {
+		return "", "", true, fmt.Errorf("empty modifier")
+	}
+	return rest[end+1:], mod, true, nil
+}
+
+func parseRetryModifier(mod string) (int, string, bool) {
+	countPart, backoff, hasBackoff := strings.Cut(mod, ",")
+	n, err := strconv.Atoi(strings.TrimSpace(countPart))
+	if err != nil || n <= 0 {
+		return 0, "", false
+	}
+	if !hasBackoff {
+		return n, "", true
+	}
+	backoff = strings.TrimSpace(backoff)
+	if d, derr := time.ParseDuration(backoff); derr != nil || d <= 0 {
+		return 0, "", false
+	}
+	return n, backoff, true
+}
+
+func parseModifierDuration(kw, mod string) (time.Duration, error) {
+	d, err := time.ParseDuration(mod)
+	if err != nil || d <= 0 {
+		return 0, fmt.Errorf("invalid %s<%s> modifier: expected a positive duration", kw, mod)
+	}
+	return d, nil
 }
 
 func firstWord(s string) string {
@@ -2003,9 +2074,9 @@ func collectBodyLines(raw []rawLine, start int) ([]rawLine, int, error) {
 func isNestedBlockHeader(t string) bool {
 	return (strings.HasPrefix(t, "if ") || strings.HasPrefix(t, "for ") || strings.HasPrefix(t, "matrix ") ||
 		strings.HasPrefix(t, "env ") || strings.HasPrefix(t, "onfail ") ||
-		strings.HasPrefix(t, "switch ") || strings.HasPrefix(t, "case ") ||
+		strings.HasPrefix(t, "switch ") || strings.HasPrefix(t, "switch<") || strings.HasPrefix(t, "case ") ||
 		strings.HasPrefix(t, "default") || strings.HasPrefix(t, "in ") ||
-		strings.HasPrefix(t, "lock ") || strings.HasPrefix(t, "case{") ||
+		strings.HasPrefix(t, "lock ") || strings.HasPrefix(t, "lock<") || strings.HasPrefix(t, "case{") ||
 		strings.HasPrefix(t, "parallel")) && strings.Contains(t, "{")
 }
 

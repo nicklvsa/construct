@@ -31,7 +31,7 @@ construct Constfile-<name> <command>    # run a command
 | `Constfile-builtins` | Any | Cross-platform builtin commands `cp`/`rm`/`mkdir`/`touch`/`download`/`extract`, error-tolerant builtins, `&last.exit` reporting |
 | `Constfile-state` | Any | Persistent `state` variables, `@state("name")` reads, runtime state expressions, `--resume`, `stats` |
 | `Constfile-cloud` (+ `example-cloud.json`) | Any | Cloud commands (`\|name\|`), `invoke` cloud fallback, pure cloud commands, `cloud list/pull/push` |
-| `Constfile-locks` | Any | Real-world `lock` usage: a release/rollback pipeline serialized on a shared named lock, composed with `confirm` and `onfail` |
+| `Constfile-locks` | Any | Real-world `lock` usage: a release/rollback pipeline serialized on a shared named lock (`lock<5s>` bounded waits), composed with `confirm` and `onfail` |
 | `Constfile-container` (+ `src/`) | Any | Container isolation (`container "image"`): containerized builds, cross-compile matrices, host/container composition, timeouts |
 | `Constfile-parallel` | Any | `parallel for` / `parallel<N>` / `parallel matrix`: concurrent iterations, per-item output prefixes, `continue if`, composition with env/workdirs/nested loops |
 | `Makefile` | Any | Import demo: run `construct import examples/Makefile` to convert it (vars, `.PHONY`, automatic vars, file targets; ifeq/`$(shell)`/pattern rule show up as flagged comments) |
@@ -72,6 +72,7 @@ construct Constfile-<name> <command>    # run a command
 - **`switch`/`case`/`default`** — `Constfile-control-flow`
 - **Scoped workdir blocks (`in`)** — `Constfile-control-flow`
 - **`lock` mutual exclusion** — `Constfile-control-flow`, `Constfile-locks` (real-world release/rollback)
+- **Keyword modifiers (`parallel<N>`, `lock<5s>`, `retry<2s>`, `switch<strict>`)** — `Constfile-parallel`, `Constfile-locks`, `Constfile-modern-flags`, `Constfile-control-flow`
 - **`timeout` (command + statement)** — `Constfile-control-flow`
 - **`confirm`/`prompt`/`input` + `--yes`** — `Constfile-control-flow`
 - **`&last.exit`/`&last.output`** — `Constfile-control-flow`, `Constfile-builtins`
@@ -81,6 +82,8 @@ construct Constfile-<name> <command>    # run a command
 - **`--repeat`, `--flame`, `--github-actions`** — `Constfile-state`, any example
 - **Cloud commands (`|name|`, `invoke` fallback)** — `Constfile-cloud`
 - **Parallel loops (`parallel for`, `parallel<N>`, `parallel matrix`)** — `Constfile-parallel`
+- **`retry<2s>` backoff** — `Constfile-modern-flags`
+- **`switch<strict>`** — `Constfile-control-flow`
 - **Makefile import (`construct import`)** — `Makefile`
 - **Interactive shells (`construct shell`, `--container`)** — `Constfile-shell`
 - **Live dashboard (`--tui`)** — `Constfile-dashboard`

@@ -1717,7 +1717,7 @@ func shellLineContentAt(line string, char int) bool {
 func keywordHover(word string) (string, bool) {
 	switch word {
 	case "switch":
-		return "`switch <expr> { case v { } ... default { } }`\n\nRuns the first case whose value equals the expression; `default` runs when nothing matches.", true
+		return "`switch<strict> <expr> { case v { } ... default { } }` / `switch <expr> { ... }`\n\nRuns the first case whose value equals the expression; `default` runs when nothing matches. `<strict>` fails the command when nothing matches and there is no default.", true
 	case "case":
 		return "`case v1, v2 { ... }`\n\nRuns its body when the switch expression equals one of the comma-separated values.", true
 	case "default":
@@ -1725,7 +1725,7 @@ func keywordHover(word string) (string, bool) {
 	case "in":
 		return "`in <dir> { ... }`\n\nRuns the block with the working directory set to `<dir>`, resolved against the Constfile directory.", true
 	case "lock":
-		return "`lock \"name\" { ... }`\n\nHolds an exclusive lock (in `.construct-cache/locks/`) while the block runs; other construct processes wait for it.", true
+		return "`lock<5m> \"name\" { ... }` / `lock \"name\" { ... }`\n\nHolds an exclusive lock (in `.construct-cache/locks/`) while the block runs; other construct processes wait for it. `<duration>` bounds the wait — the command fails instead of hanging.", true
 	case "state":
 		return "`state name = value`\n\nPersists a variable across runs in `.construct-cache/state.json`. Read it back with `state(\"name\")` or `@state(\"name\")`.", true
 	case "confirm":
@@ -1767,7 +1767,7 @@ func keywordHover(word string) (string, bool) {
 	case "require_env":
 		return "`require_env KEY \"message\"`\n\nFails the command when the environment variable KEY is not set.", true
 	case "retry":
-		return "`retry N $ cmd`\n\nReruns the statement up to N extra times when it fails.", true
+		return "`retry<3> $ cmd` / `retry<3, 2s> $ cmd`\n\nReruns the statement up to 3 extra times when it fails; the second form backs off between attempts, doubling from 2s.", true
 	case "onfail":
 		return "runs once when any later statement in this command fails\n\nfailure context available: `&fail.message`, `&fail.line`, `&fail.exit`", true
 	case "continue":

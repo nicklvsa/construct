@@ -1,4 +1,4 @@
-# switch, scoped workdirs, locks, timeouts, confirmations, and &last.*.
+# switch (+ switch<strict>), scoped workdirs, locks, timeouts, confirmations, and &last.*.
 #
 #   construct Constfile-control-flow --dry-run deploy
 #   construct Constfile-control-flow test
@@ -22,6 +22,20 @@ deploy {
     }
     confirm "push to production?"
     $ echo "deployed"
+}
+
+# switch<strict> fails when nothing matches and there is no default — an
+# unknown environment is a configuration error, not a silent no-op.
+route {
+    switch<strict> "&env" {
+        case "prod" {
+            $ echo "routing &env traffic to the production mesh"
+        }
+        case "staging", "dev" {
+            $ echo "routing &env traffic to the sandbox mesh"
+        }
+    }
+    $ echo "routing configured"
 }
 
 # in <dir> scopes the working directory (created if missing).

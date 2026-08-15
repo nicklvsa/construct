@@ -1,7 +1,7 @@
 var branch = main
 var version = 0.0.0
 // Config guards, retries, and CI-friendly flags
-// Demonstrates: require_env, global writes, retry N, string condition ops
+// Demonstrates: require_env, global writes, retry<N> (+ retry<N, 2s> backoff), string condition ops
 //               (starts_with/ends_with/matches), onchange watch globs,
 //               bare key=value overrides, --quiet, --explain, --json,
 //               --jobs auto, concurrent output prefixing, SIGINT cleanup
@@ -46,9 +46,16 @@ deploy {
     $ echo "deploying &branch"
 }
 
-// A flaky network step: retry 3 instead of failing on the first blip.
+// A flaky network step: retry<3> instead of failing on the first blip.
 fetch {
-    retry 3 $ curl -sf https://example.com/manifest.json
+    retry<3> $ curl -sf https://example.com/manifest.json
+    $ echo "manifest fetched"
+}
+
+// The same step with backoff: waits 2s, then 4s, then 8s between attempts
+// (the backoff base is given after a comma and doubles each retry).
+fetch-with-backoff {
+    retry<3, 2s> $ curl -sf https://example.com/manifest.json
     $ echo "manifest fetched"
 }
 

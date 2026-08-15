@@ -386,8 +386,9 @@ func copyDir(src, dst string) error {
 	})
 }
 
-// withLock holds an exclusive advisory lock for the duration of fn.
-func (e *Executor) withLock(ctx *execContext, name string, fn func() error) error {
+// withLock holds an exclusive advisory lock for the duration of fn. A
+// positive maxWait bounds how long acquiring the lock can take.
+func (e *Executor) withLock(ctx *execContext, name string, maxWait time.Duration, fn func() error) error {
 	dir := filepath.Join(e.cacheDirFor(), "locks")
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return err
@@ -399,6 +400,10 @@ func (e *Executor) withLock(ctx *execContext, name string, fn func() error) erro
 	defer f.Close()
 
 	runCtx := e.effectiveRunCtx(ctx)
+	var deadline time.Time
+	if maxWait > 0 {
+		deadline = time.Now().Add(maxWait)
+	}
 	waited := false
 	for {
 		if tryFlock(f) {
@@ -406,7 +411,14 @@ func (e *Executor) withLock(ctx *execContext, name string, fn func() error) erro
 		}
 		if !waited {
 			waited = true
-			fmt.Fprintf(os.Stderr, "(%s waiting for lock %q...)\n", ctx.target.Name, name)
+			if maxWait > 0 {
+				fmt.Fprintf(os.Stderr, "(%s waiting for lock %q, bounded by %s...)\n", ctx.target.Name, name, maxWait)
+			} else {
+				fmt.Fprintf(os.Stderr, "(%s waiting for lock %q...)\n", ctx.target.Name, name)
+			}
+		}
+		if !deadline.IsZero() && time.Now().After(deadline) {
+			return fmt.Errorf("timed out after %s waiting for lock %q", maxWait, name)
 		}
 		select {
 		case <-runCtx.Done():

@@ -49,6 +49,24 @@
 		"keywords": {
 			"patterns": [
 				{
+					"comment": "keyword modifier value: parallel<4>, retry<3, 2s>, lock<5m>, switch<strict>",
+					"match": "\\b(parallel|lock|retry|switch)(<)([^>]+)(>)",
+					"captures": {
+						"1": {
+							"name": "keyword.control.constfile"
+						},
+						"2": {
+							"name": "punctuation.definition.modifier.constfile"
+						},
+						"3": {
+							"name": "constant.other.modifier.constfile"
+						},
+						"4": {
+							"name": "punctuation.definition.modifier.constfile"
+						}
+					}
+				},
+				{
 					"name": "keyword.control.constfile",
 					"match": "\\b(manual|opt|parallel|if|else|for|matrix|in|contains|starts_with|ends_with|matches|import|continue|break|exists|missing|glob|require|produces|container|env|invoke|fail|onfail|global|require_env|retry|onchange|switch|case|default|lock|state|confirm|prompt|input|timeout)\\b"
 				},
@@ -389,15 +407,18 @@
 				{
 					"comment": "switch <expr> { case v { } default { } } \u2014 keyword plus block",
 					"name": "meta.block.switch.constfile",
-					"begin": "^\\s*(switch)\\s+([^{]+)(\\{)",
+					"begin": "^\\s*(switch)(<[^>\\s]*>)?\\s*([^{]+)(\\{)",
 					"beginCaptures": {
 						"1": {
 							"name": "keyword.control.constfile"
 						},
 						"2": {
-							"name": "string.interpolated.constfile"
+							"name": "constant.other.modifier.constfile"
 						},
 						"3": {
+							"name": "string.interpolated.constfile"
+						},
+						"4": {
 							"name": "punctuation.definition.block.constfile"
 						}
 					},
@@ -470,15 +491,18 @@
 				{
 					"comment": "lock \"name\" { ... } mutual exclusion block",
 					"name": "meta.block.lock.constfile",
-					"begin": "^\\s*(lock)\\s+([^{]+)(\\{)",
+					"begin": "^\\s*(lock)(<[^>\\s]*>)?\\s*([^{]+)(\\{)",
 					"beginCaptures": {
 						"1": {
 							"name": "keyword.control.constfile"
 						},
 						"2": {
-							"name": "string.interpolated.constfile"
+							"name": "constant.other.modifier.constfile"
 						},
 						"3": {
+							"name": "string.interpolated.constfile"
+						},
+						"4": {
 							"name": "punctuation.definition.block.constfile"
 						}
 					},

@@ -965,6 +965,7 @@ func (e *Executor) cleanStatements(stmts []BodyStatement, cmd *Command, argFlags
 			out[i] = BodyStatement{
 				Type:       StmtSwitch,
 				SwitchExpr: stmt.SwitchExpr,
+				Modifier:   stmt.Modifier,
 				Cases:      cases,
 				SourceLine: stmt.SourceLine,
 			}
@@ -972,6 +973,7 @@ func (e *Executor) cleanStatements(stmts []BodyStatement, cmd *Command, argFlags
 			out[i] = BodyStatement{
 				Type:       stmt.Type,
 				Shell:      stmt.Shell,
+				Modifier:   stmt.Modifier,
 				ThenBody:   e.cleanStatements(stmt.ThenBody, cmd, argFlags),
 				SourceLine: stmt.SourceLine,
 			}
@@ -980,7 +982,7 @@ func (e *Executor) cleanStatements(stmts []BodyStatement, cmd *Command, argFlags
 		case StmtInvoke, StmtEnv, StmtOnFail, StmtState, StmtConfirm, StmtPrompt, StmtInput, StmtBuiltin:
 			out[i] = stmt
 		default:
-			out[i] = BodyStatement{Type: StmtShell, Shell: e.cleanShellLine(cmd, stmt.Shell, argFlags), OutputName: stmt.OutputName, Retry: stmt.Retry, Timeout: stmt.Timeout, SourceLine: stmt.SourceLine}
+			out[i] = BodyStatement{Type: StmtShell, Shell: e.cleanShellLine(cmd, stmt.Shell, argFlags), OutputName: stmt.OutputName, Retry: stmt.Retry, Timeout: stmt.Timeout, Modifier: stmt.Modifier, SourceLine: stmt.SourceLine}
 		}
 	}
 	return out
@@ -1680,6 +1682,9 @@ func (e *Executor) execBody(ctx *execContext, body []BodyStatement) (err error) 
 						return e.execBody(ctx, c.Body)
 					}
 				}
+				if stmt.Modifier == "strict" {
+					return &FailError{Message: fmt.Sprintf("strict switch: no case matched %q", expr), File: ctx.srcFile, Line: stmt.SourceLine}
+				}
 				return nil
 			})
 			if err != nil {
@@ -1705,8 +1710,12 @@ func (e *Executor) execBody(ctx *execContext, body []BodyStatement) (err error) 
 
 		case StmtLock:
 			name := e.resolveBodyValue(ctx, stmt.Shell, ctx.target.Name)
+			var maxWait time.Duration
+			if stmt.Modifier != "" {
+				maxWait, _ = time.ParseDuration(stmt.Modifier)
+			}
 			err := e.timed(ctx, truncateLabel(ctx.targetLabel()+": lock "+name), func() error {
-				return e.withLock(ctx, name, func() error {
+				return e.withLock(ctx, name, maxWait, func() error {
 					return e.execBody(ctx, stmt.ThenBody)
 				})
 			})
@@ -2227,13 +2236,24 @@ func (p *linePrefixWriter) flush() {
 }
 
 func (e *Executor) runShell(ctx *execContext, stmt BodyStatement) error {
+	backoff, _ := time.ParseDuration(stmt.Modifier)
 	var lastErr error
 	for attempt := 0; ; attempt++ {
 		lastErr = e.runShellOnce(ctx, stmt)
 		if lastErr == nil || attempt >= stmt.Retry {
 			return lastErr
 		}
-		fmt.Fprintf(os.Stderr, "(!) %s failed, retrying (attempt %d/%d)\n", stmt.Shell, attempt+1, stmt.Retry+1)
+		if backoff > 0 {
+			wait := backoff * time.Duration(1<<attempt)
+			fmt.Fprintf(os.Stderr, "(!) %s failed, retrying in %s (attempt %d/%d)\n", stmt.Shell, wait, attempt+1, stmt.Retry+1)
+			select {
+			case <-e.effectiveRunCtx(ctx).Done():
+				return e.effectiveRunCtx(ctx).Err()
+			case <-time.After(wait):
+			}
+		} else {
+			fmt.Fprintf(os.Stderr, "(!) %s failed, retrying (attempt %d/%d)\n", stmt.Shell, attempt+1, stmt.Retry+1)
+		}
 	}
 }
 

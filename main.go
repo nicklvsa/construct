@@ -289,7 +289,11 @@ func printDryRunBody(body []pkg.BodyStatement, indent int) {
 			printDryRunBody(stmt.LoopBody, indent+1)
 			fmt.Printf("%s}\n", prefix)
 		case pkg.StmtSwitch:
-			fmt.Printf("%sswitch %s {\n", prefix, stmt.SwitchExpr)
+			mod := ""
+			if stmt.Modifier != "" {
+				mod = "<" + stmt.Modifier + ">"
+			}
+			fmt.Printf("%sswitch%s %s {\n", prefix, mod, stmt.SwitchExpr)
 			for _, c := range stmt.Cases {
 				if c.IsDefault {
 					fmt.Printf("%s  default {\n", prefix)
@@ -305,7 +309,11 @@ func printDryRunBody(body []pkg.BodyStatement, indent int) {
 			printDryRunBody(stmt.ThenBody, indent+1)
 			fmt.Printf("%s}\n", prefix)
 		case pkg.StmtLock:
-			fmt.Printf("%slock %q {\n", prefix, stmt.Shell)
+			mod := ""
+			if stmt.Modifier != "" {
+				mod = "<" + stmt.Modifier + ">"
+			}
+			fmt.Printf("%slock%s %q {\n", prefix, mod, stmt.Shell)
 			printDryRunBody(stmt.ThenBody, indent+1)
 			fmt.Printf("%s}\n", prefix)
 		case pkg.StmtState:
