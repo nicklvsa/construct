@@ -1,34 +1,59 @@
 package main
 
 import (
+	"embed"
 	"encoding/json"
 	"fmt"
 	"maps"
 	"os"
 	"path/filepath"
 	"slices"
-	"sort"
 	"strings"
-
-	flag "github.com/spf13/pflag"
 
 	"github.com/nicklvsa/construct/pkg"
 )
 
-// ---- construct lint ----
+//go:embed init-templates/*
+var initTemplates embed.FS
+
+func runInit(args []string, o *options) error {
+	template := o.template
+	fileName := o.fileName
+	force := o.force
+	if template == "" {
+		template = "minimal"
+	}
+	if fileName == "" {
+		fileName = "Constfile"
+	}
+	for _, a := range args {
+		if strings.HasPrefix(a, "-") {
+			return exitAt(2, "unknown init option %q", a)
+		}
+		template = a
+	}
+	if _, err := os.Stat(fileName); err == nil && !force {
+		return fmt.Errorf("%s already exists (use --force to overwrite)", fileName)
+	}
+	content, err := initTemplates.ReadFile("init-templates/" + template + ".constfile")
+	if err != nil {
+		return fmt.Errorf("unknown template %q (available: minimal, go, python, node, rust, monorepo)", template)
+	}
+	if err := os.WriteFile(fileName, content, 0644); err != nil {
+		return err
+	}
+	fmt.Printf("created %s from the %q template\n", fileName, template)
+	fmt.Println("next: construct --list")
+	return nil
+}
 
 func runLint(args []string, o *options) error {
 	fileName := defaultConstfileName()
-	var targets []string
 	if len(args) > 0 {
 		if fileExists(args[0]) {
 			fileName = args[0]
-			targets = args[1:]
-		} else {
-			targets = args
 		}
 	}
-	_ = targets
 
 	p, err := pkg.NewParser(fileName)
 	if err != nil {
@@ -195,7 +220,7 @@ func runClean(args []string, o *options) error {
 		if pkg.IsLazyName(cmd.Name) {
 			continue
 		}
-		if len(targets) > 0 && !contains(targets, cmd.Name) {
+		if len(targets) > 0 && !slices.Contains(targets, cmd.Name) {
 			continue
 		}
 		wd := baseDir
@@ -249,10 +274,6 @@ func runClean(args []string, o *options) error {
 		fmt.Println("nothing to clean (no produced files found)")
 	}
 	return nil
-}
-
-func contains(list []string, s string) bool {
-	return slices.Contains(list, s)
 }
 
 func expandGlobs(pattern, dir string) []string {
@@ -480,21 +501,6 @@ func runCompletion(args []string, o *options) error {
 	}
 	fmt.Fprintf(os.Stderr, "# install: source the script from your shell profile\n")
 	return nil
-}
-
-func flagList() [][2]string {
-	fs := flag.NewFlagSet("construct", flag.ContinueOnError)
-	defineFlags(fs, &options{})
-	var out [][2]string
-	fs.VisitAll(func(f *flag.Flag) {
-		name := "--" + f.Name
-		if f.Shorthand != "" {
-			name += "/-" + f.Shorthand
-		}
-		out = append(out, [2]string{name, f.Usage})
-	})
-	sort.Slice(out, func(i, j int) bool { return out[i][0] < out[j][0] })
-	return out
 }
 
 func completionBash() error {

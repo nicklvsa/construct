@@ -3,6 +3,7 @@ package pkg
 import (
 	"errors"
 	"fmt"
+	"os/exec"
 )
 
 type ParseError struct {
@@ -67,4 +68,82 @@ func (e *MissingDependencyError) Error() string {
 		return fmt.Sprintf("command '%s' depends on missing prerequisite '%s' (%s:%d)", e.Command, e.PrereqName, e.File, e.Line)
 	}
 	return fmt.Sprintf("command '%s' depends on missing prerequisite '%s'", e.Command, e.PrereqName)
+}
+
+type FailError struct {
+	Message string
+	File    string
+	Line    int
+}
+
+func (e *FailError) Error() string {
+	if e.File != "" {
+		return fmt.Sprintf("fail: %s (%s:%d)", e.Message, e.File, e.Line)
+	}
+	return fmt.Sprintf("fail: %s", e.Message)
+}
+
+// CommandError is returned when a shell statement exits non-zero.
+type CommandError struct {
+	Cmd      string
+	ExitCode int
+	Stderr   string
+	File     string
+	Line     int
+	TimedOut bool
+	Timeout  string
+}
+
+func (e *CommandError) Error() string {
+	loc := ""
+	if e.File != "" {
+		loc = fmt.Sprintf(" (%s:%d)", e.File, e.Line)
+	}
+	if e.TimedOut {
+		prefix := fmt.Sprintf("command '%s' timed out after %s (exit 124)%s", e.Cmd, e.Timeout, loc)
+		if e.Stderr != "" {
+			return prefix + ": " + e.Stderr
+		}
+		return prefix
+	}
+	if e.Stderr != "" {
+		return fmt.Sprintf("command '%s' failed (exit %d)%s: %s", e.Cmd, e.ExitCode, loc, e.Stderr)
+	}
+	return fmt.Sprintf("command '%s' failed (exit %d)%s", e.Cmd, e.ExitCode, loc)
+}
+
+// KeepGoingError aggregates failures from --keep-going runs.
+type KeepGoingError struct {
+	Errs []error
+}
+
+func (e *KeepGoingError) Error() string {
+	return errors.Join(e.Errs...).Error()
+}
+
+func (e *KeepGoingError) ExitCode() int {
+	for _, err := range e.Errs {
+		if ce, ok := err.(*CommandError); ok {
+			return ce.ExitCode
+		}
+	}
+	return 1
+}
+
+// exitCodeOf maps a command-run error to a process exit code.
+func exitCodeOf(err error) int {
+	if err == nil {
+		return 0
+	}
+	if ee, ok := err.(*exec.ExitError); ok {
+		return ee.ExitCode()
+	}
+	return 1
+}
+
+func exitCodeOfErr(err error) int {
+	if ce, ok := err.(*CommandError); ok {
+		return ce.ExitCode
+	}
+	return 1
 }

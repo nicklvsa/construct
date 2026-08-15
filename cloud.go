@@ -68,6 +68,68 @@ func cloudUsage() error {
 	return exitAt(2, "")
 }
 
+func runCloud(args []string, o *options, inputs *ConstructInput) error {
+	if len(args) == 0 {
+		return cloudUsage()
+	}
+	sub := args[0]
+	rest := args[1:]
+
+	baseDir := filepath.Dir(inputs.FileName)
+	executor := pkg.NewExecutor(&pkg.ParsedData{}, o.debug, false)
+	executor.SetBaseDir(baseDir)
+	if data, err := parseConstfileOptional(inputs.FileName); err != nil {
+		return err
+	} else if data != nil {
+		executor.SetParsedData(data)
+	}
+
+	switch sub {
+	case "list":
+		entries, err := executor.CloudList()
+		if err != nil {
+			return err
+		}
+		if len(entries) == 0 {
+			fmt.Println("no cloud definitions")
+			return nil
+		}
+		fmt.Printf("%-20s %s\n", "name", "statements")
+		for _, en := range entries {
+			fmt.Printf("%-20s %d\n", en.Name, en.BodyStmts)
+		}
+	case "pull":
+		n, err := executor.CloudPull(rest, o.output)
+		if err != nil {
+			return err
+		}
+		target := o.output
+		if target == "" {
+			target = filepath.Join(baseDir, "construct-cloud.json")
+		}
+		fmt.Printf("pulled %d cloud command(s) into %s\n", n, target)
+	case "push":
+		n, err := executor.CloudPush(rest, o.fileName)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("pushed %d command(s) into the cloud file\n", n)
+	case "submit":
+		return runCloudSubmit(rest, o)
+	case "status":
+		return runCloudStatus(rest, o)
+	case "logs":
+		return runCloudLogs(rest, o)
+	case "cancel":
+		return runCloudCancel(rest, o)
+	case "init-actions":
+		return runCloudInitActions(rest)
+	default:
+		return cloudUsage()
+	}
+	return nil
+}
+
 func gitRemoteRepo() (string, error) {
 	repo, err := pkg.RepoFromGitRemote()
 	if err != nil {
@@ -105,9 +167,7 @@ func actionsWorkflowPath(workflow string) string {
 	return filepath.Join(".github", "workflows", workflow)
 }
 
-// ensureActionsWorkflow writes the workflow template when missing; returns
-// whether it created it.
-func ensureActionsWorkflow(workflow string, force bool) (bool, error) {
+func ensureActionsWorkflow(workflow string) (bool, error) {
 	path := actionsWorkflowPath(workflow)
 	if _, err := os.Stat(path); err == nil {
 		return false, nil
@@ -201,7 +261,7 @@ func runCloudSubmit(args []string, o *options) error {
 		if noInit {
 			return fmt.Errorf("%s not found (create it with `construct cloud init-actions`)", actionsWorkflowPath(workflow))
 		}
-		created, err := ensureActionsWorkflow(workflow, force)
+		created, err := ensureActionsWorkflow(workflow)
 		if err != nil {
 			return err
 		}
@@ -239,7 +299,7 @@ func runCloudSubmit(args []string, o *options) error {
 	}
 
 	var runID int64
-	for attempt := 0; attempt < 12; attempt++ {
+	for range 12 {
 		r, err := client.LatestDispatchRun(workflow, t0)
 		if err == nil {
 			runID = r.ID
@@ -390,7 +450,7 @@ func runCloudInitActions(args []string) error {
 			return exitAt(2, "unknown init-actions option %q", a)
 		}
 	}
-	if _, err := ensureActionsWorkflow(workflow, true); err != nil {
+	if _, err := ensureActionsWorkflow(workflow); err != nil {
 		return err
 	}
 	fmt.Printf("%s is ready — commit and push it\n", actionsWorkflowPath(workflow))

@@ -83,7 +83,7 @@ func TestBuildCommand(t *testing.T) {
 }
 
 func defaultShellName() string {
-	name, _ := defaultShell()
+	name, _ := DefaultShell()
 	return name
 }
 

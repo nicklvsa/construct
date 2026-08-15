@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -44,7 +45,7 @@ func (r *ringBuf) write(p []byte) {
 	data := append(r.part, p...)
 	r.part = nil
 	for {
-		i := indexByte(data, '\n')
+		i := bytes.IndexByte(data, '\n')
 		if i < 0 {
 			break
 		}
@@ -68,15 +69,6 @@ func (r *ringBuf) tail(n int) []string {
 		return r.lines
 	}
 	return r.lines[len(r.lines)-n:]
-}
-
-func indexByte(b []byte, c byte) int {
-	for i := range b {
-		if b[i] == c {
-			return i
-		}
-	}
-	return -1
 }
 
 type dashboard struct {
@@ -240,11 +232,13 @@ func (d *dashboard) render(w, h int) string {
 		if st := d.statusText(r); st != "" {
 			line += st
 		}
-		b.WriteString(line + "\r\n")
+		b.WriteString(line)
+		b.WriteString("\r\n")
 	}
 
 	if w > 0 {
-		b.WriteString(strings.Repeat("─", minInt(w, 72)) + "\r\n")
+		b.WriteString(strings.Repeat("─", min(w, 72)))
+		b.WriteString("\r\n")
 	}
 
 	logH := h - len(visible) - 4
@@ -262,20 +256,14 @@ func (d *dashboard) render(w, h int) string {
 		if w > 2 && len(l) > w-2 {
 			l = l[:w-2]
 		}
-		b.WriteString(l + "\r\n")
+		b.WriteString(l)
+		b.WriteString("\r\n")
 	}
 	for i := len(lines); i < logH; i++ {
 		b.WriteString("\r\n")
 	}
 	b.WriteString("j/k select · f follow · q detach · Ctrl-C cancel")
 	return b.String()
-}
-
-func minInt(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }
 
 func (d *dashboard) start() {
