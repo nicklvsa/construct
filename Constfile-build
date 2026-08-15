@@ -10,7 +10,7 @@ manual build-construct {
 
 # Installs the extension's npm dependencies.
 install in editor/vscode {
-    $ npm install --silent
+    retry<2, 1s> $ npm install --silent
 }
 
 # Packages and installs the host-platform extension.
