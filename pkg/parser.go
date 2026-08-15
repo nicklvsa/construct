@@ -181,6 +181,8 @@ type Variable struct {
 	Scope  string   `json:"scope"`
 	IsList bool     `json:"is_list,omitempty"`
 	List   []string `json:"list,omitempty"`
+
+	refs []string // &names in the raw value, for cache-key scoping
 }
 
 func (p *ParsedData) SetVariableValue(name, scope string, v Value) {
@@ -284,26 +286,29 @@ type BodyStatement struct {
 }
 
 type Command struct {
-	Name            string            `json:"name"`
-	SourceFile      string            `json:"source_file,omitempty"`
-	CloudAccessible bool              `json:"cloud_accessible"`
-	IsDefault       bool              `json:"is_default"`
-	LazyEval        *LazyOutput       `json:"lazy_output"`
-	IsPrereq        bool              `json:"is_prereq"`
-	PrereqOutput    []string          `json:"prereq_output"`
-	NamedOutput     map[string]string `json:"named_output"`
-	Arguments       []*Argument       `json:"arguments"`
-	Prereqs         []string          `json:"prereqs"`
-	PrereqDirs      map[string]string `json:"prereq_dirs,omitempty"`
-	FileDeps        []string          `json:"file_deps"`
-	Produces        []string          `json:"produces,omitempty"`
-	OnChange        []string          `json:"onchange,omitempty"`
-	PrereqCmds      []*Command        `json:"prereq_cmds"`
-	WorkDir         string            `json:"work_dir"`
-	Timeout         string            `json:"timeout,omitempty"`
-	Body            []BodyStatement   `json:"body"`
-	SourceLine      int               `json:"source_line,omitempty"`
-	Description     string            `json:"description,omitempty"`
+	Name            string      `json:"name"`
+	SourceFile      string      `json:"source_file,omitempty"`
+	CloudAccessible bool        `json:"cloud_accessible"`
+	IsDefault       bool        `json:"is_default"`
+	LazyEval        *LazyOutput `json:"lazy_output"`
+	IsPrereq        bool        `json:"is_prereq"`
+
+	cacheGlobals      []string          // globals the command's refs reach, for cache keys
+	cacheGlobalsExact bool              // false (hand-built data) keys on every global
+	PrereqOutput      []string          `json:"prereq_output"`
+	NamedOutput       map[string]string `json:"named_output"`
+	Arguments         []*Argument       `json:"arguments"`
+	Prereqs           []string          `json:"prereqs"`
+	PrereqDirs        map[string]string `json:"prereq_dirs,omitempty"`
+	FileDeps          []string          `json:"file_deps"`
+	Produces          []string          `json:"produces,omitempty"`
+	OnChange          []string          `json:"onchange,omitempty"`
+	PrereqCmds        []*Command        `json:"prereq_cmds"`
+	WorkDir           string            `json:"work_dir"`
+	Timeout           string            `json:"timeout,omitempty"`
+	Body              []BodyStatement   `json:"body"`
+	SourceLine        int               `json:"source_line,omitempty"`
+	Description       string            `json:"description,omitempty"`
 }
 
 func NewParser(file string) (*Parser, error) {
@@ -489,8 +494,10 @@ func (p *Parser) parseVar(line string, scope string, lineNum int) error {
 	var variableValue string
 	var isList bool
 	var list []string
+	var refs []string
 	if len(pieces) > 1 {
 		var err error
+		refs = VarRefNames(pieces[1])
 		variableValue, isList, list, err = p.evalVarValue(pieces[1], &variableName, &scope, lineNum)
 		if err != nil {
 			return fmt.Errorf("variable %q: %w", variableName, err)
@@ -503,6 +510,7 @@ func (p *Parser) parseVar(line string, scope string, lineNum int) error {
 		Scope:  scope,
 		IsList: isList,
 		List:   list,
+		refs:   refs,
 	})
 
 	return nil
@@ -529,13 +537,10 @@ func ParseCommandName(line string) string {
 	prodIdx := findProducesIdx(line)
 	ocIdx := findTopLevelKeyword(line, " onchange ")
 	timeoutIdx := findTopLevelKeyword(line, " timeout ")
-	terminators := []rune{'(', '<', '{'}
 	endIdx := len(line)
-	for i, r := range line {
-		found := slices.Contains(terminators, r)
-		if found {
+	for _, c := range [3]byte{'(', '<', '{'} {
+		if i := strings.IndexByte(line, c); i >= 0 && i < endIdx {
 			endIdx = i
-			break
 		}
 	}
 	if inIdx >= 0 && inIdx < endIdx {
@@ -2447,6 +2452,93 @@ func (p *Parser) classifyPrereqs() error {
 	return nil
 }
 
+// computeCacheGlobals scopes each command's cache key to the global variables
+// its references actually reach (through variable-to-variable references), so
+// unrelated global changes do not invalidate its file-dep cache. Commands
+// built without the parser key on every global (conservative default).
+func (p *Parser) computeCacheGlobals() {
+	refsByName := make(map[string][]string, len(p.Data.Variables))
+	globalNames := make(map[string]bool, len(p.Data.Variables))
+	for _, v := range p.Data.Variables {
+		refsByName[v.Name] = append(refsByName[v.Name], v.refs...)
+		if v.Scope == "global" {
+			globalNames[v.Name] = true
+		}
+	}
+
+	for _, cmd := range p.Data.Commands {
+		seed := map[string]bool{}
+		collectStmtRefs(cmd.Body, seed)
+		for _, str := range cmd.Produces {
+			for _, n := range VarRefNames(str) {
+				seed[n] = true
+			}
+		}
+		for _, str := range cmd.OnChange {
+			for _, n := range VarRefNames(str) {
+				seed[n] = true
+			}
+		}
+		if cmd.WorkDir != "" {
+			for _, n := range VarRefNames(cmd.WorkDir) {
+				seed[n] = true
+			}
+		}
+
+		var globals []string
+		visited := make(map[string]bool, len(seed))
+		queue := make([]string, 0, len(seed))
+		for n := range seed {
+			queue = append(queue, n)
+		}
+		for len(queue) > 0 {
+			n := queue[len(queue)-1]
+			queue = queue[:len(queue)-1]
+			if visited[n] {
+				continue // circular variable references terminate here
+			}
+			visited[n] = true
+			if globalNames[n] {
+				globals = append(globals, n)
+			}
+			queue = append(queue, refsByName[n]...)
+		}
+		slices.Sort(slices.Compact(globals))
+		cmd.cacheGlobals, cmd.cacheGlobalsExact = globals, true
+	}
+}
+
+// collectStmtRefs gathers every &name referenced by a statement tree.
+func collectStmtRefs(stmts []BodyStatement, out map[string]bool) {
+	for i := range stmts {
+		stmt := &stmts[i]
+		for _, str := range []string{stmt.Shell, stmt.Cond, stmt.LoopItems, stmt.SwitchExpr, stmt.Message, stmt.BuiltinArgs, stmt.Dir} {
+			for _, n := range VarRefNames(str) {
+				out[n] = true
+			}
+		}
+		for _, pair := range stmt.Env {
+			if _, val, ok := strings.Cut(pair, "="); ok {
+				for _, n := range VarRefNames(val) {
+					out[n] = true
+				}
+			}
+		}
+		for _, c := range stmt.Cases {
+			for _, v := range c.Values {
+				for _, n := range VarRefNames(v) {
+					out[n] = true
+				}
+			}
+			collectStmtRefs(c.Body, out)
+		}
+		collectStmtRefs(stmt.ThenBody, out)
+		collectStmtRefs(stmt.ElseBody, out)
+		collectStmtRefs(stmt.LoopBody, out)
+		collectStmtRefs(stmt.OnFailBody, out)
+	}
+}
+
 func (p *Parser) Parse() (*ParsedData, error) {
 	if err := p.parseLines(); err != nil {
 		return nil, err
@@ -2478,6 +2570,7 @@ func (p *Parser) Parse() (*ParsedData, error) {
 	if err := p.classifyPrereqs(); err != nil {
 		return nil, err
 	}
+	p.computeCacheGlobals()
 
 	if err := p.detectCircularDependencies(); err != nil {
 		return nil, err

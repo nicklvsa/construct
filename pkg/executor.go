@@ -525,9 +525,16 @@ func (e *Executor) resolveWorkDir(dir string) string {
 	return filepath.Join(e.baseDir, dir)
 }
 
+// EvaluateCommand runs command as a top-level target.
 func (e *Executor) EvaluateCommand(command *Command) error {
+	return e.evaluate(command, "", false)
+}
+
+// evaluate runs command once per Execute call; prereqDir/isPrereq describe
+// how the first caller reached it, so the shared Command is never mutated.
+func (e *Executor) evaluate(command *Command, prereqDir string, isPrereq bool) error {
 	if e.runs == nil {
-		return e.executeCommand(command)
+		return e.executeCommand(command, prereqDir, isPrereq)
 	}
 
 	e.mu.Lock()
@@ -540,16 +547,18 @@ func (e *Executor) EvaluateCommand(command *Command) error {
 	e.runs[command.Name] = r
 	e.mu.Unlock()
 
-	r.err = e.executeCommand(command)
+	r.err = e.executeCommand(command, prereqDir, isPrereq)
 	close(r.done)
 	return r.err
 }
 
-func (e *Executor) executeCommand(command *Command) error {
+func (e *Executor) executeCommand(command *Command, prereqDir string, isPrereq bool) error {
 	start := time.Now()
-	e.mu.Lock()
 	workDir := command.WorkDir
-	isPrereq := command.IsPrereq
+	if prereqDir != "" {
+		workDir = prereqDir
+	}
+	e.mu.Lock()
 	if isPrereq {
 		command.PrereqOutput = []string{}
 	}
@@ -606,6 +615,7 @@ func (e *Executor) executeCommand(command *Command) error {
 	ctx.env = &cmdEnv
 
 	var prereqCmds []*Command
+	var prereqDirs []string
 	for _, prereqName := range command.Prereqs {
 		prereqName = strings.TrimSpace(prereqName)
 		if prereqName == "" {
@@ -617,13 +627,7 @@ func (e *Executor) executeCommand(command *Command) error {
 			return err
 		}
 
-		e.mu.Lock()
-		preCmd.IsPrereq = true
-		if dir := command.PrereqDirs[prereqName]; dir != "" {
-			preCmd.WorkDir = dir
-		}
-		e.mu.Unlock()
-
+		prereqDirs = append(prereqDirs, command.PrereqDirs[prereqName])
 		prereqCmds = append(prereqCmds, preCmd)
 	}
 
@@ -638,11 +642,11 @@ func (e *Executor) executeCommand(command *Command) error {
 		var wg sync.WaitGroup
 		for i, preCmd := range prereqCmds {
 			wg.Add(1)
-			go func(i int, pc *Command) {
+			go func(i int, pc *Command, dir string) {
 				defer wg.Done()
-				errs[i] = e.EvaluateCommand(pc)
+				errs[i] = e.evaluate(pc, dir, true)
 				results[i] = pc
-			}(i, preCmd)
+			}(i, preCmd, prereqDirs[i])
 		}
 		wg.Wait()
 		for _, err := range errs {
@@ -652,8 +656,8 @@ func (e *Executor) executeCommand(command *Command) error {
 		}
 		command.PrereqCmds = append(command.PrereqCmds, results...)
 	} else {
-		for _, preCmd := range prereqCmds {
-			if err := e.EvaluateCommand(preCmd); err != nil {
+		for i, preCmd := range prereqCmds {
+			if err := e.evaluate(preCmd, prereqDirs[i], true); err != nil {
 				return err
 			}
 			command.PrereqCmds = append(command.PrereqCmds, preCmd)
@@ -2431,7 +2435,13 @@ func (e *Executor) cacheManifest() fileCache {
 }
 
 func (e *Executor) cacheKey(cmd *Command) string {
-	parts := []string{cmd.Name}
+	name := cmd.Name
+	if cmd.SourceFile != "" {
+		// Different Constfiles share one cache dir; same-named commands in
+		// different files must not collide.
+		name += "@" + filepath.Base(cmd.SourceFile)
+	}
+	parts := []string{name}
 	for _, arg := range cmd.Arguments {
 		v := arg.Default
 		if e.flagSet != nil {
@@ -2439,8 +2449,15 @@ func (e *Executor) cacheKey(cmd *Command) string {
 		}
 		parts = append(parts, arg.Name+"="+v)
 	}
-	for name, val := range e.StructuredParse.GlobalVariableSnapshot() {
-		parts = append(parts, "var:"+name+"="+val)
+	snapshot := e.StructuredParse.GlobalVariableSnapshot()
+	if cmd.cacheGlobalsExact {
+		for _, g := range cmd.cacheGlobals {
+			parts = append(parts, "var:"+g+"="+snapshot[g])
+		}
+	} else {
+		for name, val := range snapshot {
+			parts = append(parts, "var:"+name+"="+val)
+		}
 	}
 	sort.Strings(parts[1:])
 	return strings.Join(parts, "|")

@@ -1140,3 +1140,134 @@ func TestConcurrentSharedPrereq(t *testing.T) {
 		t.Fatalf("Execute: %v", err)
 	}
 }
+
+func TestPrereqModeNotStickyAcrossRuns(t *testing.T) {
+	shared := &Command{Name: "shared", Body: shellBody("echo shared")}
+	data := &ParsedData{
+		Commands: []*Command{
+			{Name: "parent", Prereqs: []string{"shared"}},
+			shared,
+		},
+	}
+	data.buildIndexMaps()
+	e := NewExecutor(data, false, false)
+
+	if err := e.Execute([]string{"parent"}); err != nil {
+		t.Fatalf("first execute: %v", err)
+	}
+	if len(shared.PrereqOutput) != 1 {
+		t.Fatalf("prereq output after prereq run = %v, want 1 entry", shared.PrereqOutput)
+	}
+
+	// Running `shared` as a top-level target in a fresh run must stream its
+	// output, not capture it again (IsPrereq used to be sticky).
+	out := captureStdout(t, func() {
+		if err := e.Execute([]string{"shared"}); err != nil {
+			t.Fatalf("second execute: %v", err)
+		}
+	})
+	if !strings.Contains(out, "shared") {
+		t.Errorf("top-level rerun streamed %q, want the shared output", out)
+	}
+	if shared.IsPrereq {
+		t.Error("shared.IsPrereq was mutated by the executor")
+	}
+}
+
+func captureStdout(t *testing.T, fn func()) string {
+	t.Helper()
+	old := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdout = w
+	defer func() { os.Stdout = old }()
+	fn()
+	w.Close()
+	out, _ := io.ReadAll(r)
+	return string(out)
+}
+
+func TestPrereqWorkDirNotMutated(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "sub"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	shared := &Command{Name: "shared", Body: shellBody("echo shared")}
+	data := &ParsedData{
+		Commands: []*Command{
+			{Name: "parent", Prereqs: []string{"shared"}, PrereqDirs: map[string]string{"shared": "sub"}},
+			shared,
+		},
+	}
+	data.buildIndexMaps()
+	e := NewExecutor(data, false, false)
+	e.SetBaseDir(dir)
+	if err := e.Execute([]string{"parent"}); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if shared.WorkDir != "" {
+		t.Errorf("shared.WorkDir mutated to %q; per-parent dirs must not touch the shared command", shared.WorkDir)
+	}
+}
+
+func TestCacheKeyIncludesSourceFile(t *testing.T) {
+	e := NewExecutor(&ParsedData{}, false, false)
+	a := &Command{Name: "build", SourceFile: "/x/Constfile"}
+	b := &Command{Name: "build", SourceFile: "/x/Constfile-build"}
+	if e.cacheKey(a) == e.cacheKey(b) {
+		t.Error("same-named commands in different Constfiles collide in the cache key")
+	}
+}
+
+func TestCacheKeyScopedToReferencedGlobals(t *testing.T) {
+	dir := t.TempDir()
+	dep := filepath.Join(dir, "dep.txt")
+	os.WriteFile(dep, []byte("v1\n"), 0644)
+
+	p := NewParserFromContent("Constfile", "var used = a\nvar unused = b\n\ncmd < dep.txt {\n  $ echo &used\n}\n")
+	data, err := p.Parse()
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	cmd, _ := data.GetCommand("cmd")
+	if !cmd.cacheGlobalsExact || len(cmd.cacheGlobals) != 1 || cmd.cacheGlobals[0] != "used" {
+		t.Fatalf("cacheGlobals = %v (exact=%v), want [used]", cmd.cacheGlobals, cmd.cacheGlobalsExact)
+	}
+
+	e := NewExecutor(data, false, false)
+	e.SetBaseDir(dir)
+	e.SetRecordRuns(true)
+	if err := e.Execute([]string{"cmd"}); err != nil {
+		t.Fatalf("first run: %v", err)
+	}
+
+	data.SetVariable("unused", "global", "changed")
+	if err := e.Execute([]string{"cmd"}); err != nil {
+		t.Fatalf("second run: %v", err)
+	}
+	if rec := e.RunRecords()["cmd"]; rec.Status != "skipped" {
+		t.Errorf("unrelated global change invalidated the cache: status %q", rec.Status)
+	}
+
+	data.SetVariable("used", "global", "changed")
+	if err := e.Execute([]string{"cmd"}); err != nil {
+		t.Fatalf("third run: %v", err)
+	}
+	if rec := e.RunRecords()["cmd"]; rec.Status == "skipped" {
+		t.Error("referenced global change did not invalidate the cache")
+	}
+}
+
+func TestCacheGlobalsClosureThroughVariables(t *testing.T) {
+	p := NewParserFromContent("Constfile", "var base = 1\nvar derived = &base\n\ncmd {\n  $ echo &derived\n}\n")
+	data, err := p.Parse()
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	cmd, _ := data.GetCommand("cmd")
+	if !cmd.cacheGlobalsExact || len(cmd.cacheGlobals) != 2 {
+		t.Errorf("cacheGlobals = %v, want base and derived via closure", cmd.cacheGlobals)
+	}
+}

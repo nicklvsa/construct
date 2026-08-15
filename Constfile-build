@@ -16,6 +16,7 @@ install in editor/vscode {
 # Packages and installs the host-platform extension.
 build-ext in editor/vscode < build-lsp, install {
     var vsix_version = $ cd editor/vscode && node -p "require('./package.json').version"
+    rm server/construct-lsp.exe
     timeout 10m $ npx @vscode/vsce@latest package --no-yarn
     $ code --install-extension constfile-&vsix_version.vsix --force as final_out
 }

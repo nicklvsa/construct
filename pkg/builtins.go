@@ -17,7 +17,9 @@ import (
 func (e *Executor) runBuiltin(ctx *execContext, stmt BodyStatement) error {
 	ignoreErr := stmt.Tolerant
 	parts := splitArgs(stmt.BuiltinArgs)
+	release := e.acquire()
 	err := e.builtinExec(ctx, stmt.Shell, parts)
+	release()
 	code := 0
 	if err != nil {
 		code = 1

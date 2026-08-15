@@ -1,6 +1,7 @@
 package pkg
 
 import (
+	"fmt"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -1412,5 +1413,24 @@ func TestResolveCloudFileDefaultName(t *testing.T) {
 	t.Setenv("CONSTRUCT_CLOUD_FILE", "custom.json")
 	if got := e.resolveCloudFile(); got != "custom.json" {
 		t.Errorf("resolveCloudFile with env override = %q, want custom.json", got)
+	}
+}
+
+func BenchmarkParse(b *testing.B) {
+	var sb strings.Builder
+	sb.WriteString("var os = linux\nvar arch = arm64\n\n")
+	for i := 0; i < 250; i++ {
+		fmt.Fprintf(&sb, "build%d (env, opt region) produces dist/app%d < src/main.go in cmd%d {\n", i, i, i%10)
+		sb.WriteString("    if \"&os\" == \"linux\" && \"&arch\" == \"arm64\" {\n")
+		sb.WriteString("        for f in src/*.go {\n            $ echo building &f\n        }\n    }\n")
+		sb.WriteString("    switch \"&os\" {\n        case \"linux\" { $ echo lnx }\n        default { $ echo other }\n    }\n}\n\n")
+	}
+	content := sb.String()
+	b.SetBytes(int64(len(content)))
+
+	for b.Loop() {
+		if _, err := NewParserFromContent("Constfile", content).Parse(); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
