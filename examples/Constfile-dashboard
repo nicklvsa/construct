@@ -9,6 +9,8 @@
 // Dashboard keys: j/k select a command, f follow the running one,
 // q detach (the build keeps going), Ctrl-C cancel.
 
+var flaky = false
+
 gen-assets {
     $ echo "generating assets"
     $ sleep 0.4
@@ -39,7 +41,7 @@ package produces dist/release.tar < flaky-check {
     $ mkdir -p dist
     $ echo "packaged" > dist/release.tar
     $ sleep 0.3
-    $ echo "dist/release.tar written"
+    $ echo "dist/release.tar written" 
 }
 
 # Skippable step: cached on rerun, shown as skipped in the dashboard.

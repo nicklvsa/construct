@@ -1226,8 +1226,6 @@ func (p *Parser) parseBodyStatements(raw []rawLine, scope string) ([]BodyStateme
 
 var builtinCommands = []string{"cp", "rm", "mkdir", "touch", "download", "extract"}
 
-// Keywords that only make sense in a command header or at the top level;
-// bare body lines starting with them are almost always misplaced.
 var headerOnlyKeywords = []string{"manual", "produces", "container", "onchange", "import"}
 
 func parseBuiltinLine(line string) (name, args string, tolerant bool, ok bool) {
@@ -1783,9 +1781,6 @@ func parseInvokeArgs(s string) (name string, args []string) {
 	return name, pairs
 }
 
-// parseParallelBlock handles "parallel [jobs] for ..." / "parallel [jobs] matrix ..."
-// where the optional <N> modifier sets the iteration cap. When the line doesn't
-// introduce a for/matrix loop it reports handled=false so dispatch falls through.
 func (p *Parser) parseParallelBlock(line string, raw []rawLine, scope string, lineNum int) (BodyStatement, int, bool, error) {
 	rest := strings.TrimLeft(line[len("parallel"):], " \t")
 	if rest == "" {

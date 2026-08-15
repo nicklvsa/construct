@@ -314,3 +314,75 @@ func TestLintStatementKeywordCommands(t *testing.T) {
 		}
 	}
 }
+
+func TestLintUnknownVarRefs(t *testing.T) {
+	issues := lintText(t, "var version = 1\nbuild {\n    $ echo &vresion\n}\n")
+	found := false
+	for _, is := range issues {
+		if is.Severity == LintWarning && strings.Contains(is.Message, "unknown reference `&vresion`") {
+			found = true
+			if is.Line != 2 {
+				t.Errorf("issue line = %d, want 2", is.Line)
+			}
+		}
+	}
+	if !found {
+		t.Errorf("no unknown-ref warning in %v", issues)
+	}
+}
+
+func TestLintUnknownVarRefsKnownShapes(t *testing.T) {
+	in := `var list = [a, b]
+var flag = on
+gen {
+    $ echo one as out
+}
+use (env) < gen {
+    for x in &list {
+        if "&x" == "a" {
+            $ echo &env &x &gen.out &gen.0 &flag &last.exit
+        }
+    }
+}
+`
+	for _, is := range lintText(t, in) {
+		if strings.Contains(is.Message, "unknown reference") {
+			t.Errorf("false positive: %v", is)
+		}
+	}
+}
+
+func TestLintCaseWithoutValues(t *testing.T) {
+	issues := lintText(t, `build {
+    switch "&x" {
+        case {
+            $ echo hi
+        }
+        default {
+            $ echo bye
+        }
+    }
+}`)
+	found := false
+	for _, is := range issues {
+		if is.Severity == LintWarning && strings.Contains(is.Message, "case without values never matches") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("no empty-case warning in %v", issues)
+	}
+}
+
+func TestLintDuplicateNamedOutputs(t *testing.T) {
+	issues := lintText(t, "gen {\n    $ echo a as out\n    $ echo b as out\n}\n")
+	found := false
+	for _, is := range issues {
+		if is.Severity == LintError && strings.Contains(is.Message, `duplicate named output "out"`) {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("no duplicate-output error in %v", issues)
+	}
+}

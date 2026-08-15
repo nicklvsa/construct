@@ -50,6 +50,157 @@ func Lint(lines []string, data *ParsedData, baseDir string) []LintIssue {
 	issues = append(issues, lintLoopControl(data)...)
 	issues = append(issues, lintRefTrailingHyphen(lines, data)...)
 	issues = append(issues, lintStatementKeywordCommands(data)...)
+	issues = append(issues, lintUnknownVarRefs(lines, data)...)
+	issues = append(issues, lintSwitchAndOutputs(data)...)
+	return issues
+}
+
+// knownRefNames unions every name a &ref can resolve to, across commands.
+func knownRefNames(data *ParsedData) map[string]bool {
+	known := map[string]bool{"last": true, "fail": true}
+	for _, v := range data.Variables {
+		known[v.Name] = true
+	}
+	for _, s := range data.StateDecls {
+		known[s.Name] = true
+	}
+	var walk func(body []BodyStatement)
+	walk = func(body []BodyStatement) {
+		for _, stmt := range body {
+			switch stmt.Type {
+			case StmtFor:
+				known[stmt.LoopVar] = true
+				if stmt.LoopIndex != "" {
+					known[stmt.LoopIndex] = true
+				}
+				walk(stmt.LoopBody)
+			case StmtEnv:
+				for _, pair := range stmt.Env {
+					if k, _, ok := strings.Cut(pair, "="); ok {
+						known[strings.TrimSpace(k)] = true
+					}
+				}
+			case StmtInput:
+				known[stmt.Shell] = true
+			case StmtInvoke:
+				if stmt.OutputName != "" {
+					known[stmt.OutputName] = true
+				}
+			case StmtIf:
+				walk(stmt.ThenBody)
+				walk(stmt.ElseBody)
+			case StmtOnFail:
+				walk(stmt.OnFailBody)
+			case StmtSwitch:
+				for _, c := range stmt.Cases {
+					walk(c.Body)
+				}
+			case StmtInDir, StmtLock:
+				walk(stmt.ThenBody)
+			}
+		}
+	}
+	for _, cmd := range data.Commands {
+		for _, arg := range cmd.Arguments {
+			known[arg.Name] = true
+		}
+		walk(cmd.Body)
+	}
+	return known
+}
+
+func lintUnknownVarRefs(lines []string, data *ParsedData) []LintIssue {
+	known := knownRefNames(data)
+	var issues []LintIssue
+	for lineIdx, raw := range lines {
+		line := strings.TrimSpace(raw)
+		if strings.HasPrefix(line, "#") || strings.HasPrefix(line, "//") {
+			continue
+		}
+		searchFrom := 0
+		for {
+			ampIdx := strings.IndexByte(raw[searchFrom:], '&')
+			if ampIdx < 0 {
+				break
+			}
+			absIdx := searchFrom + ampIdx
+			searchFrom = absIdx + 1
+			if absIdx > 0 && raw[absIdx-1] == '\\' {
+				continue
+			}
+			name, nameLen := refNameAt(raw, absIdx)
+			if name == "" {
+				continue
+			}
+			searchFrom = absIdx + 1 + nameLen
+			first := name
+			if dot := strings.IndexByte(name, '.'); dot > 0 {
+				first = name[:dot]
+			}
+			if known[name] || known[first] {
+				continue
+			}
+			if _, err := data.GetCommand(first); err == nil {
+				continue // prereq-output ref; other rules cover it
+			}
+			issues = append(issues, LintIssue{
+				Line: lineIdx, Col: absIdx, EndCol: absIdx + nameLen,
+				Severity: LintWarning,
+				Message:  fmt.Sprintf("unknown reference `&%s` — no variable, argument, or command matches; it substitutes to empty", name),
+			})
+		}
+	}
+	return issues
+}
+
+func lintSwitchAndOutputs(data *ParsedData) []LintIssue {
+	var issues []LintIssue
+	var walk func(body []BodyStatement)
+	walk = func(body []BodyStatement) {
+		seen := map[string]bool{}
+		for _, stmt := range body {
+			switch stmt.Type {
+			case StmtShell:
+				if stmt.OutputName != "" {
+					if seen[stmt.OutputName] {
+						issues = append(issues, LintIssue{
+							Line: max(stmt.SourceLine-1, 0), Col: 0, EndCol: 0,
+							Severity: LintError,
+							Message:  fmt.Sprintf("duplicate named output %q — `&cmd.%s` resolves to only one of them", stmt.OutputName, stmt.OutputName),
+						})
+					}
+					seen[stmt.OutputName] = true
+				}
+			case StmtInvoke:
+				if stmt.OutputName != "" {
+					seen[stmt.OutputName] = true
+				}
+			case StmtSwitch:
+				for _, c := range stmt.Cases {
+					if !c.IsDefault && len(c.Values) == 0 {
+						issues = append(issues, LintIssue{
+							Line: max(c.SourceLine-1, 0), Col: 0, EndCol: 0,
+							Severity: LintWarning,
+							Message:  "case without values never matches",
+						})
+					}
+					walk(c.Body)
+				}
+			case StmtIf:
+				walk(stmt.ThenBody)
+				walk(stmt.ElseBody)
+			case StmtFor:
+				walk(stmt.LoopBody)
+			case StmtOnFail:
+				walk(stmt.OnFailBody)
+			case StmtInDir, StmtLock:
+				walk(stmt.ThenBody)
+			}
+		}
+	}
+	for _, cmd := range data.Commands {
+		walk(cmd.Body)
+	}
 	return issues
 }
 
@@ -63,9 +214,6 @@ var statementKeywordNames = map[string]bool{
 	"container": true, "onchange": true, "import": true,
 }
 
-// lintStatementKeywordCommands flags headers like `env { ... }` or
-// `onfail { ... }` at the top level, which parse as commands literally
-// named after the statement keyword the writer meant to use in a body.
 func lintStatementKeywordCommands(data *ParsedData) []LintIssue {
 	var issues []LintIssue
 	for _, cmd := range data.Commands {
@@ -81,9 +229,6 @@ func lintStatementKeywordCommands(data *ParsedData) []LintIssue {
 	return issues
 }
 
-// lintHeaderKeywordMisuse flags header modifiers written after the
-// prerequisite list, where they are silently treated as prerequisites or
-// file deps, and header timeouts that never parse.
 func lintHeaderKeywordMisuse(lines []string, data *ParsedData) []LintIssue {
 	var issues []LintIssue
 	for _, cmd := range data.Commands {
@@ -145,8 +290,6 @@ func lintHeaderKeywordMisuse(lines []string, data *ParsedData) []LintIssue {
 	return issues
 }
 
-// lintStatementPrefixes catches `timeout`/`retry` statements whose value is
-// malformed — the parser silently runs them as plain shell lines instead.
 func lintStatementPrefixes(lines []string) []LintIssue {
 	var issues []LintIssue
 	for lineIdx, raw := range lines {
@@ -189,8 +332,6 @@ func lintStatementPrefixes(lines []string) []LintIssue {
 	return issues
 }
 
-// lintLoopControl flags loop-control statements outside any loop and
-// `break` inside a parallel loop, which cannot stop concurrent iterations.
 func lintLoopControl(data *ParsedData) []LintIssue {
 	var issues []LintIssue
 	var walk func(body []BodyStatement, inLoop, parallel bool)
@@ -233,9 +374,6 @@ func lintLoopControl(data *ParsedData) []LintIssue {
 	return issues
 }
 
-// lintRefTrailingHyphen flags references like `&svc-` where the hyphen is
-// part of the reference name — usually the writer meant `&svc` followed by
-// a literal hyphen.
 func lintRefTrailingHyphen(lines []string, data *ParsedData) []LintIssue {
 	known := func(name string) bool {
 		if _, err := data.GetCommand(name); err == nil {

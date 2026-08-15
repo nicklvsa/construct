@@ -278,7 +278,6 @@ func minInt(a, b int) int {
 	return b
 }
 
-// start takes over the terminal until the dashboard is detached or stopped.
 func (d *dashboard) start() {
 	old, err := term.MakeRaw(int(os.Stdin.Fd()))
 	if err != nil {
@@ -359,7 +358,6 @@ func (d *dashboard) key(k byte) {
 	}
 }
 
-// detachLocked restores normal output while the build keeps running.
 func (d *dashboard) detachLocked() {
 	d.stopOnce.Do(func() {
 		if d.restoreTerm != nil {

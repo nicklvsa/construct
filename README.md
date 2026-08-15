@@ -740,8 +740,10 @@ misused keywords before they silently misparse: `produces`/`container`/
 prerequisites instead of modifiers), header or statement `timeout` values
 that are not valid durations, `retry` counts that are not positive
 integers, `break`/`continue` outside a loop, `break` inside a `parallel`
-loop (it cannot stop concurrent iterations), and references like `&svc-`
-whose trailing `-` is swallowed into the name. `parallel<4>` on a
+loop (it cannot stop concurrent iterations), references like `&svc-`
+whose trailing `-` is swallowed into the name, `&name` references that
+resolve to nothing (typos — they substitute to empty silently), `case`
+arms without values, and duplicate named outputs. `parallel<4>` on a
 non-loop statement is a parse error. Exit code 1 on errors (or warnings
 with `--strict`); `--json` emits machine-readable issues — both are
 CI-friendly.
