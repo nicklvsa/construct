@@ -603,6 +603,9 @@ func commandHover(c *pkg.Command) string {
 	if c.Container != "" {
 		fmt.Fprintf(&b, "- container: `%s`\n", c.Container)
 	}
+	if c.Manual {
+		b.WriteString("- manual entry point (excluded from unreferenced checks)\n")
+	}
 	if c.Timeout != "" {
 		fmt.Fprintf(&b, "- timeout: `%s`\n", c.Timeout)
 	}
@@ -1353,6 +1356,7 @@ func isIdentRune(r rune) bool {
 // commandNameAtLine guesses the header's command name via the parser's own
 // header logic. Callers must validate with GetCommand; shell lines match nothing.
 func commandNameAtLine(line string) (string, bool) {
+	line, _ = pkg.StripManual(line)
 	name := pkg.ParseCommandName(line)
 	if name == "" {
 		return "", false
@@ -1773,6 +1777,8 @@ func keywordHover(word string) (string, bool) {
 		return "`import \"lib.constfile\" as lib`\n\nMerges another file's commands and variables, optionally under a namespace (`lib.cmd`, `&lib.var`).", true
 	case "produces":
 		return "`produces <files>`\n\nDeclares the command's outputs. While the artifacts exist and are newer than the command's file dependencies, the command is skipped as up to date.", true
+	case "manual":
+		return "`manual <command>`\n\nMarks the command as an intentionally unreferenced entry point — meant to be invoked by name or via `--choose`, so lint and doctor stay quiet about it.", true
 	case "container":
 		return "`container \"image\"`\n\nRuns the command's shell statements inside the image via docker/podman, with the workspace mounted at `/work`. Builtins (`cp`, `rm`, …) still run on the host.", true
 	case "onchange":

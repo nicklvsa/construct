@@ -560,7 +560,7 @@ func TestParseCommandBodyBraceInString(t *testing.T) {
 	lines := strings.Split(input, "\n")
 	parser := &Parser{Data: &ParsedData{}, Lines: lines}
 
-	_, err := parser.parseCommand(0, input, false, 1, "")
+	_, err := parser.parseCommand(0, input, false, false, 1, "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

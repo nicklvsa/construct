@@ -1151,7 +1151,7 @@ func runDoctor(o *options, inputs *ConstructInput) error {
 		}
 	}
 	for _, cmd := range data.Commands {
-		if cmd.Name == "_" || pkg.IsLazyName(cmd.Name) {
+		if cmd.Name == "_" || cmd.Manual || pkg.IsLazyName(cmd.Name) {
 			continue
 		}
 		if !referenced[cmd.Name] {

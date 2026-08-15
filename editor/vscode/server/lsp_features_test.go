@@ -566,3 +566,14 @@ func TestLSPContainerHeader(t *testing.T) {
 		t.Errorf("hover over container header = %q (ok=%v)", msg, ok)
 	}
 }
+
+func TestLSPManualHeader(t *testing.T) {
+	text := "manual build-construct {\n    $ go build -o construct .\n}\n"
+	msg, ok := hoverAt(t, text, 0, 8)
+	if !ok || !strings.Contains(msg, "**build-construct**") || !strings.Contains(msg, "manual entry point") {
+		t.Errorf("hover over manual header = %q (ok=%v)", msg, ok)
+	}
+	if _, ok := keywordHover("manual"); !ok {
+		t.Error("keywordHover(manual) missing")
+	}
+}

@@ -222,6 +222,27 @@ func (p *ParsedData) LookupVariableValue(name, scope string) (Value, bool) {
 	return StringValue(v.Value), true
 }
 
+// StripManual removes a `manual ` prefix when it marks a command header
+// (`manual build {`). A command literally named "manual" (e.g. `manual {`)
+// is left untouched.
+func StripManual(line string) (string, bool) {
+	trimmed := strings.TrimSpace(line)
+	rest, ok := strings.CutPrefix(trimmed, "manual ")
+	if !ok {
+		return line, false
+	}
+	rest = strings.TrimLeft(rest, " 	")
+	if rest == "" || !isCommandNameStart(rest[0]) {
+		return line, false
+	}
+	return rest, true
+}
+
+func isCommandNameStart(c byte) bool {
+	return c == '_' || c == '|' ||
+		(c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+}
+
 // IsLazyName reports a synthetic lazy-evaluation command, not a user command.
 func IsLazyName(name string) bool {
 	return strings.HasPrefix(name, "__lazy_") || strings.Contains(name, ".__lazy_")
@@ -306,6 +327,7 @@ type Command struct {
 	PrereqCmds        []*Command        `json:"prereq_cmds"`
 	WorkDir           string            `json:"work_dir"`
 	Container         string            `json:"container,omitempty"`
+	Manual            bool              `json:"manual,omitempty"`
 	Timeout           string            `json:"timeout,omitempty"`
 	Body              []BodyStatement   `json:"body"`
 	SourceLine        int               `json:"source_line,omitempty"`
@@ -1909,7 +1931,7 @@ func extractIfCondition(line string) string {
 	return line
 }
 
-func (p *Parser) parseCommand(idx int, line string, isDefault bool, lineNum int, description string) (int, error) {
+func (p *Parser) parseCommand(idx int, line string, isDefault, manual bool, lineNum int, description string) (int, error) {
 	trimmedLine := strings.TrimSpace(line)
 	if !strings.Contains(trimmedLine, "{") {
 		return 0, nil
@@ -1966,6 +1988,7 @@ func (p *Parser) parseCommand(idx int, line string, isDefault bool, lineNum int,
 			PrereqDirs:      prereqDirs,
 			WorkDir:         workDir,
 			Container:       container,
+			Manual:          manual,
 			Timeout:         timeout,
 			Produces:        produces,
 			OnChange:        onChange,
@@ -2124,12 +2147,13 @@ func (p *Parser) parseLines() error {
 			continue
 		}
 
-		cmdLine := strings.TrimSpace(line)
+		header, manual := StripManual(line)
+		cmdLine := strings.TrimSpace(header)
 		isDefault := strings.HasPrefix(cmdLine, "_") &&
 			(len(cmdLine) == 1 || cmdLine[1] == ' ' || cmdLine[1] == '\t' ||
 				cmdLine[1] == '(' || cmdLine[1] == '<' || cmdLine[1] == '{')
 
-		consumed, err := p.parseCommand(idx, line, isDefault, lineNum, strings.Join(pendingComment, "\n"))
+		consumed, err := p.parseCommand(idx, header, isDefault, manual, lineNum, strings.Join(pendingComment, "\n"))
 		if err != nil {
 			return p.parseErr(lineNum, err, line)
 		}

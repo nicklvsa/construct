@@ -260,7 +260,7 @@ func lintUnreferencedCommands(data *ParsedData) []LintIssue {
 	}
 	var issues []LintIssue
 	for _, cmd := range data.Commands {
-		if cmd.Name == "_" || IsLazyName(cmd.Name) || referenced[cmd.Name] {
+		if cmd.Name == "_" || cmd.Manual || IsLazyName(cmd.Name) || referenced[cmd.Name] {
 			continue
 		}
 		issues = append(issues, LintIssue{

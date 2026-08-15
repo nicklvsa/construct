@@ -695,6 +695,15 @@ file dependencies, unused globals, and unreferenced commands. Exit code 1 on
 errors (or warnings with `--strict`); `--json` emits machine-readable
 issues — both are CI-friendly.
 
+Commands that are meant to be invoked by hand (or via `--choose`) can opt out
+of the unreferenced check with the `manual` marker:
+
+```
+manual build-construct {
+    $ go build -o construct .
+}
+```
+
 ### Cleaning
 
 `construct clean [targets...]` deletes the files a command declares in

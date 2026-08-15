@@ -115,3 +115,12 @@ func TestLintNamedOutputInsideSwitch(t *testing.T) {
 		}
 	}
 }
+
+func TestLintManualNotFlagged(t *testing.T) {
+	issues := lintText(t, "manual build-construct {\n  $ echo hi\n}\n")
+	for _, is := range issues {
+		if strings.Contains(is.Message, "never referenced") {
+			t.Errorf("manual command flagged: %s", is.Message)
+		}
+	}
+}

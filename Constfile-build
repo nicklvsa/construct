@@ -4,7 +4,7 @@ build-lsp in editor/vscode/server {
 }
 
 # Builds the actual construct binary
-build-construct {
+manual build-construct { 
     $ go build -o construct .
 }
 
@@ -23,7 +23,7 @@ build-ext in editor/vscode < build-lsp, install {
 
 # Cross-compiles construct-lsp and packages the extension for every target
 # (darwin/win32/linux x x64/arm64).
-build-all < install {
+manual build-all < install {
     matrix goos in darwin, linux, windows; arch in amd64, arm64 {
         env {
             SUFFIX=
