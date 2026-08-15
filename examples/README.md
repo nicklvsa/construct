@@ -33,6 +33,10 @@ construct Constfile-<name> <command>    # run a command
 | `Constfile-cloud` (+ `example-cloud.json`) | Any | Cloud commands (`\|name\|`), `invoke` cloud fallback, pure cloud commands, `cloud list/pull/push` |
 | `Constfile-locks` | Any | Real-world `lock` usage: a release/rollback pipeline serialized on a shared named lock, composed with `confirm` and `onfail` |
 | `Constfile-container` (+ `src/`) | Any | Container isolation (`container "image"`): containerized builds, cross-compile matrices, host/container composition, timeouts |
+| `Constfile-parallel` | Any | `parallel for` / `parallel<N>` / `parallel matrix`: concurrent iterations, per-item output prefixes, `continue if`, composition with env/workdirs/nested loops |
+| `Makefile` | Any | Import demo: run `construct import examples/Makefile` to convert it (vars, `.PHONY`, automatic vars, file targets; ifeq/`$(shell)`/pattern rule show up as flagged comments) |
+| `Constfile-shell` | Any | `construct shell`: interactive shells with a command's env block, workdir, or container; ad-hoc `--container` |
+| `Constfile-dashboard` | Any | `--tui` live dashboard over a multi-command DAG: statuses, durations, output tails, detach, cached skips, failure tails |
 
 ## Feature Coverage
 
@@ -76,4 +80,8 @@ construct Constfile-<name> <command>    # run a command
 - **`--resume` / `--only-failed`** — `Constfile-state`
 - **`--repeat`, `--flame`, `--github-actions`** — `Constfile-state`, any example
 - **Cloud commands (`|name|`, `invoke` fallback)** — `Constfile-cloud`
+- **Parallel loops (`parallel for`, `parallel<N>`, `parallel matrix`)** — `Constfile-parallel`
+- **Makefile import (`construct import`)** — `Makefile`
+- **Interactive shells (`construct shell`, `--container`)** — `Constfile-shell`
+- **Live dashboard (`--tui`)** — `Constfile-dashboard`
 - **`init`/`doctor`/`stats`/`cloud` subcommands** — any example

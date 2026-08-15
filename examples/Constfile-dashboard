@@ -1,0 +1,54 @@
+// A multi-command DAG sized for the live dashboard
+// Demonstrates: --tui (live per-command status, durations, output tails),
+//               --concurrent / --jobs fan-out, produces, cached skips
+// Run with:
+//   construct Constfile-dashboard --tui release
+//   construct Constfile-dashboard --tui --jobs 4 release
+//   construct Constfile-dashboard release        # plain run, same DAG
+//
+// Dashboard keys: j/k select a command, f follow the running one,
+// q detach (the build keeps going), Ctrl-C cancel.
+
+gen-assets {
+    $ echo "generating assets"
+    $ sleep 0.4
+    $ echo "assets: logo.svg favicon.ico"
+}
+
+gen-config {
+    $ echo "config: base.yaml"
+    $ sleep 0.2
+}
+
+build < gen-assets, gen-config {
+    $ echo "compiling..."
+    $ sleep 0.5
+    $ echo "binary ready"
+}
+
+# A step that fails on demand, to see failure tails after the dashboard
+# closes: run with  construct --tui -e flaky=true release
+flaky-check < build {
+    if "&flaky" == "true" {
+        fail "flaky check failed (on purpose)"
+    }
+    $ echo "checks passed"
+}
+
+package produces dist/release.tar < flaky-check {
+    $ mkdir -p dist
+    $ echo "packaged" > dist/release.tar
+    $ sleep 0.3
+    $ echo "dist/release.tar written"
+}
+
+# Skippable step: cached on rerun, shown as skipped in the dashboard.
+docs < gen-config {
+    $ echo "docs built"
+}
+
+release < package, docs {
+    $ echo "release complete"
+}
+
+_ < release { }

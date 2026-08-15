@@ -594,9 +594,9 @@ func TestParseMalformedSyntax(t *testing.T) {
 			expectError: true,
 		},
 		{
-			name:        "command without body",
+			name:        "bare word with no command body",
 			input:       []string{"test"},
-			expectError: false,
+			expectError: true,
 		},
 	}
 

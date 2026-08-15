@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -115,7 +116,7 @@ type docState struct {
 type server struct {
 	mu   sync.Mutex
 	docs map[string]*docState
-	out  *os.File
+	out  io.Writer
 }
 
 func newServer() *server {
@@ -892,7 +893,7 @@ var statementKeywords = []string{
 	"var", "import", "switch", "case", "default", "in", "lock", "state",
 	"confirm", "prompt", "input", "timeout",
 	"cp", "rm", "mkdir", "touch", "download", "extract",
-	"for", "if", "matrix", "env", "invoke", "fail", "global",
+	"for", "if", "matrix", "env", "invoke", "fail", "global", "parallel",
 	"require_env", "retry", "onfail", "continue", "break",
 }
 
@@ -1753,6 +1754,8 @@ func keywordHover(word string) (string, bool) {
 		return "`if <cond> { ... } else if ... { ... } else { ... }`\n\nConditions support `==`, `!=`, `<`, `>`, `<=`, `>=`, `&&`, `||`, `!`, `contains`, `starts_with`, `ends_with`, `matches`, `in`, and the helpers `exists()`, `missing()`, `glob()`, `require()`.", true
 	case "matrix":
 		return "`matrix os in linux, mac; arch in amd64, arm64 { ... }`\n\nRuns the body once per combination of the `;`-separated clauses (nested loops).", true
+	case "parallel":
+		return "`parallel for x in a, b { ... }` / `parallel matrix ...`\n\nRuns each iteration concurrently with its own variable scope. Cap iterations with the modifier: `parallel<4> for ...` (default: --jobs or the CPU count). `continue` works per iteration; `break` does not.", true
 	case "env":
 		return "`env KEY=VALUE { ... }` or `env KEY=VALUE, ... { ... }`\n\nExports variables to the rest of the command's statements; reference them as `@KEY`.", true
 	case "invoke":

@@ -1,6 +1,7 @@
 package pkg
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -121,6 +122,195 @@ func TestLintManualNotFlagged(t *testing.T) {
 	for _, is := range issues {
 		if strings.Contains(is.Message, "never referenced") {
 			t.Errorf("manual command flagged: %s", is.Message)
+		}
+	}
+}
+
+func TestLintHeaderKeywordAfterPrereqs(t *testing.T) {
+	issues := lintText(t, "build {\n    $ echo step\n}\npackage < build produces dist/app {\n    $ echo hi\n}\n")
+	found := false
+	for _, is := range issues {
+		if is.Severity == LintError && strings.Contains(is.Message, "`produces` after the prerequisite list") {
+			found = true
+			if is.Line != 3 {
+				t.Errorf("issue line = %d, want 3", is.Line)
+			}
+		}
+	}
+	if !found {
+		t.Errorf("no misplaced-produces error in %v", issues)
+	}
+
+	issues = lintText(t, "build {\n    $ echo step\n}\npackage produces dist/app < build {\n    $ echo hi\n}\n")
+	for _, is := range issues {
+		if strings.Contains(is.Message, "after the prerequisite list") {
+			t.Errorf("false positive on valid header: %v", is)
+		}
+	}
+}
+
+func TestLintHeaderInvalidTimeout(t *testing.T) {
+	issues := lintText(t, "build timeout 30x {\n    $ echo hi\n}\n")
+	found := false
+	for _, is := range issues {
+		if is.Severity == LintError && strings.Contains(is.Message, "invalid timeout duration") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("no invalid-timeout error in %v", issues)
+	}
+
+	for _, is := range lintText(t, "build timeout 30s {\n    $ echo hi\n}\n") {
+		if strings.Contains(is.Message, "invalid timeout duration") {
+			t.Errorf("false positive on valid timeout: %v", is)
+		}
+	}
+}
+
+func TestLintStatementPrefixMisuse(t *testing.T) {
+	issues := lintText(t, "build {\n    timeout 30x $ go test\n    retry 0 $ go test\n}\n")
+	timeouts, retries := 0, 0
+	for _, is := range issues {
+		if is.Severity == LintError && strings.Contains(is.Message, "invalid timeout duration") {
+			timeouts++
+		}
+		if is.Severity == LintError && strings.Contains(is.Message, "retry expects a positive integer") {
+			retries++
+		}
+	}
+	if timeouts != 1 || retries != 1 {
+		t.Errorf("timeouts=%d retries=%d, want 1 and 1: %v", timeouts, retries, issues)
+	}
+
+	for _, is := range lintText(t, "build {\n    timeout 5 ./server\n    retry 3 $ go test\n}\n") {
+		if strings.Contains(is.Message, "runs as a plain shell line") {
+			t.Errorf("false positive: %v", is)
+		}
+	}
+}
+
+func TestLintLoopControlOutsideLoop(t *testing.T) {
+	issues := lintText(t, "build {\n    continue\n}\naft {\n    break\n}\n")
+	found := 0
+	for _, is := range issues {
+		if is.Severity == LintError && strings.Contains(is.Message, "outside a loop") {
+			found++
+		}
+	}
+	if found != 2 {
+		t.Errorf("outside-loop errors = %d, want 2: %v", found, issues)
+	}
+
+	for _, is := range lintText(t, "build {\n    for x in a, b {\n        continue\n        break\n    }\n}\n") {
+		if strings.Contains(is.Message, "outside a loop") {
+			t.Errorf("false positive inside loop: %v", is)
+		}
+	}
+}
+
+func TestLintBreakInParallelLoop(t *testing.T) {
+	issues := lintText(t, "build {\n    parallel for x in a, b {\n        break\n    }\n}\n")
+	found := false
+	for _, is := range issues {
+		if is.Severity == LintError && strings.Contains(is.Message, "concurrent iterations") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("no parallel-break error in %v", issues)
+	}
+
+	// break bound to a nested serial loop inside a parallel one is fine
+	for _, is := range lintText(t, "build {\n    parallel for x in a, b {\n        for y in 1, 2 {\n            break\n        }\n    }\n}\n") {
+		if strings.Contains(is.Message, "concurrent iterations") {
+			t.Errorf("false positive on nested serial break: %v", is)
+		}
+	}
+}
+
+func TestLintRefTrailingHyphen(t *testing.T) {
+	issues := lintText(t, "var svc = api\nbuild {\n    $ echo &svc-&n\n}\n")
+	found := false
+	for _, is := range issues {
+		if is.Severity == LintWarning && strings.Contains(is.Message, "trailing `-`") {
+			found = true
+			if is.Line != 2 {
+				t.Errorf("issue line = %d, want 2", is.Line)
+			}
+		}
+	}
+	if !found {
+		t.Errorf("no trailing-hyphen warning in %v", issues)
+	}
+
+	// a variable really named with a hyphen is fine
+	for _, is := range lintText(t, "var my-svc = api\nbuild {\n    $ echo &my-svc\n}\n") {
+		if strings.Contains(is.Message, "trailing `-`") {
+			t.Errorf("false positive on hyphenated name: %v", is)
+		}
+	}
+}
+
+func TestParseParallelModifierMisuse(t *testing.T) {
+	in := "build {\n    parallel<4> echo hi\n}\n"
+	if _, err := NewParserFromContent("t.constfile", in).Parse(); err == nil {
+		t.Error("expected parse error for parallel<4> on a non-loop statement")
+	}
+}
+
+func TestParseHeaderKeywordInBody(t *testing.T) {
+	for _, kw := range []string{"manual", "produces", "container", "onchange", "import"} {
+		in := "build {\n    $ echo ok\n    " + kw + " thing\n}\n"
+		_, err := NewParserFromContent("t.constfile", in).Parse()
+		if err == nil {
+			t.Errorf("expected error for `%s` in body", kw)
+			continue
+		}
+		if !strings.Contains(err.Error(), "`"+kw+"` belongs in the command header") {
+			t.Errorf("wrong message for %s: %v", kw, err)
+		}
+		var pe *ParseError
+		if !errors.As(err, &pe) || pe.Line != 3 {
+			t.Errorf("error should point at line 3, got %+v", pe)
+		}
+	}
+
+	// $ escape keeps shell access to such names
+	if _, err := NewParserFromContent("t.constfile", "build {\n    $ manual --version\n}\n").Parse(); err != nil {
+		t.Errorf("shell escape should parse: %v", err)
+	}
+}
+
+func TestParseUnknownTopLevelStatement(t *testing.T) {
+	for _, in := range []string{
+		"garbage line here\nbuild {\n    $ echo hi\n}\n",
+		"invoke deploy\nbuild {\n    $ echo hi\n}\n",
+		"continue\nbuild {\n    $ echo hi\n}\n",
+	} {
+		if _, err := NewParserFromContent("t.constfile", in).Parse(); err == nil {
+			t.Errorf("expected top-level error for %q", in)
+		} else if !strings.Contains(err.Error(), "unrecognized top-level statement") {
+			t.Errorf("wrong message: %v", err)
+		}
+	}
+}
+
+func TestLintStatementKeywordCommands(t *testing.T) {
+	issues := lintText(t, "env { CI=true }\nbuild {\n    $ echo hi\n}\n")
+	found := false
+	for _, is := range issues {
+		if is.Severity == LintError && strings.Contains(is.Message, "command literally named `env`") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("no phantom-env error in %v", issues)
+	}
+
+	for _, is := range lintText(t, "build {\n    $ echo hi\n}\n") {
+		if strings.Contains(is.Message, "statement keyword") {
+			t.Errorf("false positive: %v", is)
 		}
 	}
 }

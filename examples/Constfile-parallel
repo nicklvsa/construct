@@ -1,0 +1,74 @@
+// Parallel loops: parallel for, parallel<N>, parallel matrix
+// Demonstrates: concurrent loop iterations, the <N> keyword modifier,
+//               per-iteration scoping and [cmd/item] output prefixes,
+//               continue if inside parallel bodies, composition with
+//               workdirs, prereqs, and nested serial loops
+// Run with:
+//   construct Constfile-parallel demo-for
+//   construct Constfile-parallel --jobs 2 demo-for        # cap from --jobs
+//   construct Constfile-parallel demo-matrix
+//   construct Constfile-parallel demo-services
+//   construct Constfile-parallel demo-nested
+
+// The plain form: every iteration runs concurrently (cap: --jobs or CPU
+// count). Each iteration sees its own &svc, and output is prefixed
+// [demo-for/api], [demo-for/web], ... so interleaving stays readable.
+demo-for {
+    parallel for svc in api, web, worker {
+        $ echo "building &svc..."
+        $ sleep 0.3
+        $ echo "&svc done"
+    }
+}
+
+// The <N> keyword modifier sets the iteration cap directly.
+// parallel<1> forces fully ordered execution.
+manual demo-capped {
+    parallel<1> for step in fetch, compile, link {
+        $ echo "step: &step"
+    }
+}
+
+// Cross-product parallelism: the outer axis varies concurrently, inner
+// clauses stay nested. continue if filters combinations per iteration.
+demo-matrix {
+    parallel matrix os in linux, darwin, windows; arch in amd64, arm64 {
+        continue if "&os" == "windows" && "&arch" == "arm64"
+        $ echo "target: &os/&arch"
+    }
+}
+
+// Loop variables can be lists, globs, or ranges like serial for loops.
+demo-globs {
+    $ mkdir -p out
+    parallel for f in *.constfile {
+        $ echo "checking &f"
+    }
+}
+
+// Real-world shape: fan out per service, then aggregate. Parallel bodies
+// compose with if, env, invoke, lock, and nested serial for loops.
+demo-services < demo-for {
+    env { BUILD_MODE=parallel }
+    parallel for svc in api, web, worker {
+        if "&svc" == "worker" {
+            $ echo "&svc: &BUILD_MODE, no assets"
+        } else {
+            $ echo "&svc: &BUILD_MODE, bundling assets"
+            for asset in app.js, vendor.js {
+                $ echo "  packing &asset into &svc"
+            }
+        }
+    }
+    $ echo "all services built"
+}
+
+// A serial loop of parallel batches: batches run one after another,
+// iterations within a batch run concurrently.
+demo-nested {
+    for region in us, eu {
+        parallel for n in 1, 2 {
+            $ echo "&region: node &n ready"
+        }
+    }
+}

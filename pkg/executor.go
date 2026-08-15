@@ -22,6 +22,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -106,6 +107,19 @@ type Executor struct {
 	state           map[string]string
 	stateLoaded     bool
 	containerRT     string
+	observer        RunObserver
+	stdoutSink      io.Writer
+	stderrSink      io.Writer
+	silentStatus    bool
+}
+
+type RunObserver interface {
+	CommandStarted(name string)
+	CommandFinished(name string, rec RunRecord)
+}
+
+type OutputCollector interface {
+	OutputWriter(name string) io.Writer
 }
 
 type FlameRow struct {
@@ -274,6 +288,7 @@ func (e *Executor) loadCloudDefs() error {
 func (e *Executor) RegisterArgumentFlags(flagSet *pflag.FlagSet) {
 	e.flagSet = flagSet
 	for _, cmd := range e.StructuredParse.Commands {
+		cmd.argKey = cmd.Name
 		for _, arg := range cmd.Arguments {
 			flagName := fmt.Sprintf("%s:%s", cmd.Name, arg.Name)
 			flagSet.String(flagName, arg.Default, fmt.Sprintf("Argument %s for command %s", arg.Name, cmd.Name))
@@ -302,6 +317,55 @@ func (e *Executor) SetJobs(n int) {
 
 func (e *Executor) SetTiming(t bool) {
 	e.timing = t
+}
+
+func (e *Executor) SetObserver(o RunObserver) {
+	e.observer = o
+}
+
+func (e *Executor) SetStdoutSink(w io.Writer) {
+	e.stdoutSink = w
+}
+
+func (e *Executor) SetStderrSink(w io.Writer) {
+	e.stderrSink = w
+}
+
+func (e *Executor) outSink() io.Writer {
+	if e.stdoutSink != nil {
+		return e.stdoutSink
+	}
+	return os.Stdout
+}
+
+func (e *Executor) errSink() io.Writer {
+	if e.stderrSink != nil {
+		return e.stderrSink
+	}
+	return os.Stderr
+}
+
+func (e *Executor) errSinkFor(ctx *execContext) io.Writer {
+	if oc, ok := e.observer.(OutputCollector); ok && !e.quiet {
+		return oc.OutputWriter(ctx.target.Name)
+	}
+	return e.errSink()
+}
+
+func (e *Executor) SetSilentStatus(v bool) {
+	e.silentStatus = v
+}
+
+func (e *Executor) notifyStart(name string) {
+	if e.observer != nil {
+		e.observer.CommandStarted(name)
+	}
+}
+
+func (e *Executor) notifyFinish(name string, rec RunRecord) {
+	if e.observer != nil {
+		e.observer.CommandFinished(name, rec)
+	}
 }
 
 func (e *Executor) SetNoCache(v bool) {
@@ -652,10 +716,12 @@ func (e *Executor) executeCommand(command *Command, prereqDir string, isPrereq b
 	if len(command.FileDeps) > 0 && !isPrereq && len(command.Produces) == 0 && !e.noCache {
 		if skip, reason := e.shouldSkip(command, resolveValue, workDir); skip {
 			e.explainf("(%s cached: %s)\n", command.Name, reason)
-			if !e.explain {
+			if !e.explain && !e.silentStatus {
 				fmt.Printf("(%s cached)\n", command.Name)
 			}
-			e.recordRun(command.Name, RunRecord{Status: "skipped", DurationMs: time.Since(start).Milliseconds(), End: time.Now()})
+			rec := RunRecord{Status: "skipped", DurationMs: time.Since(start).Milliseconds(), End: time.Now()}
+			e.recordRun(command.Name, rec)
+			e.notifyFinish(command.Name, rec)
 			return nil
 		} else if e.explain && reason != "" {
 			fmt.Printf("(%s running: %s)\n", command.Name, reason)
@@ -664,10 +730,12 @@ func (e *Executor) executeCommand(command *Command, prereqDir string, isPrereq b
 	if len(command.Produces) > 0 && !isPrereq && !e.noCache {
 		if skip, reason := e.shouldSkipProduced(command, resolveValue, workDir); skip {
 			e.explainf("(%s up to date: %s)\n", command.Name, reason)
-			if !e.explain {
+			if !e.explain && !e.silentStatus {
 				fmt.Printf("(%s up to date)\n", command.Name)
 			}
-			e.recordRun(command.Name, RunRecord{Status: "skipped", DurationMs: time.Since(start).Milliseconds(), End: time.Now()})
+			rec := RunRecord{Status: "skipped", DurationMs: time.Since(start).Milliseconds(), End: time.Now()}
+			e.recordRun(command.Name, rec)
+			e.notifyFinish(command.Name, rec)
 			return nil
 		} else if e.explain && reason != "" {
 			fmt.Printf("(%s running: %s)\n", command.Name, reason)
@@ -763,6 +831,8 @@ func (e *Executor) executeCommand(command *Command, prereqDir string, isPrereq b
 
 	body := e.cleanCommandBody(command, e.bodyFor(command))
 
+	e.notifyStart(command.Name)
+
 	if e.ghActions && !isPrereq && command.LazyEval == nil {
 		fmt.Printf("::group::%s\n", command.Name)
 	}
@@ -779,7 +849,9 @@ func (e *Executor) executeCommand(command *Command, prereqDir string, isPrereq b
 		if e.ghActions && !isPrereq {
 			ghErrorAnnotation(bodyErr)
 		}
-		e.recordRun(command.Name, RunRecord{Status: "failed", Exit: exitCodeOfErr(bodyErr), DurationMs: time.Since(start).Milliseconds(), End: time.Now(), Error: bodyErr.Error()})
+		rec := RunRecord{Status: "failed", Exit: exitCodeOfErr(bodyErr), DurationMs: time.Since(start).Milliseconds(), End: time.Now(), Error: bodyErr.Error()}
+		e.recordRun(command.Name, rec)
+		e.notifyFinish(command.Name, rec)
 		return bodyErr
 	}
 
@@ -795,11 +867,13 @@ func (e *Executor) executeCommand(command *Command, prereqDir string, isPrereq b
 		e.updateCache(command, resolveValue, workDir)
 	}
 
-	if e.timing && !isPrereq && command.LazyEval == nil {
+	if e.timing && !isPrereq && command.LazyEval == nil && !e.silentStatus {
 		fmt.Printf("(%s completed in %s)\n", command.Name, time.Since(start).Round(time.Millisecond))
 	}
 
-	e.recordRun(command.Name, RunRecord{Status: "ok", DurationMs: time.Since(start).Milliseconds(), End: time.Now()})
+	rec := RunRecord{Status: "ok", DurationMs: time.Since(start).Milliseconds(), End: time.Now()}
+	e.recordRun(command.Name, rec)
+	e.notifyFinish(command.Name, rec)
 	return nil
 }
 
@@ -831,8 +905,9 @@ func exitCodeOfErr(err error) int {
 
 func (e *Executor) argFlags(cmd *Command) map[string]bool {
 	flags := make(map[string]bool, len(cmd.Arguments))
+	scope := cmd.flagScope()
 	for _, arg := range cmd.Arguments {
-		flags[cmd.Name+":"+arg.Name] = true
+		flags[scope+":"+arg.Name] = true
 	}
 	return flags
 }
@@ -868,12 +943,14 @@ func (e *Executor) cleanStatements(stmts []BodyStatement, cmd *Command, argFlags
 			}
 		case StmtFor:
 			out[i] = BodyStatement{
-				Type:       StmtFor,
-				LoopVar:    stmt.LoopVar,
-				LoopIndex:  stmt.LoopIndex,
-				LoopItems:  e.cleanLoopItems(cmd, stmt.LoopItems),
-				LoopBody:   stmt.LoopBody,
-				SourceLine: stmt.SourceLine,
+				Type:         StmtFor,
+				LoopVar:      stmt.LoopVar,
+				LoopIndex:    stmt.LoopIndex,
+				LoopItems:    e.cleanLoopItems(cmd, stmt.LoopItems),
+				LoopBody:     stmt.LoopBody,
+				Parallel:     stmt.Parallel,
+				ParallelJobs: stmt.ParallelJobs,
+				SourceLine:   stmt.SourceLine,
 			}
 		case StmtSwitch:
 			cases := make([]SwitchCase, len(stmt.Cases))
@@ -931,7 +1008,7 @@ func (e *Executor) cleanShellLine(cmd *Command, line string, argFlags map[string
 	})
 
 	for _, arg := range cmd.Arguments {
-		lookupKey := cmd.Name + ":" + arg.Name
+		lookupKey := cmd.flagScope() + ":" + arg.Name
 		if !argFlags[lookupKey] {
 			continue
 		}
@@ -1407,18 +1484,19 @@ func (e *Executor) bodyFor(cmd *Command) []BodyStatement {
 }
 
 type execContext struct {
-	target    *Command
-	isPrereq  bool
-	workDir   string
-	container string
-	envFile   string
-	srcFile   string
-	out       io.Writer
-	env       *[]string
-	runCtx    context.Context
-	depth     int // nesting depth for the --flame report
-	onFails   []BodyStatement
-	onFailRun bool
+	target      *Command
+	isPrereq    bool
+	workDir     string
+	container   string
+	envFile     string
+	srcFile     string
+	out         io.Writer
+	env         *[]string
+	runCtx      context.Context
+	depth       int // nesting depth for the --flame report
+	onFails     []BodyStatement
+	onFailRun   bool
+	forcePrefix bool // per-iteration output prefixing for parallel loops
 }
 
 func (ctx *execContext) targetLabel() string {
@@ -1719,6 +1797,13 @@ func (e *Executor) execBody(ctx *execContext, body []BodyStatement) (err error) 
 			}
 			argFlags := e.argFlags(ctx.target)
 
+			if stmt.Parallel {
+				if err := e.execParallelFor(ctx, stmt, expanded, argFlags); err != nil {
+					return err
+				}
+				continue
+			}
+
 		iterLoop:
 			for idx, item := range expanded {
 				e.StructuredParse.SetVariable(stmt.LoopVar, ctx.target.Name, item)
@@ -1784,6 +1869,86 @@ func (e *Executor) execBody(ctx *execContext, body []BodyStatement) (err error) 
 		}
 	}
 	return nil
+}
+
+func (e *Executor) execParallelFor(ctx *execContext, stmt BodyStatement, items []string, argFlags map[string]bool) error {
+	limit := stmt.ParallelJobs
+	if limit <= 0 {
+		limit = e.jobs
+	}
+	if limit <= 0 {
+		limit = runtime.NumCPU()
+	}
+	limit = min(limit, len(items))
+	if limit < 1 {
+		return nil
+	}
+
+	snapshot := e.StructuredParse.SnapshotScope(ctx.target.Name)
+	dupes := make(map[string]int, len(items))
+	for _, it := range items {
+		dupes[it]++
+	}
+
+	errs := make([]error, len(items))
+	gate := make(chan struct{}, limit)
+	var wg sync.WaitGroup
+	var stop atomic.Bool
+
+	for idx, item := range items {
+		if stop.Load() {
+			break
+		}
+		gate <- struct{}{}
+		wg.Add(1)
+		go func(idx int, item string) {
+			defer wg.Done()
+			defer func() { <-gate }()
+			err := e.runParallelIteration(ctx, stmt, item, idx, snapshot, argFlags, dupes[item] > 1)
+			switch {
+			case errors.Is(err, errLoopContinue):
+			case errors.Is(err, errLoopBreak):
+				errs[idx] = fmt.Errorf("break is not supported inside a parallel loop (%s:%d)", ctx.srcFile, stmt.SourceLine)
+				stop.Store(true)
+			case err != nil:
+				errs[idx] = err
+				stop.Store(true)
+			}
+		}(idx, item)
+	}
+	wg.Wait()
+
+	for _, err := range errs {
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (e *Executor) runParallelIteration(ctx *execContext, stmt BodyStatement, item string, idx int, snapshot []*Variable, argFlags map[string]bool, qualify bool) error {
+	scope := ctx.target.Name + "/" + item
+	if qualify {
+		scope = fmt.Sprintf("%s/%s#%d", ctx.target.Name, item, idx)
+	}
+	iterCmd := *ctx.target
+	iterCmd.Name = scope
+	e.StructuredParse.SeedScope(scope, snapshot)
+	e.StructuredParse.SetVariable(stmt.LoopVar, scope, item)
+	if stmt.LoopIndex != "" {
+		e.StructuredParse.SetVariable(stmt.LoopIndex, scope, strconv.Itoa(idx))
+	}
+	e.debugf("Parallel loop %s = %s\n", stmt.LoopVar, item)
+
+	sub := *ctx
+	sub.target = &iterCmd
+	envCopy := slices.Clone(*ctx.env)
+	sub.env = &envCopy
+	sub.onFails = nil
+	sub.forcePrefix = true
+
+	cleaned := e.cleanStatements(stmt.LoopBody, &iterCmd, argFlags)
+	return e.execBody(&sub, cleaned)
 }
 
 func truncateLabel(s string) string {
@@ -2002,14 +2167,16 @@ func (e *Executor) runShellBatch(ctx *execContext, stmts []BodyStatement) error 
 		cmd := e.command(ctx, argv)
 
 		var buf bytes.Buffer
-		sink := io.Writer(os.Stdout)
+		sink := io.Writer(e.outSink())
 		if e.quiet {
 			sink = io.Discard
-		} else if e.prefixOutput {
-			sink = &linePrefixWriter{w: os.Stdout, prefix: "[" + ctx.target.Name + "] "}
+		} else if oc, ok := e.observer.(OutputCollector); ok {
+			sink = oc.OutputWriter(ctx.target.Name)
+		} else if e.prefixOutput || ctx.forcePrefix {
+			sink = &linePrefixWriter{w: e.outSink(), prefix: "[" + ctx.target.Name + "] "}
 		}
 		cmd.Stdout = io.MultiWriter(sink, &buf)
-		cmd.Stderr = os.Stderr
+		cmd.Stderr = e.errSinkFor(ctx)
 
 		e.debugf("Running command %s (batched): %s\n", ctx.target.Name, fullCommand)
 
@@ -2111,14 +2278,16 @@ func (e *Executor) runShellOnce(ctx *execContext, stmt BodyStatement) error {
 	stream := !e.debug && !ctx.isPrereq && ctx.target.LazyEval == nil && ctx.out == nil
 	if stream {
 		var buf bytes.Buffer
-		sink := io.Writer(os.Stdout)
+		sink := io.Writer(e.outSink())
 		if e.quiet {
 			sink = io.Discard
-		} else if e.prefixOutput {
-			sink = &linePrefixWriter{w: os.Stdout, prefix: "[" + ctx.target.Name + "] "}
+		} else if oc, ok := e.observer.(OutputCollector); ok {
+			sink = oc.OutputWriter(ctx.target.Name)
+		} else if e.prefixOutput || ctx.forcePrefix {
+			sink = &linePrefixWriter{w: e.outSink(), prefix: "[" + ctx.target.Name + "] "}
 		}
 		cmd.Stdout = io.MultiWriter(sink, &buf)
-		cmd.Stderr = os.Stderr
+		cmd.Stderr = e.errSinkFor(ctx)
 		err := cmd.Run()
 		release()
 		if pw, ok := sink.(*linePrefixWriter); ok {
@@ -2193,7 +2362,7 @@ func (e *Executor) runShellOnce(ctx *execContext, stmt BodyStatement) error {
 		e.debugf("Set variable %s.%s = %s\n", ctx.target.LazyEval.Scope, ctx.target.LazyEval.VarName, strOutput)
 	default:
 		if !e.quiet {
-			fmt.Println(strOutput)
+			fmt.Fprintln(e.outSink(), strOutput)
 		}
 	}
 	return nil
@@ -2543,8 +2712,6 @@ func (e *Executor) cacheManifest() fileCache {
 func (e *Executor) cacheKey(cmd *Command) string {
 	name := cmd.Name
 	if cmd.SourceFile != "" {
-		// Different Constfiles share one cache dir; same-named commands in
-		// different files must not collide.
 		name += "@" + filepath.Base(cmd.SourceFile)
 	}
 	parts := []string{name}

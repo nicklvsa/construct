@@ -1,6 +1,9 @@
 package pkg
 
-import "fmt"
+import (
+	"errors"
+	"fmt"
+)
 
 type ParseError struct {
 	File    string
@@ -32,6 +35,10 @@ func NewParseError(file string, line, column int, message, context string) *Pars
 }
 
 func (p *Parser) parseErr(lineNum int, err error, context string) *ParseError {
+	var pe *ParseError
+	if errors.As(err, &pe) {
+		return pe
+	}
 	return NewParseError(p.InputFile, lineNum, 1, err.Error(), context)
 }
 

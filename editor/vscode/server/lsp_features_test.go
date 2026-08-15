@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -575,5 +576,59 @@ func TestLSPManualHeader(t *testing.T) {
 	}
 	if _, ok := keywordHover("manual"); !ok {
 		t.Error("keywordHover(manual) missing")
+	}
+}
+
+func diagnosticsFor(t *testing.T, text string) string {
+	t.Helper()
+	var buf bytes.Buffer
+	s := newServer()
+	s.out = &buf
+	s.updateDoc("file:///test.constfile", text)
+	return buf.String()
+}
+
+func TestLSPHeaderMisuseDiagnostics(t *testing.T) {
+	out := diagnosticsFor(t, "build {\n    $ echo step\n}\npackage < build produces dist/app {\n    $ echo hi\n}\n")
+	if !strings.Contains(out, "after the prerequisite list") {
+		t.Errorf("expected misplaced-produces diagnostic, got: %s", out)
+	}
+}
+
+func TestLSPParallelModifierMisuseDiagnostic(t *testing.T) {
+	out := diagnosticsFor(t, "build {\n    parallel<4> echo hi\n}\n")
+	if !strings.Contains(out, "modifier only applies to parallel") {
+		t.Errorf("expected parallel modifier diagnostic, got: %s", out)
+	}
+}
+
+func TestLSPBreakInParallelLoopDiagnostic(t *testing.T) {
+	out := diagnosticsFor(t, "build {\n    parallel for x in a, b {\n        break\n    }\n}\n")
+	if !strings.Contains(out, "concurrent iterations") {
+		t.Errorf("expected parallel-break diagnostic, got: %s", out)
+	}
+}
+
+func TestLSPTrailingHyphenDiagnostic(t *testing.T) {
+	out := diagnosticsFor(t, "var svc = api\nbuild {\n    $ echo &svc-&n\n}\n")
+	if !strings.Contains(out, "trailing `-`") {
+		t.Errorf("expected trailing-hyphen diagnostic, got: %s", out)
+	}
+}
+
+func TestLSPManualInBodyDiagnostic(t *testing.T) {
+	out := diagnosticsFor(t, "build {\n    manual deploy\n}\n")
+	if !strings.Contains(out, "belongs in the command header") {
+		t.Errorf("expected manual-in-body diagnostic, got: %s", out)
+	}
+	if !strings.Contains(out, `"line":1`) {
+		t.Errorf("diagnostic should sit on line 2, got: %s", out)
+	}
+}
+
+func TestLSPEnvCommandDiagnostic(t *testing.T) {
+	out := diagnosticsFor(t, "env { CI=true }\nbuild {\n    $ echo hi\n}\n")
+	if !strings.Contains(out, "command literally named `env`") {
+		t.Errorf("expected phantom-env diagnostic, got: %s", out)
 	}
 }

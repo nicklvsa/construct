@@ -1,85 +1,102 @@
 {
-	"Command": {
-		"prefix": "cmd",
-		"body": [
-			"${1:name}${2: (${3:arg})}${4: < ${5:prereq}}${6: in ${7:dir}} {",
-			"\t$0",
-			"}"
-		],
-		"description": "New command"
-	},
-	"If block": {
-		"prefix": ["if"],
-		"body": [
-			"if ${1:condition} {",
-			"\t$0",
-			"}"
-		],
-		"description": "Conditional block"
-	},
-	"If-else block": {
-		"prefix": ["ifelse"],
-		"body": [
-			"if ${1:condition} {",
-			"\t$0",
-			"} else {",
-			"\t",
-			"}"
-		],
-		"description": "If-else block"
-	},
-	"For loop": {
-		"prefix": "for",
-		"body": [
-			"for ${1:i} in ${2:items} {",
-			"\t$0",
-			"}"
-		],
-		"description": "For loop"
-	},
-	"Matrix": {
-		"prefix": "matrix",
-		"body": [
-			"matrix ${1:a} in ${2:items}; ${3:b} in ${4:items} {",
-			"\t$0",
-			"}"
-		],
-		"description": "Build matrix"
-	},
-	"Env block": {
-		"prefix": "env",
-		"body": [
-			"env { ${1:KEY}=${2:value} }"
-		],
-		"description": "Per-command environment variables"
-	},
-	"Onfail block": {
-		"prefix": "onfail",
-		"body": [
-			"onfail {",
-			"\t$0",
-			"}"
-		],
-		"description": "Cleanup block that runs when the command fails"
-	},
-	"Fail": {
-		"prefix": "fail",
-		"body": ["fail \"${1:message}\""],
-		"description": "Abort the command with a message"
-	},
-	"Invoke": {
-		"prefix": "invoke",
-		"body": ["invoke ${1:command}${2: ${3:arg}=${4:value}}"],
-		"description": "Run another command's body inline"
-	},
-	"Invoke with capture": {
-		"prefix": "invoke-as",
-		"body": [
-			"invoke ${1:command} as ${2:lines}",
-			"for ${3:l} in &${2:lines} {",
-			"\t$0",
-			"}"
-		],
-		"description": "Capture invoked output and iterate it"
-	}
+  "Command": {
+    "prefix": "cmd",
+    "body": [
+      "${1:name}${2: (${3:arg})}${4: < ${5:prereq}}${6: in ${7:dir}} {",
+      "\t$0",
+      "}"
+    ],
+    "description": "New command"
+  },
+  "If block": {
+    "prefix": [
+      "if"
+    ],
+    "body": [
+      "if ${1:condition} {",
+      "\t$0",
+      "}"
+    ],
+    "description": "Conditional block"
+  },
+  "If-else block": {
+    "prefix": [
+      "ifelse"
+    ],
+    "body": [
+      "if ${1:condition} {",
+      "\t$0",
+      "} else {",
+      "\t",
+      "}"
+    ],
+    "description": "If-else block"
+  },
+  "For loop": {
+    "prefix": "for",
+    "body": [
+      "for ${1:i} in ${2:items} {",
+      "\t$0",
+      "}"
+    ],
+    "description": "For loop"
+  },
+  "Matrix": {
+    "prefix": "matrix",
+    "body": [
+      "matrix ${1:a} in ${2:items}; ${3:b} in ${4:items} {",
+      "\t$0",
+      "}"
+    ],
+    "description": "Build matrix"
+  },
+  "Env block": {
+    "prefix": "env",
+    "body": [
+      "env { ${1:KEY}=${2:value} }"
+    ],
+    "description": "Per-command environment variables"
+  },
+  "Onfail block": {
+    "prefix": "onfail",
+    "body": [
+      "onfail {",
+      "\t$0",
+      "}"
+    ],
+    "description": "Cleanup block that runs when the command fails"
+  },
+  "Fail": {
+    "prefix": "fail",
+    "body": [
+      "fail \"${1:message}\""
+    ],
+    "description": "Abort the command with a message"
+  },
+  "Invoke": {
+    "prefix": "invoke",
+    "body": [
+      "invoke ${1:command}${2: ${3:arg}=${4:value}}"
+    ],
+    "description": "Run another command's body inline"
+  },
+  "Invoke with capture": {
+    "prefix": "invoke-as",
+    "body": [
+      "invoke ${1:command} as ${2:lines}",
+      "for ${3:l} in &${2:lines} {",
+      "\t$0",
+      "}"
+    ],
+    "description": "Capture invoked output and iterate it"
+  },
+  "Parallel for loop": {
+    "prefix": "parallel",
+    "body": [
+      "parallel for ${1:item} in ${2:a, b, c} {",
+      "\t$0",
+      "}"
+    ],
+    "description": "Loop whose iterations run concurrently"
+  }
 }

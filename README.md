@@ -22,6 +22,8 @@ construct [options] [Constfile] [commands...]
 |---------|-------------|
 | `list` | List all available commands |
 | `init [template]` | Scaffold a Constfile (`minimal`, `go`, `python`, `node`, `rust`, `monorepo`; `--force` to overwrite) |
+| `import [Makefile] [out]` | Convert a Makefile to a Constfile (best-effort; `--force` to overwrite) |
+| `shell [command]` | Start a shell with a command's env block, workdir, or container (`--container IMG` for ad-hoc) |
 | `doctor` | Diagnose the environment, Constfile, tools, and cloud file |
 | `stats` | Show per-command timing history from `.construct-cache/run-state.json` |
 | `cloud list\|pull\|push` | Manage cloud command definitions (see Cloud Commands) |
@@ -62,6 +64,8 @@ construct [options] [Constfile] [commands...]
 | `--yes` | Auto-approve `confirm` statements |
 | `--force`, `-f` | Overwrite files (`init`) |
 | `--notify` | Desktop notification when the run finishes (works with `--watch` and `--repeat`) |
+| `--tui` | Live dashboard for the run (`q` detaches, Ctrl-C cancels) |
+| `--container IMG` | `shell`: run in this container image instead of the command's |
 | `--strict` | `lint`: fail on warnings too |
 | `--cache` | `clean`: also remove `.construct-cache` |
 | `--dot` | `graph`: emit Graphviz DOT |
@@ -559,6 +563,45 @@ use < gen {
 Working directories and file dependencies resolve relative to the Constfile's
 directory, so `construct /path/to/Constfile` behaves the same from anywhere.
 
+### Parallel Loops
+
+`parallel for` runs the loop body for every item concurrently — each
+iteration gets its own variable scope, environment, and output prefix
+(`[cmd/item]`):
+
+```
+build {
+    parallel for spec in darwin/arm64, windows/amd64, linux/arm64 {
+        $ go build -o dist/construct-&spec .
+    }
+}
+```
+
+- The iteration cap defaults to `--jobs` (or the CPU count); an explicit cap
+  can be given with the `<N>` keyword modifier: `parallel<4> for x in ...`.
+  `--jobs` still bounds global process concurrency, so the two compose.
+- `continue` (and `continue if`) skips a single iteration; `break` is an
+  error — it cannot stop other in-flight iterations.
+- Variables assigned inside a parallel body are shared across iterations;
+  the loop variable itself is always iteration-local.
+- On failure the loop stops launching new iterations, waits for in-flight
+  ones, and reports the first error.
+
+`parallel matrix` parallelizes across the cross product (the outer axis
+varies concurrently, inner axes stay nested):
+
+```
+build_matrix {
+    parallel matrix os in windows, linux; arch in amd64, arm64 {
+        continue if "&os" == "windows" && "&arch" == "arm64"
+        $ echo "building &os/&arch"
+    }
+}
+```
+
+The `<...>` modifier slot is reserved for keyword modifiers — future
+keywords may adopt it (e.g. a wait timeout on `lock`).
+
 ### Build Matrices
 
 For multi-axis builds, `matrix` iterates the cross product of several
@@ -691,9 +734,17 @@ CLI; the container itself is removed via `--rm`.
 
 `construct lint` runs the same checks the editor shows inline: out-of-bounds
 `&cmd.N` indexes, unknown named outputs, duplicate prerequisites, missing
-file dependencies, unused globals, and unreferenced commands. Exit code 1 on
-errors (or warnings with `--strict`); `--json` emits machine-readable
-issues — both are CI-friendly.
+file dependencies, unused globals, and unreferenced commands. It also flags
+misused keywords before they silently misparse: `produces`/`container`/
+`timeout` written after the prerequisite list (where they are treated as
+prerequisites instead of modifiers), header or statement `timeout` values
+that are not valid durations, `retry` counts that are not positive
+integers, `break`/`continue` outside a loop, `break` inside a `parallel`
+loop (it cannot stop concurrent iterations), and references like `&svc-`
+whose trailing `-` is swallowed into the name. `parallel<4>` on a
+non-loop statement is a parse error. Exit code 1 on errors (or warnings
+with `--strict`); `--json` emits machine-readable issues — both are
+CI-friendly.
 
 Commands that are meant to be invoked by hand (or via `--choose`) can opt out
 of the unreferenced check with the `manual` marker:
@@ -861,6 +912,81 @@ _ {
 }
 ```
 
+## Importing a Makefile
+
+`construct import [Makefile] [output]` converts an existing Makefile to a
+Constfile (defaults: `Makefile` → `Constfile`, refusing to overwrite without
+`--force`):
+
+```bash
+construct import                # Makefile -> Constfile
+construct import GNUmakefile    # explicit input
+construct import Makefile lib/Constfile
+```
+
+What converts mechanically:
+
+- `VAR = ...` / `:=` / `::=` / `?=` → `var NAME = ...` with `$(VAR)` refs
+  rewritten to `&NAME` (forward references included)
+- rules → commands; prereqs keep make ordering; `.PHONY` targets keep their
+  names; file-like targets (`main.o`, `dist/app`) get a safe command name
+  plus `produces <original>` so the up-to-date check covers the file
+- automatic variables: `$@` → the target, `$<` → the first prereq,
+  `$^`/`$?` → all prereqs, `$(MAKE)` → `construct`, `$$` → `$`
+- recipe prefixes: `@` is dropped (construct never echoes commands),
+  `-` becomes the error-tolerant `!`
+- `include` → `import`, doc comments above rules become command
+  descriptions, `.DEFAULT_GOAL` (or the first target) becomes `_`
+
+What is flagged instead of guessed: conditionals (`ifeq`/`ifdef`/...),
+`$(shell ...)`, pattern rules (`%.o: %.c`), `define` blocks, `export`,
+`+=` on existing variables, target-specific variables, order-only
+prereqs, and double-colon rules each get a
+`# construct-import: ...` comment at the site, and the summary counts
+them. The generated file is formatted and parse-checked; run
+`construct lint` after importing.
+
+## Interactive Shell
+
+`construct shell [command]` starts an interactive shell with that
+command's environment — the resolved `env` block, header workdir
+(created if missing), and container image when one is declared:
+
+```bash
+construct shell dev                     # env + workdir of 'dev'
+construct shell --container golang:1.26 # ad-hoc container shell
+construct shell                         # bare shell at the Constfile's dir
+```
+
+With `container "image"` (or `--container`), construct runs
+`docker/podman run --rm -it` with the Constfile mounted at `/work`, the
+environment passed via `--env-file`, and `bash` if the image has it
+(falling back to `sh`). Without a container, the shell is `CONSTRUCT_SHELL`,
+`$SHELL`, or `/bin/sh`, and the child's exit code becomes construct's.
+
+## Live Dashboard
+
+`--tui` replaces the scrolling output with a full-screen dashboard while
+the build runs: one row per command with a live spinner, duration, and
+exit codes, plus a rolling log pane for the selected command.
+
+```
+construct --tui --jobs 8 build
+```
+
+- `j`/`k` (or arrows) select a command to watch; `f` follows the
+  currently running one (the default)
+- `q` detaches — the terminal is restored and the run continues with
+  normal output; nothing is killed
+- `Ctrl-C` cancels the run as usual (exit 130)
+- when commands fail, their captured output tails print after the
+  dashboard closes so the error context isn't lost
+
+The dashboard requires a terminal and is disabled automatically (with a
+notice) for `--watch`, `--repeat`, `--choose`, `--dry-run`, `--debug`,
+`--explain`, `--quiet`, `--resume`, GitHub Actions output, or Constfiles
+using `confirm`/`prompt`/`input`.
+
 ## Platform-Specific Files
 
 Construct automatically looks for platform-specific Constfiles:
@@ -888,6 +1014,14 @@ Construct validates:
 - Missing prerequisite commands
 - Unclosed command blocks
 - `case`/`default` outside a `switch`, duplicate case values, switches without cases
+- Header-only keywords (`manual`, `produces`, `container`, `onchange`, `import`)
+  used as body statements — with a hint to prefix `$` when a shell command of
+  that name was intended
+- Unrecognized top-level statements (anything that is not `var`, `import`,
+  `state`, or a command header) instead of silently dropping the line
+- Top-level blocks like `env { ... }` or `onfail { ... }` that would parse as
+  commands literally named after the statement keyword (a lint error, since
+  renaming the command is the fix)
 
 Failures are reported with their source location, e.g.
 `Constfile:42: command '...' failed (exit 1)` — the file and line of the

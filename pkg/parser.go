@@ -66,6 +66,26 @@ func (p *ParsedData) addVariable(v *Variable) {
 	p.variableMap[v.Scope+"."+v.Name] = v
 }
 
+func (p *ParsedData) SnapshotScope(scope string) []*Variable {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	var out []*Variable
+	for _, v := range p.Variables {
+		if v.Scope == scope {
+			out = append(out, &Variable{Name: v.Name, Value: v.Value, Scope: scope, IsList: v.IsList, List: v.List})
+		}
+	}
+	return out
+}
+
+func (p *ParsedData) SeedScope(scope string, vars []*Variable) {
+	for _, v := range vars {
+		c := *v
+		c.Scope = scope
+		p.addVariable(&c)
+	}
+}
+
 func (p *ParsedData) addCommand(cmd *Command) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -222,9 +242,6 @@ func (p *ParsedData) LookupVariableValue(name, scope string) (Value, bool) {
 	return StringValue(v.Value), true
 }
 
-// StripManual removes a `manual ` prefix when it marks a command header
-// (`manual build {`). A command literally named "manual" (e.g. `manual {`)
-// is left untouched.
 func StripManual(line string) (string, bool) {
 	trimmed := strings.TrimSpace(line)
 	rest, ok := strings.CutPrefix(trimmed, "manual ")
@@ -282,28 +299,30 @@ type SwitchCase struct {
 }
 
 type BodyStatement struct {
-	Type        string          `json:"type"` // one of the Stmt* constants
-	Shell       string          `json:"shell,omitempty"`
-	OutputName  string          `json:"output_name,omitempty"`
-	Cond        string          `json:"cond,omitempty"`
-	ThenBody    []BodyStatement `json:"then,omitempty"`
-	ElseBody    []BodyStatement `json:"else,omitempty"`
-	LoopVar     string          `json:"loop_var,omitempty"`
-	LoopIndex   string          `json:"loop_index,omitempty"`
-	LoopItems   string          `json:"loop_items,omitempty"`
-	LoopBody    []BodyStatement `json:"loop_body,omitempty"`
-	Env         []string        `json:"env,omitempty"`
-	Message     string          `json:"message,omitempty"`
-	OnFailBody  []BodyStatement `json:"onfail,omitempty"`
-	InvokeArgs  []string        `json:"invoke_args,omitempty"`
-	Retry       int             `json:"retry,omitempty"`
-	Timeout     string          `json:"timeout,omitempty"`
-	SwitchExpr  string          `json:"switch_expr,omitempty"`
-	Cases       []SwitchCase    `json:"cases,omitempty"`
-	Dir         string          `json:"dir,omitempty"`
-	BuiltinArgs string          `json:"builtin_args,omitempty"`
-	Tolerant    bool            `json:"tolerant,omitempty"`
-	SourceLine  int             `json:"source_line,omitempty"`
+	Type         string          `json:"type"` // one of the Stmt* constants
+	Shell        string          `json:"shell,omitempty"`
+	OutputName   string          `json:"output_name,omitempty"`
+	Cond         string          `json:"cond,omitempty"`
+	ThenBody     []BodyStatement `json:"then,omitempty"`
+	ElseBody     []BodyStatement `json:"else,omitempty"`
+	LoopVar      string          `json:"loop_var,omitempty"`
+	LoopIndex    string          `json:"loop_index,omitempty"`
+	LoopItems    string          `json:"loop_items,omitempty"`
+	LoopBody     []BodyStatement `json:"loop_body,omitempty"`
+	Env          []string        `json:"env,omitempty"`
+	Message      string          `json:"message,omitempty"`
+	OnFailBody   []BodyStatement `json:"onfail,omitempty"`
+	InvokeArgs   []string        `json:"invoke_args,omitempty"`
+	Retry        int             `json:"retry,omitempty"`
+	Timeout      string          `json:"timeout,omitempty"`
+	SwitchExpr   string          `json:"switch_expr,omitempty"`
+	Cases        []SwitchCase    `json:"cases,omitempty"`
+	Dir          string          `json:"dir,omitempty"`
+	BuiltinArgs  string          `json:"builtin_args,omitempty"`
+	Tolerant     bool            `json:"tolerant,omitempty"`
+	Parallel     bool            `json:"parallel,omitempty"`
+	ParallelJobs int             `json:"parallel_jobs,omitempty"`
+	SourceLine   int             `json:"source_line,omitempty"`
 }
 
 type Command struct {
@@ -316,6 +335,7 @@ type Command struct {
 
 	cacheGlobals      []string          // globals the command's refs reach, for cache keys
 	cacheGlobalsExact bool              // false (hand-built data) keys on every global
+	argKey            string            // flag-set scope, fixed at registration so renames keep args resolvable
 	PrereqOutput      []string          `json:"prereq_output"`
 	NamedOutput       map[string]string `json:"named_output"`
 	Arguments         []*Argument       `json:"arguments"`
@@ -332,6 +352,13 @@ type Command struct {
 	Body              []BodyStatement   `json:"body"`
 	SourceLine        int               `json:"source_line,omitempty"`
 	Description       string            `json:"description,omitempty"`
+}
+
+func (c *Command) flagScope() string {
+	if c.argKey != "" {
+		return c.argKey
+	}
+	return c.Name
 }
 
 func NewParser(file string) (*Parser, error) {
@@ -493,7 +520,7 @@ func (p *Parser) evalVarValue(value string, varName *string, varScope *string, l
 		}
 		return v.S, false, nil, nil
 	}
-	// Fall back to literal substitution when the value is not an expression.
+
 	if strings.IndexByte(value, '&') >= 0 {
 		value = resolveVarRefs(value, func(name string) (string, bool) {
 			v, ok := LookupVariableIndexed(p.Data, name, *varScope)
@@ -613,8 +640,6 @@ func findProducesIdx(line string) int {
 	return findTopLevelKeyword(line, " produces ")
 }
 
-// headerSegmentAfter returns the text after the top-level keyword kw, cut at
-// '<', '{', and any header modifier that follows.
 func headerSegmentAfter(line, kw string) string {
 	idx := findTopLevelKeyword(line, kw)
 	if idx < 0 {
@@ -657,7 +682,6 @@ func extractOnChange(line string) []string {
 	return splitListSegment(headerSegmentAfter(line, " onchange "))
 }
 
-// extractContainer parses the `container "image"` header modifier.
 func extractContainer(line string) string {
 	return trimQuoted(strings.TrimSpace(headerSegmentAfter(line, " container ")))
 }
@@ -702,7 +726,7 @@ func extractPrerequisites(line string) ([]string, map[string]string, error) {
 
 	dirs := make(map[string]string)
 	var result []string
-	for _, part := range strings.Split(segment, ",") {
+	for part := range strings.SplitSeq(segment, ",") {
 		part = strings.TrimSpace(part)
 		if part == "" || part == "in" {
 			continue
@@ -906,6 +930,18 @@ func (p *Parser) parseBodyStatements(raw []rawLine, scope string) ([]BodyStateme
 			stmts = append(stmts, stmt)
 			i += consumed
 			continue
+		}
+
+		if strings.HasPrefix(line, "parallel") {
+			stmt, consumed, handled, err := p.parseParallelBlock(line, raw[i:], scope, lineNum)
+			if err != nil {
+				return nil, err
+			}
+			if handled {
+				stmts = append(stmts, stmt)
+				i += consumed
+				continue
+			}
 		}
 
 		if strings.HasPrefix(line, "for ") && strings.Contains(line, "{") {
@@ -1175,6 +1211,12 @@ func (p *Parser) parseBodyStatements(raw []rawLine, scope string) ([]BodyStateme
 			return nil, fmt.Errorf("'else' without a matching 'if'")
 		}
 
+		for _, kw := range headerOnlyKeywords {
+			if line == kw || strings.HasPrefix(line, kw+" ") || strings.HasPrefix(line, kw+"\t") {
+				return nil, NewParseError(p.InputFile, lineNum, 1, fmt.Sprintf("`%s` belongs in the command header or at the top level, not in a body — prefix the line with $ to run it in the shell", kw), line)
+			}
+		}
+
 		shell, outputName := extractOutputName(line)
 		stmts = append(stmts, BodyStatement{Type: StmtShell, Shell: shell, OutputName: outputName, Timeout: timeoutDur, SourceLine: lineNum})
 		i++
@@ -1183,6 +1225,10 @@ func (p *Parser) parseBodyStatements(raw []rawLine, scope string) ([]BodyStateme
 }
 
 var builtinCommands = []string{"cp", "rm", "mkdir", "touch", "download", "extract"}
+
+// Keywords that only make sense in a command header or at the top level;
+// bare body lines starting with them are almost always misplaced.
+var headerOnlyKeywords = []string{"manual", "produces", "container", "onchange", "import"}
 
 func parseBuiltinLine(line string) (name, args string, tolerant bool, ok bool) {
 	rest := line
@@ -1737,6 +1783,66 @@ func parseInvokeArgs(s string) (name string, args []string) {
 	return name, pairs
 }
 
+// parseParallelBlock handles "parallel [jobs] for ..." / "parallel [jobs] matrix ..."
+// where the optional <N> modifier sets the iteration cap. When the line doesn't
+// introduce a for/matrix loop it reports handled=false so dispatch falls through.
+func (p *Parser) parseParallelBlock(line string, raw []rawLine, scope string, lineNum int) (BodyStatement, int, bool, error) {
+	rest := strings.TrimLeft(line[len("parallel"):], " \t")
+	if rest == "" {
+		return BodyStatement{}, 0, false, nil
+	}
+	jobs := 0
+	hasModifier := false
+	if rest[0] == '<' {
+		end := strings.IndexByte(rest, '>')
+		if end < 0 {
+			return BodyStatement{}, 0, true, fmt.Errorf("malformed parallel modifier: missing '>'")
+		}
+		n, err := strconv.Atoi(rest[1:end])
+		if err != nil || n <= 0 {
+			return BodyStatement{}, 0, true, fmt.Errorf("malformed parallel modifier %q: expected a positive integer", rest[:end+1])
+		}
+		jobs = n
+		rest = rest[end+1:]
+		hasModifier = true
+	}
+	rest = strings.TrimLeft(rest, " \t")
+	if !strings.HasPrefix(rest, "for ") && !strings.HasPrefix(rest, "matrix ") {
+		if hasModifier {
+			return BodyStatement{}, 0, true, fmt.Errorf("the <N> modifier only applies to parallel for/matrix loops (got %q)", firstWord(rest))
+		}
+		return BodyStatement{}, 0, false, nil
+	}
+
+	saved := raw[0].text
+	raw[0].text = rest
+	var (
+		stmt     BodyStatement
+		consumed int
+		err      error
+	)
+	if strings.HasPrefix(rest, "for ") {
+		stmt, consumed, err = p.parseForBlock(raw, scope)
+	} else {
+		stmt, consumed, err = p.parseMatrixBlock(raw, scope)
+	}
+	raw[0].text = saved
+	if err != nil {
+		return BodyStatement{}, 0, true, err
+	}
+	stmt.Parallel = true
+	stmt.ParallelJobs = jobs
+	return stmt, consumed, true, nil
+}
+
+func firstWord(s string) string {
+	s = strings.TrimSpace(s)
+	if sp := strings.IndexAny(s, " \t"); sp >= 0 {
+		return s[:sp]
+	}
+	return s
+}
+
 func (p *Parser) parseForBlock(raw []rawLine, scope string) (BodyStatement, int, error) {
 	headerLine := raw[0]
 	header := strings.TrimSpace(headerLine.text)
@@ -1904,7 +2010,8 @@ func isNestedBlockHeader(t string) bool {
 		strings.HasPrefix(t, "env ") || strings.HasPrefix(t, "onfail ") ||
 		strings.HasPrefix(t, "switch ") || strings.HasPrefix(t, "case ") ||
 		strings.HasPrefix(t, "default") || strings.HasPrefix(t, "in ") ||
-		strings.HasPrefix(t, "lock ") || strings.HasPrefix(t, "case{")) && strings.Contains(t, "{")
+		strings.HasPrefix(t, "lock ") || strings.HasPrefix(t, "case{") ||
+		strings.HasPrefix(t, "parallel")) && strings.Contains(t, "{")
 }
 
 func extractIfCondition(line string) string {
@@ -2158,10 +2265,10 @@ func (p *Parser) parseLines() error {
 			return p.parseErr(lineNum, err, line)
 		}
 		pendingComment = nil
-		idx += consumed
 		if consumed == 0 {
-			idx++
+			return p.parseErr(lineNum, fmt.Errorf("unrecognized top-level statement %q (expected var, import, state, or a command)", firstWord(line)), line)
 		}
+		idx += consumed
 	}
 
 	return nil

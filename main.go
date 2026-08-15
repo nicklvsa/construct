@@ -43,45 +43,48 @@ type ConstructInput struct {
 }
 
 type options struct {
-	showHelp    bool
-	showVersion bool
-	debug       bool
-	concurrent  bool
-	dryRun      bool
-	showList    bool
-	watch       bool
-	choose      bool
-	timing      bool
-	keepGoing   bool
-	noCache     bool
-	quiet       bool
-	explain     bool
-	json        bool
-	resume      bool
-	repeat      int
-	flame       bool
-	ghActions   bool
-	yes         bool
-	doctor      bool
-	force       bool
-	template    string
-	fileName    string
-	output      string
-	wait        bool
-	repo        string
-	ref         string
-	workflow    string
-	noInit      bool
-	notify      bool
-	strict      bool
-	cleanCache  bool
-	dotGraph    bool
-	checkFormat bool
-	jobsStr     string
-	jobs        int
-	envFile     string
-	shell       string
-	overrides   []string
+	showHelp          bool
+	showVersion       bool
+	debug             bool
+	concurrent        bool
+	dryRun            bool
+	showList          bool
+	watch             bool
+	choose            bool
+	timing            bool
+	keepGoing         bool
+	noCache           bool
+	quiet             bool
+	explain           bool
+	json              bool
+	resume            bool
+	repeat            int
+	flame             bool
+	ghActions         bool
+	yes               bool
+	doctor            bool
+	force             bool
+	template          string
+	fileName          string
+	output            string
+	wait              bool
+	repo              string
+	ref               string
+	workflow          string
+	noInit            bool
+	notify            bool
+	strict            bool
+	cleanCache        bool
+	dotGraph          bool
+	checkFormat       bool
+	jobsStr           string
+	jobs              int
+	envFile           string
+	shell             string
+	overrides         []string
+	containerOverride string
+	tui               bool
+	dash              *dashboard
 }
 
 func printUsage() {
@@ -89,11 +92,13 @@ func printUsage() {
 
 Usage:
   construct [options] [Constfile] [commands...]
-  construct <init|doctor|stats|cloud|clean|lint|graph|fmt|completion> [args...]
+  construct <init|import|shell|doctor|stats|cloud|clean|lint|graph|fmt|completion> [args...]
 
 Commands:
   list              List all available commands
   init [template]   Scaffold a Constfile (minimal, go, python, node, rust, monorepo)
+  import [FILE] [OUT]  Convert a Makefile to a Constfile (best-effort, --force)
+  shell [FILE] [cmd]  Start a shell with a command's env, workdir, or container
   doctor            Diagnose the environment, Constfile, tools, and cloud file
   stats             Show per-command timing history
   clean [targets]   Remove files declared in produces (--cache drops .construct-cache)
@@ -127,7 +132,9 @@ Options:
   --flame           Print a per-statement flame graph after the run
   --github-actions  GitHub Actions native output (auto-enabled in CI)
   --yes             Auto-approve confirm statements
-  --force, -f       Overwrite existing files (init)
+  --tui             Live dashboard for the run (q detaches, Ctrl-C cancels)
+  --container IMG   shell: run in this container image instead of the command's
+  --force, -f       Overwrite existing files (init, import)
   --repo OWNER/REPO GitHub repository for cloud jobs (default: git remote)
   --ref BRANCH      Git ref to dispatch cloud jobs on (default: current branch)
   --wait            Follow a cloud job and stream its logs
@@ -146,6 +153,8 @@ Examples:
   construct --list           List available commands
   construct --flame build    Run 'build' and show a timing flame graph
   construct cloud submit --wait test     Run 'test' on GitHub Actions
+  construct import Makefile  Convert a Makefile to ./Constfile
+  construct shell dev        Drop into the 'dev' command's environment
 `)
 }
 
@@ -269,7 +278,14 @@ func printDryRunBody(body []pkg.BodyStatement, indent int) {
 			if stmt.LoopIndex != "" {
 				loopVar = stmt.LoopIndex + ", " + loopVar
 			}
-			fmt.Printf("%sfor %s in %s {\n", prefix, loopVar, stmt.LoopItems)
+			keyword := "for"
+			if stmt.Parallel {
+				keyword = "parallel"
+				if stmt.ParallelJobs > 0 {
+					keyword = fmt.Sprintf("parallel<%d>", stmt.ParallelJobs)
+				}
+			}
+			fmt.Printf("%s%s %s in %s {\n", prefix, keyword, loopVar, stmt.LoopItems)
 			printDryRunBody(stmt.LoopBody, indent+1)
 			fmt.Printf("%s}\n", prefix)
 		case pkg.StmtSwitch:
@@ -390,6 +406,8 @@ func defineFlags(fs *flag.FlagSet, o *options) {
 	fs.BoolVar(&o.checkFormat, "check", false, "fmt: exit 1 when files are not formatted")
 	fs.StringVar(&o.jobsStr, "jobs", "", "Max parallel commands (0 = unlimited, auto = CPU count)")
 	fs.StringVar(&o.envFile, "env-file", "", "Load environment from file")
+	fs.StringVar(&o.containerOverride, "container", "", "`shell`: run in this container image instead of the command's")
+	fs.BoolVar(&o.tui, "tui", false, "Live dashboard for the run (requires a terminal)")
 	fs.StringVar(&o.shell, "shell", "", "Shell to run statements with (default: $SHELL)")
 	fs.StringArrayVarP(&o.overrides, "env", "e", []string{}, "Override variable (key=value)")
 }
@@ -749,6 +767,33 @@ func chooseTargetsLine(items []chooseItem, data *pkg.ParsedData) ([]string, erro
 	}
 }
 
+func tuiEligible(inputs *ConstructInput, o *options) bool {
+	if o.watch || o.repeat > 0 || o.dryRun || o.showList || o.choose || o.debug || o.explain || o.ghActions || o.quiet || o.resume {
+		fmt.Fprintln(os.Stderr, "(--tui disabled: incompatible with the selected options)")
+		return false
+	}
+	if !term.IsTerminal(int(os.Stdin.Fd())) || !term.IsTerminal(int(os.Stdout.Fd())) {
+		fmt.Fprintln(os.Stderr, "(--tui requires a terminal; running without the dashboard)")
+		return false
+	}
+	if p, err := pkg.NewParser(inputs.FileName); err == nil {
+		if data, err := p.Parse(); err == nil {
+			var all []pkg.BodyStatement
+			for _, cmd := range data.Commands {
+				all = append(all, collectAllStatements(cmd.Body)...)
+			}
+			for _, stmt := range all {
+				switch stmt.Type {
+				case pkg.StmtConfirm, pkg.StmtPrompt, pkg.StmtInput:
+					fmt.Fprintln(os.Stderr, "(--tui disabled: interactive statements need a plain terminal)")
+					return false
+				}
+			}
+		}
+	}
+	return true
+}
+
 func executeBuild(inputs *ConstructInput, o *options, runCtx context.Context) ([]string, error) {
 	p, err := pkg.NewParser(inputs.FileName)
 	if err != nil {
@@ -764,6 +809,15 @@ func executeBuild(inputs *ConstructInput, o *options, runCtx context.Context) ([
 	flagSet.SetOutput(io.Discard)
 	defineFlags(flagSet, &options{})
 	executor := pkg.NewExecutor(data, o.concurrent, o.debug)
+	if o.tui {
+		dashCtx, dashCancel := context.WithCancel(runCtx)
+		defer dashCancel()
+		runCtx = dashCtx
+		o.dash = newDashboard(executor, dashCancel)
+		executor.SetObserver(o.dash)
+		executor.SetSilentStatus(true)
+		go o.dash.start()
+	}
 	executor.SetBaseDir(filepath.Dir(inputs.FileName))
 	executor.SetJobs(o.jobs)
 	executor.SetTiming(o.timing)
@@ -975,7 +1029,7 @@ func exitError(err error) {
 //go:embed init-templates/*
 var initTemplates embed.FS
 
-var subcommandNames = []string{"init", "doctor", "stats", "cloud", "clean", "lint", "graph", "completion", "fmt"}
+var subcommandNames = []string{"init", "import", "shell", "doctor", "stats", "cloud", "clean", "lint", "graph", "completion", "fmt"}
 
 func isSubcommandName(s string) bool {
 	return slices.Contains(subcommandNames, s)
@@ -1482,6 +1536,10 @@ func main() {
 		switch positionals[0] {
 		case "init":
 			err = runInit(positionals[1:], &o)
+		case "import":
+			err = runImport(positionals[1:], &o)
+		case "shell":
+			err = runShellCmd(positionals[1:], &o)
 		case "doctor":
 			err = runDoctor(&o, inputs)
 		case "stats":
@@ -1616,8 +1674,15 @@ func main() {
 		return
 	}
 
+	if o.tui && !tuiEligible(inputs, &o) {
+		o.tui = false
+	}
+
 	runStart := time.Now()
 	files, err := executeBuild(inputs, &o, runCtx)
+	if o.dash != nil {
+		o.dash.stop()
+	}
 	if files != nil && o.notify {
 		notifySummary(inputs, err, time.Since(runStart))
 	}

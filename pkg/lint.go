@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 )
 
 type LintIssue struct {
@@ -44,6 +45,235 @@ func Lint(lines []string, data *ParsedData, baseDir string) []LintIssue {
 	issues = append(issues, lintMissingFileDeps(data, baseDir)...)
 	issues = append(issues, lintUnusedGlobals(data)...)
 	issues = append(issues, lintUnreferencedCommands(data)...)
+	issues = append(issues, lintHeaderKeywordMisuse(lines, data)...)
+	issues = append(issues, lintStatementPrefixes(lines)...)
+	issues = append(issues, lintLoopControl(data)...)
+	issues = append(issues, lintRefTrailingHyphen(lines, data)...)
+	issues = append(issues, lintStatementKeywordCommands(data)...)
+	return issues
+}
+
+var statementKeywordNames = map[string]bool{
+	"if": true, "else": true, "for": true, "matrix": true, "parallel": true,
+	"in": true, "switch": true, "case": true, "default": true, "env": true,
+	"invoke": true, "fail": true, "onfail": true, "require_env": true,
+	"retry": true, "confirm": true, "prompt": true, "input": true,
+	"global": true, "var": true, "state": true, "lock": true,
+	"continue": true, "break": true, "manual": true, "produces": true,
+	"container": true, "onchange": true, "import": true,
+}
+
+// lintStatementKeywordCommands flags headers like `env { ... }` or
+// `onfail { ... }` at the top level, which parse as commands literally
+// named after the statement keyword the writer meant to use in a body.
+func lintStatementKeywordCommands(data *ParsedData) []LintIssue {
+	var issues []LintIssue
+	for _, cmd := range data.Commands {
+		if !statementKeywordNames[cmd.Name] {
+			continue
+		}
+		issues = append(issues, LintIssue{
+			Line: max(cmd.SourceLine-1, 0), Col: 0, EndCol: len(cmd.Name),
+			Severity: LintError,
+			Message:  fmt.Sprintf("`%s` is a statement keyword — this line defines a command literally named `%s`; the statement belongs inside a command body", cmd.Name, cmd.Name),
+		})
+	}
+	return issues
+}
+
+// lintHeaderKeywordMisuse flags header modifiers written after the
+// prerequisite list, where they are silently treated as prerequisites or
+// file deps, and header timeouts that never parse.
+func lintHeaderKeywordMisuse(lines []string, data *ParsedData) []LintIssue {
+	var issues []LintIssue
+	for _, cmd := range data.Commands {
+		lineIdx := cmd.SourceLine - 1
+		if lineIdx < 0 || lineIdx >= len(lines) {
+			continue
+		}
+		line := lines[lineIdx]
+		lt := strings.IndexByte(line, '<')
+		brace := strings.IndexByte(line, '{')
+		if brace < 0 {
+			brace = len(line)
+		}
+
+		if lt >= 0 && brace > lt {
+			segment := line[lt+1 : brace]
+			for _, kw := range []string{"produces", "container", "timeout"} {
+				for _, tok := range strings.FieldsFunc(segment, func(r rune) bool { return r == ',' || r == ' ' || r == '\t' }) {
+					if tok != kw {
+						continue
+					}
+					if _, err := data.GetCommand(kw); err == nil {
+						continue
+					}
+					col := strings.Index(line[lt:], " "+kw)
+					if col < 0 {
+						col = 0
+					} else {
+						col += lt + 1
+					}
+					issues = append(issues, LintIssue{
+						Line: lineIdx, Col: col, EndCol: col + len(kw),
+						Severity: LintError,
+						Message:  fmt.Sprintf("`%s` after the prerequisite list is not a modifier — write `%s produces <artifact> < prereqs`-style headers (here `%s` is treated as a prerequisite)", kw, cmd.Name, kw),
+					})
+				}
+			}
+		}
+
+		if ti := findTopLevelKeyword(line, " timeout "); ti >= 0 && ti < brace {
+			seg := line[ti+len(" timeout "):]
+			for _, stop := range []string{"<", "{", " produces ", " onchange ", " container ", " in "} {
+				if c := strings.Index(seg, stop); c >= 0 {
+					seg = seg[:c]
+				}
+			}
+			seg = strings.TrimSpace(seg)
+			if seg != "" {
+				if _, err := time.ParseDuration(seg); err != nil {
+					issues = append(issues, LintIssue{
+						Line: lineIdx, Col: ti, EndCol: ti + len(" timeout "),
+						Severity: LintError,
+						Message:  fmt.Sprintf("invalid timeout duration %q (expected e.g. 30s, 5m)", seg),
+					})
+				}
+			}
+		}
+	}
+	return issues
+}
+
+// lintStatementPrefixes catches `timeout`/`retry` statements whose value is
+// malformed — the parser silently runs them as plain shell lines instead.
+func lintStatementPrefixes(lines []string) []LintIssue {
+	var issues []LintIssue
+	for lineIdx, raw := range lines {
+		line := strings.TrimSpace(raw)
+		if !strings.HasPrefix(line, "timeout ") && !strings.HasPrefix(line, "retry ") {
+			continue
+		}
+		kw := line[:strings.IndexByte(line, ' ')]
+		rest := strings.TrimSpace(line[len(kw):])
+		sp := strings.IndexAny(rest, " \t")
+		if sp <= 0 {
+			continue
+		}
+		value, tail := rest[:sp], strings.TrimSpace(rest[sp:])
+		if !strings.HasPrefix(tail, "$") && !strings.HasPrefix(tail, "! $") {
+			continue // likely a shell command that happens to start with the keyword
+		}
+		col := strings.Index(raw, value)
+		if col < 0 {
+			col = 0
+		}
+		if kw == "timeout" {
+			if _, err := time.ParseDuration(value); err != nil {
+				issues = append(issues, LintIssue{
+					Line: lineIdx, Col: col, EndCol: col + len(value),
+					Severity: LintError,
+					Message:  fmt.Sprintf("invalid timeout duration %q — the statement runs as a plain shell line (expected e.g. `timeout 30s $ cmd`)", value),
+				})
+			}
+		} else {
+			if n, err := strconv.Atoi(value); err != nil || n <= 0 {
+				issues = append(issues, LintIssue{
+					Line: lineIdx, Col: col, EndCol: col + len(value),
+					Severity: LintError,
+					Message:  fmt.Sprintf("retry expects a positive integer, got %q — the statement runs as a plain shell line (e.g. `retry 3 $ cmd`)", value),
+				})
+			}
+		}
+	}
+	return issues
+}
+
+// lintLoopControl flags loop-control statements outside any loop and
+// `break` inside a parallel loop, which cannot stop concurrent iterations.
+func lintLoopControl(data *ParsedData) []LintIssue {
+	var issues []LintIssue
+	var walk func(body []BodyStatement, inLoop, parallel bool)
+	walk = func(body []BodyStatement, inLoop, parallel bool) {
+		for _, stmt := range body {
+			switch stmt.Type {
+			case StmtContinue, StmtBreak:
+				if !inLoop {
+					issues = append(issues, LintIssue{
+						Line: max(stmt.SourceLine-1, 0), Col: 0, EndCol: 0,
+						Severity: LintError,
+						Message:  fmt.Sprintf("`%s` outside a loop", stmt.Type),
+					})
+				} else if stmt.Type == StmtBreak && parallel {
+					issues = append(issues, LintIssue{
+						Line: max(stmt.SourceLine-1, 0), Col: 0, EndCol: 0,
+						Severity: LintError,
+						Message:  "`break` cannot stop the concurrent iterations of a parallel loop — use `continue if` to skip items instead",
+					})
+				}
+			case StmtIf:
+				walk(stmt.ThenBody, inLoop, parallel)
+				walk(stmt.ElseBody, inLoop, parallel)
+			case StmtFor:
+				walk(stmt.LoopBody, true, stmt.Parallel)
+			case StmtOnFail:
+				walk(stmt.OnFailBody, inLoop, parallel)
+			case StmtSwitch:
+				for _, c := range stmt.Cases {
+					walk(c.Body, inLoop, parallel)
+				}
+			case StmtInDir, StmtLock:
+				walk(stmt.ThenBody, inLoop, parallel)
+			}
+		}
+	}
+	for _, cmd := range data.Commands {
+		walk(cmd.Body, false, false)
+	}
+	return issues
+}
+
+// lintRefTrailingHyphen flags references like `&svc-` where the hyphen is
+// part of the reference name — usually the writer meant `&svc` followed by
+// a literal hyphen.
+func lintRefTrailingHyphen(lines []string, data *ParsedData) []LintIssue {
+	known := func(name string) bool {
+		if _, err := data.GetCommand(name); err == nil {
+			return true
+		}
+		for _, v := range data.Variables {
+			if v.Name == name {
+				return true
+			}
+		}
+		return false
+	}
+	var issues []LintIssue
+	for lineIdx, line := range lines {
+		searchFrom := 0
+		for {
+			ampIdx := strings.IndexByte(line[searchFrom:], '&')
+			if ampIdx < 0 {
+				break
+			}
+			absIdx := searchFrom + ampIdx
+			name, nameLen := refNameAt(line, absIdx)
+			searchFrom = absIdx + 1
+			if name == "" || !strings.HasSuffix(name, "-") {
+				continue
+			}
+			searchFrom = absIdx + 1 + nameLen
+			base := strings.TrimSuffix(name, "-")
+			if base == "" || known(name) || !known(base) {
+				continue
+			}
+			issues = append(issues, LintIssue{
+				Line: lineIdx, Col: absIdx, EndCol: absIdx + nameLen,
+				Severity: LintWarning,
+				Message:  fmt.Sprintf("`&%s` includes the trailing `-` in the reference name — did you mean `&%s -`?", name, base),
+			})
+		}
+	}
 	return issues
 }
 

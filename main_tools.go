@@ -3,8 +3,10 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 
@@ -77,7 +79,96 @@ func readFileOr(path string) string {
 	return string(b)
 }
 
-// ---- construct clean ----
+func runImport(args []string, o *options) error {
+	input := "Makefile"
+	output := "Constfile"
+	var rest []string
+	for _, a := range args {
+		if strings.HasPrefix(a, "-") {
+			return exitAt(2, "unknown import option %q", a)
+		}
+		rest = append(rest, a)
+	}
+	if len(rest) > 0 {
+		input = rest[0]
+	}
+	if len(rest) > 1 {
+		output = rest[1]
+	}
+	if len(rest) > 2 {
+		return exitAt(2, "usage: construct import [Makefile] [output]")
+	}
+
+	content, err := os.ReadFile(input)
+	if err != nil {
+		return fmt.Errorf("cannot read %s: %w", input, err)
+	}
+	res, err := pkg.ImportMakefile(string(content))
+	if err != nil {
+		return fmt.Errorf("%s: %w", input, err)
+	}
+	if _, err := os.Stat(output); err == nil && !o.force {
+		return fmt.Errorf("%s already exists (use --force to overwrite)", output)
+	}
+	if err := os.WriteFile(output, []byte(res.Constfile), 0644); err != nil {
+		return err
+	}
+
+	fmt.Printf("imported %s -> %s: %d command(s), %d variable(s)", input, output, res.Commands, res.Variables)
+	if res.Flagged > 0 {
+		fmt.Printf(", %d line(s) flagged for review (search \"construct-import\")", res.Flagged)
+	}
+	fmt.Println()
+	fmt.Println("next: construct lint && construct --list")
+	return nil
+}
+
+func runShellCmd(args []string, o *options) error {
+	fileName := defaultConstfileName()
+	target := ""
+	var rest []string
+	for _, a := range args {
+		if strings.HasPrefix(a, "-") {
+			return exitAt(2, "unknown shell option %q", a)
+		}
+		rest = append(rest, a)
+	}
+	if len(rest) > 0 && fileExists(rest[0]) {
+		fileName = rest[0]
+		rest = rest[1:]
+	}
+	if len(rest) > 1 {
+		return exitAt(2, "usage: construct shell [Constfile] [command]")
+	}
+	if len(rest) == 1 {
+		target = rest[0]
+	}
+
+	data, err := parseConstfileOptional(fileName)
+	if err != nil {
+		return err
+	}
+	if data == nil {
+		return fmt.Errorf("no Constfile found (looked for %s)", fileName)
+	}
+
+	executor := pkg.NewExecutor(data, false, o.debug)
+	executor.SetBaseDir(filepath.Dir(fileName))
+	if o.envFile != "" {
+		if err := pkg.LoadEnvFile(o.envFile); err != nil {
+			return fmt.Errorf("failed to load env file %s: %w", o.envFile, err)
+		}
+	}
+
+	code, err := executor.InteractiveShell(target, o.containerOverride)
+	if err != nil {
+		return exitAt(2, "%v", err)
+	}
+	if code != 0 {
+		return exitAt(code, "shell exited with code %d", code)
+	}
+	return nil
+}
 
 func runClean(args []string, o *options) error {
 	fileName := defaultConstfileName()
@@ -161,12 +252,7 @@ func runClean(args []string, o *options) error {
 }
 
 func contains(list []string, s string) bool {
-	for _, v := range list {
-		if v == s {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(list, s)
 }
 
 func expandGlobs(pattern, dir string) []string {
@@ -185,8 +271,6 @@ func withinDir(path, dir string) bool {
 	}
 	return strings.HasPrefix(path, absDir+string(os.PathSeparator))
 }
-
-// ---- construct graph ----
 
 func runGraph(args []string, o *options) error {
 	fileName := defaultConstfileName()
@@ -219,7 +303,6 @@ func runGraph(args []string, o *options) error {
 	return nil
 }
 
-// graphRoots returns user commands that no other command depends on.
 func graphRoots(data *pkg.ParsedData) []string {
 	referenced := map[string]bool{}
 	var names []string
@@ -274,9 +357,7 @@ func printGraphChildren(data *pkg.ParsedData, name, prefix string, path map[stri
 
 func union(m map[string]bool, k string) map[string]bool {
 	out := make(map[string]bool, len(m)+1)
-	for k2, v := range m {
-		out[k2] = v
-	}
+	maps.Copy(out, m)
 	out[k] = true
 	return out
 }
@@ -360,8 +441,6 @@ func graphJSON(data *pkg.ParsedData, targets []string) error {
 	return nil
 }
 
-// ---- construct completion + hidden __targets ----
-
 func runTargets() error {
 	fileName := defaultConstfileName()
 	p, err := pkg.NewParser(fileName)
@@ -403,7 +482,6 @@ func runCompletion(args []string, o *options) error {
 	return nil
 }
 
-// flagList enumerates the CLI's flags for completion scripts.
 func flagList() [][2]string {
 	fs := flag.NewFlagSet("construct", flag.ContinueOnError)
 	defineFlags(fs, &options{})
@@ -457,7 +535,7 @@ func completionFish() error {
 	fmt.Println("complete -c construct -f")
 	fmt.Println(`complete -c construct -a '(construct __targets 2>/dev/null)' -d command`)
 	for _, f := range flagList() {
-		name := strings.SplitN(f[0], "/", 2)[0]
+		name, _, _ := strings.Cut(f[0], "/")
 		fmt.Printf("complete -c construct -l %s -d %q\n", strings.TrimPrefix(name, "--"), f[1])
 	}
 	return nil
@@ -481,8 +559,6 @@ func zshFlagArgs() string {
 	}
 	return strings.Join(parts, " ")
 }
-
-// ---- construct fmt ----
 
 func runFmt(args []string, o *options) error {
 	files := args
