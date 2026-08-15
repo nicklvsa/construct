@@ -441,6 +441,7 @@ func (p *Parser) Parse() (*ParsedData, error) {
 		return nil, err
 	}
 	p.computeCacheGlobals()
+	p.collectIndexedOutputRefs()
 
 	if err := p.detectCircularDependencies(); err != nil {
 		return nil, err

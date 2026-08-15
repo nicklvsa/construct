@@ -17,8 +17,6 @@ import (
 	"sync/atomic"
 	"time"
 	"unicode/utf8"
-
-	"github.com/spf13/pflag"
 )
 
 type execContext struct {
@@ -166,9 +164,6 @@ func (e *Executor) execBody(ctx *execContext, body []BodyStatement) (err error) 
 				e.debugf("env %s=%s\n", key, resolved)
 			}
 
-			rest := e.cleanStatements(body[i+1:], ctx.target, e.argFlags(ctx.target))
-			body = append(body[:i+1], rest...)
-
 		case StmtIf:
 			cond := e.resolveBodyValue(ctx, stmt.Cond, ctx.target.Name)
 			e.debugf("Evaluating condition: %s\n", cond)
@@ -257,9 +252,6 @@ func (e *Executor) execBody(ctx *execContext, body []BodyStatement) (err error) 
 			e.setRuntimeState(stmt.Shell, value)
 			e.StructuredParse.SetVariable(stmt.Shell, ctx.target.Name, value)
 			e.debugf("state %s=%s\n", stmt.Shell, value)
-			// Re-clean the remainder so &name refs pick up the new value.
-			rest := e.cleanStatements(body[i+1:], ctx.target, e.argFlags(ctx.target))
-			body = append(body[:i+1], rest...)
 
 		case StmtConfirm:
 			if !e.yes {
@@ -293,9 +285,6 @@ func (e *Executor) execBody(ctx *execContext, body []BodyStatement) (err error) 
 			line = strings.TrimSpace(line)
 			e.StructuredParse.SetVariable(stmt.Shell, ctx.target.Name, line)
 			e.debugf("input %s=%q\n", stmt.Shell, line)
-			// Re-clean the remainder so &name refs pick up the input.
-			rest := e.cleanStatements(body[i+1:], ctx.target, e.argFlags(ctx.target))
-			body = append(body[:i+1], rest...)
 
 		case StmtBuiltin:
 			if err := e.timed(ctx, truncateLabel(ctx.targetLabel()+": "+stmt.Shell+" "+stmt.BuiltinArgs), func() error {
@@ -311,11 +300,6 @@ func (e *Executor) execBody(ctx *execContext, body []BodyStatement) (err error) 
 				return err
 			}
 
-			if stmt.OutputName != "" {
-				rest := e.cleanStatements(body[i+1:], ctx.target, e.argFlags(ctx.target))
-				body = append(body[:i+1], rest...)
-			}
-
 		case StmtFor:
 			items := e.resolveBodyValue(ctx, stmt.LoopItems, ctx.target.Name)
 			items = e.expandOutputRefs(items, ctx.target.Name)
@@ -328,10 +312,9 @@ func (e *Executor) execBody(ctx *execContext, body []BodyStatement) (err error) 
 			} else {
 				expanded = e.expandLoopItems(ctx, items)
 			}
-			argFlags := e.argFlags(ctx.target)
 
 			if stmt.Parallel {
-				if err := e.execParallelFor(ctx, stmt, expanded, argFlags); err != nil {
+				if err := e.execParallelFor(ctx, stmt, expanded); err != nil {
 					return err
 				}
 				continue
@@ -344,8 +327,7 @@ func (e *Executor) execBody(ctx *execContext, body []BodyStatement) (err error) 
 					e.StructuredParse.SetVariable(stmt.LoopIndex, ctx.target.Name, strconv.Itoa(idx))
 				}
 				e.debugf("For loop %s = %s\n", stmt.LoopVar, item)
-				cleaned := e.cleanStatements(stmt.LoopBody, ctx.target, argFlags)
-				err := e.execBody(ctx, cleaned)
+				err := e.execBody(ctx, stmt.LoopBody)
 				switch {
 				case errors.Is(err, errLoopContinue):
 					continue
@@ -380,7 +362,8 @@ func (e *Executor) execBody(ctx *execContext, body []BodyStatement) (err error) 
 			if e.streaming(ctx) {
 				end := i
 				for end < len(body) && body[end].Type == StmtShell && body[end].Retry == 0 && body[end].Timeout == "" &&
-					!strings.HasPrefix(body[end].Shell, "!") &&
+					!(ctx.isPrereq && body[end].OutputName != "") &&
+					!strings.HasPrefix(shellLineBody(body[end].Shell), "!") &&
 					!strings.Contains(body[end].Shell, "&last.") {
 					end++
 				}
@@ -404,7 +387,7 @@ func (e *Executor) execBody(ctx *execContext, body []BodyStatement) (err error) 
 	return nil
 }
 
-func (e *Executor) execParallelFor(ctx *execContext, stmt BodyStatement, items []string, argFlags map[string]bool) error {
+func (e *Executor) execParallelFor(ctx *execContext, stmt BodyStatement, items []string) error {
 	limit := stmt.ParallelJobs
 	if limit <= 0 {
 		limit = e.jobs
@@ -437,7 +420,7 @@ func (e *Executor) execParallelFor(ctx *execContext, stmt BodyStatement, items [
 		go func(idx int, item string) {
 			defer wg.Done()
 			defer func() { <-gate }()
-			err := e.runParallelIteration(ctx, stmt, item, idx, snapshot, argFlags, dupes[item] > 1)
+			err := e.runParallelIteration(ctx, stmt, item, idx, snapshot, dupes[item] > 1)
 			switch {
 			case errors.Is(err, errLoopContinue):
 			case errors.Is(err, errLoopBreak):
@@ -459,7 +442,7 @@ func (e *Executor) execParallelFor(ctx *execContext, stmt BodyStatement, items [
 	return nil
 }
 
-func (e *Executor) runParallelIteration(ctx *execContext, stmt BodyStatement, item string, idx int, snapshot []*Variable, argFlags map[string]bool, qualify bool) error {
+func (e *Executor) runParallelIteration(ctx *execContext, stmt BodyStatement, item string, idx int, snapshot []*Variable, qualify bool) error {
 	scope := ctx.target.Name + "/" + item
 	if qualify {
 		scope = fmt.Sprintf("%s/%s#%d", ctx.target.Name, item, idx)
@@ -480,8 +463,7 @@ func (e *Executor) runParallelIteration(ctx *execContext, stmt BodyStatement, it
 	sub.onFails = nil
 	sub.forcePrefix = true
 
-	cleaned := e.cleanStatements(stmt.LoopBody, &iterCmd, argFlags)
-	return e.execBody(&sub, cleaned)
+	return e.execBody(&sub, stmt.LoopBody)
 }
 
 func truncateLabel(s string) string {
@@ -505,8 +487,7 @@ func (e *Executor) runOnFails(ctx *execContext, cause error) error {
 	}
 
 	for _, body := range snapshot {
-		cleaned := e.cleanStatements([]BodyStatement{body}, ctx.target, e.argFlags(ctx.target))
-		if err := e.execBody(ctx, cleaned); err != nil {
+		if err := e.execBody(ctx, []BodyStatement{body}); err != nil {
 			fmt.Fprintf(os.Stderr, "onfail error: %v\n", err)
 		}
 	}
@@ -565,19 +546,19 @@ func (e *Executor) invokeCommand(ctx *execContext, stmt BodyStatement) error {
 		}
 	}
 
-	cleaned := e.cleanStatements(e.bodyFor(invoked), ctx.target, e.argFlags(ctx.target))
+	body := e.bodyFor(invoked)
 
 	var invokeErr error
 	if stmt.OutputName != "" {
 		var buf bytes.Buffer
 		sub.out = &buf
-		invokeErr = e.execBody(&sub, cleaned)
+		invokeErr = e.execBody(&sub, body)
 		if invokeErr == nil {
 			e.StructuredParse.SetVariable(stmt.OutputName, ctx.target.Name, strings.TrimSpace(buf.String()))
 			e.debugf("invoke %s captured %d bytes\n", invoked.Name, buf.Len())
 		}
 	} else {
-		invokeErr = e.execBody(&sub, cleaned)
+		invokeErr = e.execBody(&sub, body)
 	}
 
 	e.mu.Lock()
@@ -647,152 +628,28 @@ func envIsSet(ctx *execContext, name string) bool {
 	return ok
 }
 
-// ---- statement cleaning: resolve references ahead of execution ----
+// ---- prereq output seeding ----
 
-func (e *Executor) argFlags(cmd *Command) map[string]bool {
-	flags := make(map[string]bool, len(cmd.Arguments))
-	scope := cmd.flagScope()
-	for _, arg := range cmd.Arguments {
-		flags[scope+":"+arg.Name] = true
+// seedPrereqOutputs exposes a prerequisite's captured outputs to the calling
+// command's scope as &prereq.N / &prereq.name variables. Reference resolution
+// itself happens lazily at execution time (see resolveShellLine), so bodies no
+// longer need to be re-cleaned after env/state/input statements or per loop
+// iteration.
+func (e *Executor) seedPrereqOutputs(cmd *Command) {
+	if len(cmd.PrereqCmds) == 0 {
+		return
 	}
-	return flags
-}
-
-func (e *Executor) cleanCommandBody(cmd *Command, body []BodyStatement) []BodyStatement {
-	if len(cmd.PrereqCmds) > 0 {
-		for _, prereq := range cmd.PrereqCmds {
-			for idx, arg := range prereq.PrereqOutput {
-				varName := prereq.Name + "." + strconv.Itoa(idx)
-				e.StructuredParse.SetVariable(strings.TrimSpace(varName), cmd.Name, strings.TrimSpace(arg))
-			}
-
-			for name, val := range prereq.NamedOutput {
-				varName := prereq.Name + "." + name
-				e.StructuredParse.SetVariable(varName, cmd.Name, strings.TrimSpace(val))
-			}
-		}
-	}
-	return e.cleanStatements(body, cmd, e.argFlags(cmd))
-}
-
-func (e *Executor) cleanStatements(stmts []BodyStatement, cmd *Command, argFlags map[string]bool) []BodyStatement {
-	out := make([]BodyStatement, len(stmts))
-	for i, stmt := range stmts {
-		switch stmt.Type {
-		case StmtIf:
-			out[i] = BodyStatement{
-				Type:       StmtIf,
-				Cond:       stmt.Cond,
-				ThenBody:   e.cleanStatements(stmt.ThenBody, cmd, argFlags),
-				ElseBody:   e.cleanStatements(stmt.ElseBody, cmd, argFlags),
-				SourceLine: stmt.SourceLine,
-			}
-		case StmtFor:
-			out[i] = BodyStatement{
-				Type:         StmtFor,
-				LoopVar:      stmt.LoopVar,
-				LoopIndex:    stmt.LoopIndex,
-				LoopItems:    e.cleanLoopItems(cmd, stmt.LoopItems),
-				LoopBody:     stmt.LoopBody,
-				Parallel:     stmt.Parallel,
-				ParallelJobs: stmt.ParallelJobs,
-				SourceLine:   stmt.SourceLine,
-			}
-		case StmtSwitch:
-			cases := make([]SwitchCase, len(stmt.Cases))
-			for j, c := range stmt.Cases {
-				cases[j] = SwitchCase{
-					Values:     c.Values,
-					IsDefault:  c.IsDefault,
-					Body:       e.cleanStatements(c.Body, cmd, argFlags),
-					SourceLine: c.SourceLine,
-				}
-			}
-			out[i] = BodyStatement{
-				Type:       StmtSwitch,
-				SwitchExpr: stmt.SwitchExpr,
-				Modifier:   stmt.Modifier,
-				Cases:      cases,
-				SourceLine: stmt.SourceLine,
-			}
-		case StmtInDir, StmtLock:
-			out[i] = BodyStatement{
-				Type:       stmt.Type,
-				Shell:      stmt.Shell,
-				Modifier:   stmt.Modifier,
-				ThenBody:   e.cleanStatements(stmt.ThenBody, cmd, argFlags),
-				SourceLine: stmt.SourceLine,
-			}
-		case StmtContinue, StmtBreak, StmtFail, StmtRequireEnv:
-			out[i] = stmt
-		case StmtInvoke, StmtEnv, StmtOnFail, StmtState, StmtConfirm, StmtPrompt, StmtInput, StmtBuiltin:
-			out[i] = stmt
-		default:
-			out[i] = BodyStatement{Type: StmtShell, Shell: e.cleanShellLine(cmd, stmt.Shell, argFlags), OutputName: stmt.OutputName, Retry: stmt.Retry, Timeout: stmt.Timeout, Modifier: stmt.Modifier, SourceLine: stmt.SourceLine}
-		}
-	}
-	return out
-}
-
-func (e *Executor) cleanShellLine(cmd *Command, line string, argFlags map[string]bool) string {
-	line = strings.TrimSpace(line)
-	if line == "" {
-		return ""
-	}
-
-	if len(line) > 0 && line[0] == '$' {
-		line = strings.TrimSpace(line[1:])
-	}
-
-	line = resolveVarRefs(line, func(name string) (string, bool) {
-		if name == "last.exit" || name == "last.output" {
-			return "", false // resolved lazily at execution time
-		}
-		v, ok := LookupVariableIndexed(e.StructuredParse, name, cmd.Name)
-		if !ok {
-			return "", false
-		}
-		return escapeShellValue(v.Joined()), true
-	})
-
-	for _, arg := range cmd.Arguments {
-		lookupKey := cmd.flagScope() + ":" + arg.Name
-		if !argFlags[lookupKey] {
-			continue
+	for _, prereq := range cmd.PrereqCmds {
+		for idx, arg := range prereq.PrereqOutput {
+			varName := prereq.Name + "." + strconv.Itoa(idx)
+			e.StructuredParse.SetVariable(strings.TrimSpace(varName), cmd.Name, strings.TrimSpace(arg))
 		}
 
-		if !strings.Contains(line, "&"+arg.Name) {
-			continue
+		for name, val := range prereq.NamedOutput {
+			varName := prereq.Name + "." + name
+			e.StructuredParse.SetVariable(varName, cmd.Name, strings.TrimSpace(val))
 		}
-		e.debugf("Handling argument --%s for command %s\n", arg.Name, cmd.Name)
-		fs := e.flagSet
-		if fs == nil {
-			fs = pflag.CommandLine
-		}
-
-		v, _ := fs.GetString(lookupKey)
-		line = strings.ReplaceAll(line, "&"+arg.Name, escapeShellValue(v))
 	}
-
-	return resolveEnvRefsKeepUnset(line)
-}
-
-func (e *Executor) cleanLoopItems(cmd *Command, line string) string {
-	line = strings.TrimSpace(line)
-	if line == "" {
-		return ""
-	}
-	if len(line) > 0 && line[0] == '$' {
-		line = strings.TrimSpace(line[1:])
-	}
-	line = resolveVarRefs(line, func(name string) (string, bool) {
-		v, ok := LookupVariableIndexed(e.StructuredParse, name, cmd.Name)
-		if !ok {
-			return "", false
-		}
-		return v.String(), true
-	})
-	return resolveEnvRefsKeepUnset(line)
 }
 
 // expandOutputRefs rewrites &cmd.* into the comma-joined prereq outputs of cmd.
@@ -839,8 +696,17 @@ func (e *Executor) expandOutputRefs(items, scope string) string {
 	return result.String()
 }
 
+// streaming reports whether plain consecutive shell statements can run as one
+// batched shell script. Prerequisite bodies qualify only when nothing
+// references their per-statement outputs, since batching merges the captures.
 func (e *Executor) streaming(ctx *execContext) bool {
-	return !e.debug && !ctx.isPrereq && ctx.target.LazyEval == nil && ctx.out == nil
+	if e.debug || ctx.target.LazyEval != nil || ctx.out != nil {
+		return false
+	}
+	if ctx.isPrereq {
+		return !e.StructuredParse.OutputsIndexReferenced(ctx.target.Name)
+	}
+	return true
 }
 
 func (e *Executor) bodyFor(cmd *Command) []BodyStatement {

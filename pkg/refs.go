@@ -154,7 +154,37 @@ func VarRefNames(s string) []string {
 	return names
 }
 
-// isEnvDefaultEnd reports characters that terminate an @ENV:-default value.
+func wildcardRefNames(s string) []string {
+	if strings.IndexByte(s, '&') < 0 {
+		return nil
+	}
+	var names []string
+	runes := []rune(s)
+	for i := 0; i < len(runes); i++ {
+		if runes[i] != '&' {
+			continue
+		}
+		j := i + 1
+		for j < len(runes) && isVarIdentRune(runes[j]) {
+			j++
+		}
+		if j == i+1 {
+			continue
+		}
+		for j < len(runes) && runes[j] == '.' && j+1 < len(runes) && isPlainRune(runes[j+1]) {
+			j++
+			for j < len(runes) && isPlainRune(runes[j]) {
+				j++
+			}
+		}
+		if j+1 < len(runes) && runes[j] == '.' && runes[j+1] == '*' {
+			names = append(names, string(runes[i+1:j]))
+			i = j + 1
+		}
+	}
+	return names
+}
+
 func isEnvDefaultEnd(r rune) bool {
 	switch r {
 	case ' ', '\t', '\r', '\n', '"', '\'', ',', ';', '&', '@', '$':

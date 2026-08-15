@@ -9,11 +9,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"slices"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/spf13/pflag"
 )
 
 func (e *Executor) command(ctx *execContext, argv []string) *exec.Cmd {
@@ -98,6 +101,78 @@ func (e *Executor) shellArgsFor(ctx *execContext, script string) (argv []string,
 	return argv, rt + " run " + image + " /bin/sh -c " + script
 }
 
+func (e *Executor) resolveShellLine(ctx *execContext, line string) string {
+	cmd := ctx.target
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return ""
+	}
+	if line[0] == '$' {
+		line = strings.TrimSpace(line[1:])
+	}
+
+	line = resolveVarRefs(line, func(name string) (string, bool) {
+		if name == "last.exit" || name == "last.output" {
+			return "", false // resolved after vars/args, below
+		}
+		v, ok := LookupVariableIndexed(e.StructuredParse, name, cmd.Name)
+		if !ok {
+			return "", false
+		}
+		return escapeShellValue(v.Joined()), true
+	})
+
+	for _, arg := range cmd.Arguments {
+		if !strings.Contains(line, "&"+arg.Name) {
+			continue
+		}
+		e.debugf("Handling argument --%s for command %s\n", arg.Name, cmd.Name)
+		fs := e.flagSet
+		if fs == nil {
+			fs = pflag.CommandLine
+		}
+		v, _ := fs.GetString(cmd.flagScope() + ":" + arg.Name)
+		line = strings.ReplaceAll(line, "&"+arg.Name, escapeShellValue(v))
+	}
+
+	line = e.resolveLastRefs(line, cmd.Name)
+	return e.resolveBodyEnvRef(ctx, line)
+}
+
+var isolationRe = regexp.MustCompile(`\b(cd|pushd|popd|export|declare|typeset|readonly|local|set|unset|setopt|unsetopt|shopt|trap|umask|ulimit|alias|unalias|eval|exec|source|exit|return|break|continue|shift|read|readarray|mapfile|let|suspend|hash|caller)\b`)
+
+func needsShellIsolation(line string) bool {
+	if isolationRe.MatchString(line) {
+		return true
+	}
+	if strings.Contains(line, "((") {
+		return true
+	}
+	// Leading assignment (VAR=value …) defines a shell variable.
+	name, _, ok := strings.Cut(line, "=")
+	if !ok {
+		return false
+	}
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return false
+	}
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		if c == '_' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || i > 0 && c >= '0' && c <= '9' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func shellLineBody(line string) string {
+	line = strings.TrimSpace(line)
+	line = strings.TrimPrefix(line, "$")
+	return strings.TrimSpace(line)
+}
+
 func (e *Executor) runShellBatch(ctx *execContext, stmts []BodyStatement) error {
 	type group struct {
 		lines    []string
@@ -105,26 +180,30 @@ func (e *Executor) runShellBatch(ctx *execContext, stmts []BodyStatement) error 
 		sourceLn int
 	}
 	var groups []*group
-	cur := &group{strict: !strings.HasPrefix(stmts[0].Shell, "!"), sourceLn: stmts[0].SourceLine}
+	cur := &group{strict: !strings.HasPrefix(shellLineBody(stmts[0].Shell), "!"), sourceLn: stmts[0].SourceLine}
 
 	for _, stmt := range stmts {
 		cmdLine := stmt.Shell
 		if cmdLine == "" {
 			continue
 		}
-		tolerant := strings.HasPrefix(cmdLine, "!")
+		tolerant := strings.HasPrefix(shellLineBody(cmdLine), "!")
 		if tolerant {
-			cmdLine = strings.TrimSpace(cmdLine[1:])
+			cmdLine = strings.TrimSpace(strings.TrimPrefix(shellLineBody(cmdLine), "!"))
 		}
-		cmdLine = e.resolveBodyEnvRef(ctx, cmdLine)
-		cmdLine = strings.TrimSpace(strings.TrimPrefix(cmdLine, "$"))
-		if supportsPipefail(e.shellName) {
-			cmdLine = "set -o pipefail; " + cmdLine
+		cmdLine = e.resolveShellLine(ctx, cmdLine)
+		if cmdLine == "" {
+			continue
 		}
-		if tolerant {
-			cmdLine = "( " + cmdLine + " ) || true"
-		} else {
-			cmdLine = "( " + cmdLine + " )"
+		switch {
+		case needsShellIsolation(cmdLine) || strings.Contains(cmdLine, ";"):
+			if tolerant {
+				cmdLine = "( " + cmdLine + " ) || true"
+			} else {
+				cmdLine = "( " + cmdLine + " )"
+			}
+		case tolerant:
+			cmdLine = cmdLine + " || true"
 		}
 		if cur.strict == tolerant { // tolerance changed: start a new group
 			groups = append(groups, cur)
@@ -153,8 +232,8 @@ func (e *Executor) runShellBatch(ctx *execContext, stmts []BodyStatement) error 
 
 		var buf bytes.Buffer
 		sink := io.Writer(e.outSink())
-		if e.quiet {
-			sink = io.Discard
+		if e.quiet || ctx.isPrereq {
+			sink = io.Discard // prereq stdout is captured, not streamed
 		} else if oc, ok := e.observer.(OutputCollector); ok {
 			sink = oc.OutputWriter(ctx.target.Name)
 		} else if e.prefixOutput || ctx.forcePrefix {
@@ -172,6 +251,11 @@ func (e *Executor) runShellBatch(ctx *execContext, stmts []BodyStatement) error 
 			pw.flush()
 		}
 		e.setLastResult(ctx, exitCodeOf(err), buf.String())
+		if ctx.isPrereq {
+			e.mu.Lock()
+			ctx.target.PrereqOutput = append(ctx.target.PrereqOutput, strings.TrimSpace(buf.String()))
+			e.mu.Unlock()
+		}
 		if err != nil {
 			return e.commandError(fullCommand, ctx, BodyStatement{SourceLine: g.sourceLn}, err, "")
 		}
@@ -240,14 +324,15 @@ func (e *Executor) runShellOnce(ctx *execContext, stmt BodyStatement) error {
 	}
 
 	ignoreErr := false
-	if strings.HasPrefix(cmdLine, "!") {
+	if body := shellLineBody(cmdLine); strings.HasPrefix(body, "!") {
 		ignoreErr = true
-		cmdLine = strings.TrimSpace(cmdLine[1:])
+		cmdLine = strings.TrimSpace(body[1:])
 	}
 
-	cmdLine = e.resolveLastRefs(cmdLine, ctx.target.Name)
-	cmdLine = e.resolveBodyEnvRef(ctx, cmdLine)
-	cmdLine = strings.TrimSpace(strings.TrimPrefix(cmdLine, "$"))
+	cmdLine = e.resolveShellLine(ctx, cmdLine)
+	if cmdLine == "" {
+		return nil
+	}
 	if supportsPipefail(e.shellName) {
 		cmdLine = "set -o pipefail\n" + cmdLine
 	}

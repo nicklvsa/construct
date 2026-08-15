@@ -97,6 +97,13 @@ func (p *Parser) classifyPrereqs() error {
 	return nil
 }
 
+func (p *Parser) collectIndexedOutputRefs() {
+	refs := p.Data.computeIndexedOutputRefs()
+	p.Data.mu.Lock()
+	p.Data.indexedOutputRefs = refs
+	p.Data.mu.Unlock()
+}
+
 func (p *Parser) computeCacheGlobals() {
 	refsByName := make(map[string][]string, len(p.Data.Variables))
 	globalNames := make(map[string]bool, len(p.Data.Variables))
@@ -177,5 +184,35 @@ func collectStmtRefs(stmts []BodyStatement, out map[string]bool) {
 		collectStmtRefs(stmt.ElseBody, out)
 		collectStmtRefs(stmt.LoopBody, out)
 		collectStmtRefs(stmt.OnFailBody, out)
+	}
+}
+
+func collectStmtWildcardRefs(stmts []BodyStatement, out map[string]bool) {
+	for i := range stmts {
+		stmt := &stmts[i]
+		for _, str := range []string{stmt.Shell, stmt.Cond, stmt.LoopItems, stmt.SwitchExpr, stmt.Message, stmt.BuiltinArgs, stmt.Dir} {
+			for _, n := range wildcardRefNames(str) {
+				out[n] = true
+			}
+		}
+		for _, pair := range stmt.Env {
+			if _, val, ok := strings.Cut(pair, "="); ok {
+				for _, n := range wildcardRefNames(val) {
+					out[n] = true
+				}
+			}
+		}
+		for _, c := range stmt.Cases {
+			for _, v := range c.Values {
+				for _, n := range wildcardRefNames(v) {
+					out[n] = true
+				}
+			}
+			collectStmtWildcardRefs(c.Body, out)
+		}
+		collectStmtWildcardRefs(stmt.ThenBody, out)
+		collectStmtWildcardRefs(stmt.ElseBody, out)
+		collectStmtWildcardRefs(stmt.LoopBody, out)
+		collectStmtWildcardRefs(stmt.OnFailBody, out)
 	}
 }

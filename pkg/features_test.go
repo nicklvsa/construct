@@ -1715,6 +1715,66 @@ func TestShellBatchingInLoop(t *testing.T) {
 	}
 }
 
+func TestDollarPrefixedTolerantLine(t *testing.T) {
+	data := &ParsedData{
+		Commands: []*Command{
+			{Name: "tol", Body: shellBody("echo first", "$ ! "+exitNonZero(), "echo last")},
+		},
+	}
+	data.buildIndexMaps()
+	if out := runAndCapture(t, data, "tol"); out != "first\nlast" {
+		t.Errorf("output = %q, want %q", out, "first\nlast")
+	}
+}
+
+func TestPrereqBodyBatchedWhenOutputsUnreferenced(t *testing.T) {
+	data := &ParsedData{
+		Commands: []*Command{
+			{Name: "quiet", Body: shellBody("echo one", "echo two")},
+			{Name: "top", Prereqs: []string{"quiet"}, Body: shellBody("echo done")},
+		},
+	}
+	data.buildIndexMaps()
+	if out := runAndCapture(t, data, "top"); out != "done" {
+		t.Errorf("output = %q, want %q (prereq stdout stays captured)", out, "done")
+	}
+}
+
+func TestNeedsShellIsolation(t *testing.T) {
+	mutating := []string{
+		"cd /tmp && pwd",
+		"export FOO=bar",
+		"set -x",
+		"VAR=value cmd",
+		"unset VAR",
+		"trap 'echo bye' EXIT",
+		"eval 'cd /tmp'",
+		"((counter++))",
+		"printf 'a'; cd /tmp",
+		"source env.sh",
+	}
+	for _, line := range mutating {
+		if !needsShellIsolation(line) {
+			t.Errorf("needsShellIsolation(%q) = false, want true", line)
+		}
+	}
+	plain := []string{
+		"echo hello",
+		"make all",
+		"go build ./...",
+		"cat file.txt | grep x",
+		"printf '%s' hi",
+		"test -f x && echo yes",
+		"asset-settle-words", // substring must not trip the keyword match
+		"echo a=b",
+	}
+	for _, line := range plain {
+		if needsShellIsolation(line) {
+			t.Errorf("needsShellIsolation(%q) = true, want false", line)
+		}
+	}
+}
+
 func runAndCapture(t *testing.T, data *ParsedData, target string) string {
 	t.Helper()
 	so, sw, _ := os.Pipe()

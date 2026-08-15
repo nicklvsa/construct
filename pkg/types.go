@@ -14,14 +14,62 @@ type ParsedData struct {
 
 	SourceFiles []string `json:"source_files,omitempty"`
 
-	variableMap map[string]*Variable // key: "scope.name"
-	commandMap  map[string]*Command  // key: command name
+	variableMap       map[string]*Variable // key: "scope.name"
+	commandMap        map[string]*Command  // key: command name
+	indexedOutputRefs map[string]bool      // commands referenced as &name.N / &name.*
 
 	mu sync.RWMutex
 }
 
-// buildIndexMapsLocked creates the lookup maps if missing; mu must be held.
-// addVariable/addCommand keep them in sync afterwards.
+func (p *ParsedData) OutputsIndexReferenced(name string) bool {
+	p.mu.RLock()
+	refs := p.indexedOutputRefs
+	p.mu.RUnlock()
+	if refs == nil {
+		refs = p.computeIndexedOutputRefs()
+		p.mu.Lock()
+		p.indexedOutputRefs = refs
+		p.mu.Unlock()
+	}
+	return refs[name]
+}
+
+func (p *ParsedData) computeIndexedOutputRefs() map[string]bool {
+	all := map[string]bool{}
+	wildcards := map[string]bool{}
+	for _, cmd := range p.Commands {
+		collectStmtRefs(cmd.Body, all)
+		collectStmtWildcardRefs(cmd.Body, wildcards)
+		for _, str := range cmd.Produces {
+			for _, n := range VarRefNames(str) {
+				all[n] = true
+			}
+			for _, n := range wildcardRefNames(str) {
+				wildcards[n] = true
+			}
+		}
+		for _, str := range cmd.OnChange {
+			for _, n := range VarRefNames(str) {
+				all[n] = true
+			}
+			for _, n := range wildcardRefNames(str) {
+				wildcards[n] = true
+			}
+		}
+	}
+
+	refs := make(map[string]bool)
+	for n := range wildcards {
+		refs[n] = true
+	}
+	for n := range all {
+		if dot := strings.LastIndexByte(n, '.'); dot > 0 && n[dot+1:] != "" && strings.Trim(n[dot+1:], "0123456789") == "" {
+			refs[n[:dot]] = true
+		}
+	}
+	return refs
+}
+
 func (p *ParsedData) buildIndexMapsLocked() {
 	if p.variableMap == nil {
 		p.variableMap = make(map[string]*Variable, len(p.Variables))

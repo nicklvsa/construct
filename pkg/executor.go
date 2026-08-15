@@ -36,6 +36,9 @@ type Executor struct {
 	flagSet         *pflag.FlagSet
 	cache           fileCache
 	cacheLoaded     bool
+	cacheDirty      bool
+	hashMemo        map[string]string
+	stateDirty      bool
 	runs            map[string]*commandRun
 	baseDir         string
 	jobs            int
@@ -348,8 +351,13 @@ func (e *Executor) executeCommand(command *Command, prereqDir string, isPrereq b
 		return ResolveEnvRefs(s)
 	}
 
+	var depFiles []string
+	if len(command.FileDeps) > 0 && !isPrereq {
+		depFiles = expandFileDeps(command.FileDeps, e.workDirFor(command, resolveValue, workDir))
+	}
+
 	if len(command.FileDeps) > 0 && !isPrereq && len(command.Produces) == 0 && !e.noCache {
-		if skip, reason := e.shouldSkip(command, resolveValue, workDir); skip {
+		if skip, reason := e.shouldSkip(command, depFiles); skip {
 			e.explainf("(%s cached: %s)\n", command.Name, reason)
 			if !e.explain && !e.silentStatus {
 				fmt.Printf("(%s cached)\n", command.Name)
@@ -363,7 +371,7 @@ func (e *Executor) executeCommand(command *Command, prereqDir string, isPrereq b
 		}
 	}
 	if len(command.Produces) > 0 && !isPrereq && !e.noCache {
-		if skip, reason := e.shouldSkipProduced(command, resolveValue, workDir); skip {
+		if skip, reason := e.shouldSkipProduced(command, resolveValue, workDir, depFiles); skip {
 			e.explainf("(%s up to date: %s)\n", command.Name, reason)
 			if !e.explain && !e.silentStatus {
 				fmt.Printf("(%s up to date)\n", command.Name)
@@ -377,8 +385,8 @@ func (e *Executor) executeCommand(command *Command, prereqDir string, isPrereq b
 		}
 	}
 
-	if len(command.FileDeps) > 0 && !isPrereq {
-		for _, dep := range expandFileDeps(command.FileDeps, e.workDirFor(command, resolveValue, workDir)) {
+	if len(depFiles) > 0 {
+		for _, dep := range depFiles {
 			if _, err := os.Stat(dep); err != nil {
 				fmt.Fprintf(os.Stderr, "warning: %s: file dependency %q does not exist\n", command.Name, dep)
 			}
@@ -436,7 +444,6 @@ func (e *Executor) executeCommand(command *Command, prereqDir string, isPrereq b
 	}
 
 	if e.concurrent && len(prereqCmds) > 1 {
-		// DAG execution: evaluate independent prerequisites in parallel.
 		results := make([]*Command, len(prereqCmds))
 		errs := make([]error, len(prereqCmds))
 		var wg sync.WaitGroup
@@ -464,7 +471,8 @@ func (e *Executor) executeCommand(command *Command, prereqDir string, isPrereq b
 		}
 	}
 
-	body := e.cleanCommandBody(command, e.bodyFor(command))
+	e.seedPrereqOutputs(command)
+	body := e.bodyFor(command)
 
 	e.notifyStart(command.Name)
 
@@ -491,11 +499,14 @@ func (e *Executor) executeCommand(command *Command, prereqDir string, isPrereq b
 	}
 
 	if len(command.Produces) > 0 && !isPrereq {
-		for _, artifact := range expandFileDeps(command.Produces, e.workDirFor(command, resolveValue, workDir)) {
+		produced := expandFileDeps(command.Produces, e.workDirFor(command, resolveValue, workDir))
+		for _, artifact := range produced {
 			if _, err := os.Stat(artifact); err != nil {
 				fmt.Fprintf(os.Stderr, "warning: %s declares produces %q but it does not exist\n", command.Name, artifact)
 			}
 		}
+		// Files this command just built must re-hash for later commands.
+		e.invalidateHashes(produced)
 	}
 
 	if len(command.FileDeps) > 0 && !isPrereq && len(command.Produces) == 0 && !e.noCache {
@@ -536,12 +547,17 @@ func (e *Executor) Execute(commands []string) error {
 	e.loadState()
 
 	for _, decl := range e.StructuredParse.StateDecls {
-		if _, exists := e.state[decl.Name]; !exists {
+		e.mu.Lock()
+		_, exists := e.state[decl.Name]
+		e.mu.Unlock()
+		if !exists {
 			e.setRuntimeState(decl.Name, e.resolveGlobalValue(decl.Value))
 			e.debugf("state %s=%s (initialized)\n", decl.Name, decl.Value)
 		}
 	}
 	defer e.saveRunRecords()
+	defer e.flushCache()
+	defer e.flushState()
 
 	targets := make([]string, 0, len(commands))
 	for _, cmdName := range commands {

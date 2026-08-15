@@ -103,6 +103,11 @@ func (e *Executor) loadState() {
 	if e.stateLoaded {
 		return
 	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.stateLoaded {
+		return
+	}
 	e.stateLoaded = true
 	e.state = make(map[string]string)
 	data, err := os.ReadFile(e.statePath())
@@ -117,6 +122,8 @@ func (e *Executor) loadState() {
 
 func (e *Executor) stateLookup(name string) (string, bool) {
 	e.loadState()
+	e.mu.Lock()
+	defer e.mu.Unlock()
 	v, ok := e.state[name]
 	return v, ok
 }
@@ -135,11 +142,25 @@ func (e *Executor) resolveGlobalValue(s string) string {
 
 func (e *Executor) setRuntimeState(name, value string) {
 	e.loadState()
+	e.mu.Lock()
 	e.state[name] = value
+	e.stateDirty = true
+	e.mu.Unlock()
+}
+
+func (e *Executor) flushState() {
+	e.mu.Lock()
+	dirty := e.stateDirty
+	state := e.state
+	e.stateDirty = false
+	e.mu.Unlock()
+	if !dirty || state == nil {
+		return
+	}
 	if err := os.MkdirAll(e.cacheDirFor(), 0755); err != nil {
 		return
 	}
-	data, _ := json.MarshalIndent(e.state, "", "  ")
+	data, _ := json.MarshalIndent(state, "", "  ")
 	_ = os.WriteFile(e.statePath(), data, 0644)
 }
 
@@ -164,6 +185,49 @@ func (fc fileCache) save(dir string) {
 
 	data, _ := json.MarshalIndent(fc, "", "  ")
 	_ = os.WriteFile(filepath.Join(dir, "manifest.json"), data, 0644)
+}
+
+func (e *Executor) hashFiles(files []string) []string {
+	e.mu.Lock()
+	if e.hashMemo == nil {
+		e.hashMemo = make(map[string]string, len(files))
+	}
+	out := make([]string, len(files))
+	var missing []int
+	for i, f := range files {
+		if h, ok := e.hashMemo[f]; ok {
+			out[i] = h
+		} else {
+			missing = append(missing, i)
+		}
+	}
+	e.mu.Unlock()
+
+	if len(missing) > 0 {
+		paths := make([]string, len(missing))
+		for k, i := range missing {
+			paths[k] = files[i]
+		}
+		hashes := parallelHash(paths)
+		e.mu.Lock()
+		for k, i := range missing {
+			e.hashMemo[paths[k]] = hashes[k]
+			out[i] = hashes[k]
+		}
+		e.mu.Unlock()
+	}
+	return out
+}
+
+func (e *Executor) invalidateHashes(paths []string) {
+	if len(paths) == 0 {
+		return
+	}
+	e.mu.Lock()
+	for _, p := range paths {
+		delete(e.hashMemo, p)
+	}
+	e.mu.Unlock()
 }
 
 func hashFile(path string) string {
@@ -247,8 +311,7 @@ func (e *Executor) workDirFor(cmd *Command, resolve func(string, string) string,
 	return wd
 }
 
-func (e *Executor) shouldSkip(cmd *Command, resolve func(string, string) string, workDir string) (bool, string) {
-	files := expandFileDeps(cmd.FileDeps, e.workDirFor(cmd, resolve, workDir))
+func (e *Executor) shouldSkip(cmd *Command, files []string) (bool, string) {
 	if len(files) == 0 {
 		return false, ""
 	}
@@ -260,7 +323,7 @@ func (e *Executor) shouldSkip(cmd *Command, resolve func(string, string) string,
 		return false, "no cached result"
 	}
 
-	hashes := parallelHash(files)
+	hashes := e.hashFiles(files)
 	for i, f := range files {
 		if cached[f] != hashes[i] {
 			e.debugf("%s: file changed: %s\n", cmd.Name, f)
@@ -291,7 +354,7 @@ func parallelHash(files []string) []string {
 	return out
 }
 
-func (e *Executor) shouldSkipProduced(cmd *Command, resolve func(string, string) string, workDir string) (bool, string) {
+func (e *Executor) shouldSkipProduced(cmd *Command, resolve func(string, string) string, workDir string, depFiles []string) (bool, string) {
 	artifacts := expandFileDeps(cmd.Produces, e.workDirFor(cmd, resolve, workDir))
 	if len(artifacts) == 0 {
 		return false, ""
@@ -306,7 +369,7 @@ func (e *Executor) shouldSkipProduced(cmd *Command, resolve func(string, string)
 			newest = info.ModTime()
 		}
 	}
-	for _, d := range expandFileDeps(cmd.FileDeps, e.workDirFor(cmd, resolve, workDir)) {
+	for _, d := range depFiles {
 		info, err := os.Stat(d)
 		if err != nil {
 			return false, fmt.Sprintf("missing dep %s", d)
@@ -320,6 +383,7 @@ func (e *Executor) shouldSkipProduced(cmd *Command, resolve func(string, string)
 
 func (e *Executor) updateCache(cmd *Command, resolve func(string, string) string, workDir string) {
 	files := expandFileDeps(cmd.FileDeps, e.workDirFor(cmd, resolve, workDir))
+	hashes := e.hashFiles(files)
 
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -329,9 +393,20 @@ func (e *Executor) updateCache(cmd *Command, resolve func(string, string) string
 	if fc[key] == nil {
 		fc[key] = make(map[string]string)
 	}
-	hashes := parallelHash(files)
 	for i, f := range files {
 		fc[key][f] = hashes[i]
 	}
-	fc.save(e.cacheDirFor())
+
+	e.cacheDirty = true
+}
+
+func (e *Executor) flushCache() {
+	e.mu.Lock()
+	dirty := e.cacheDirty
+	fc := e.cache
+	e.cacheDirty = false
+	e.mu.Unlock()
+	if dirty && fc != nil {
+		fc.save(e.cacheDirFor())
+	}
 }
