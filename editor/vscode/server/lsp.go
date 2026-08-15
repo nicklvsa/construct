@@ -600,6 +600,9 @@ func commandHover(c *pkg.Command) string {
 	if c.WorkDir != "" {
 		fmt.Fprintf(&b, "- working dir: `%s`\n", c.WorkDir)
 	}
+	if c.Container != "" {
+		fmt.Fprintf(&b, "- container: `%s`\n", c.Container)
+	}
 	if c.Timeout != "" {
 		fmt.Fprintf(&b, "- timeout: `%s`\n", c.Timeout)
 	}

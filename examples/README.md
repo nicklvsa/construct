@@ -32,6 +32,7 @@ construct Constfile-<name> <command>    # run a command
 | `Constfile-state` | Any | Persistent `state` variables, `@state("name")` reads, runtime state expressions, `--resume`, `stats` |
 | `Constfile-cloud` (+ `example-cloud.json`) | Any | Cloud commands (`\|name\|`), `invoke` cloud fallback, pure cloud commands, `cloud list/pull/push` |
 | `Constfile-locks` | Any | Real-world `lock` usage: a release/rollback pipeline serialized on a shared named lock, composed with `confirm` and `onfail` |
+| `Constfile-container` (+ `src/`) | Any | Container isolation (`container "image"`): containerized builds, cross-compile matrices, host/container composition, timeouts |
 
 ## Feature Coverage
 

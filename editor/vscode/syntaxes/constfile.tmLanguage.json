@@ -285,6 +285,24 @@
 					}
 				},
 				{
+					"comment": "container \"image\" and timeout modifiers in headers",
+					"match": "\\b(container)\\s+(\"[^\"]*\"|[^\\s{<,]+)|\\b(timeout)\\s+([^\\s{<,]+)",
+					"captures": {
+						"1": {
+							"name": "keyword.control.constfile"
+						},
+						"2": {
+							"name": "string.interpolated.constfile"
+						},
+						"3": {
+							"name": "keyword.control.constfile"
+						},
+						"4": {
+							"name": "constant.numeric.constfile"
+						}
+					}
+				},
+				{
 					"name": "keyword.control.constfile",
 					"match": "\\bproduces\\b"
 				},

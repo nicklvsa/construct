@@ -526,8 +526,30 @@ func (e *Executor) resolveWorkDir(dir string) string {
 	return filepath.Join(e.baseDir, dir)
 }
 
-// EvaluateCommand runs command as a top-level target.
-// containerRuntime resolves the container CLI once: docker, else podman.
+var containerEnvBlocked = map[string]bool{
+	"TMPDIR": true, "TMP": true, "TEMP": true,
+	"HOME": true, "PWD": true, "OLDPWD": true, "SHELL": true,
+	"USER": true, "LOGNAME": true, "SHLVL": true,
+	"PATH": true, "SSH_AUTH_SOCK": true, "COMMAND_MODE": true,
+	"NVM_DIR": true, "NVM_CD_FLAGS": true,
+	"XPC_FLAGS": true, "XPC_SERVICE_NAME": true,
+	"__CFBundleIdentifier": true, "__CF_USER_TEXT_ENCODING": true,
+	"MallocNanoZone": true, "OSLogRateLimit": true,
+	"MACH_PORT_RENDEZVOUS_PEER_VALDATION": true,
+}
+
+func containerForwardedEnv(env []string) []string {
+	out := make([]string, 0, len(env))
+	for _, kv := range env {
+		name, _, _ := strings.Cut(kv, "=")
+		if containerEnvBlocked[name] {
+			continue
+		}
+		out = append(out, kv)
+	}
+	return out
+}
+
 func (e *Executor) containerRuntime() string {
 	if e.containerRT == "" {
 		e.containerRT = "docker"
@@ -680,7 +702,7 @@ func (e *Executor) executeCommand(command *Command, prereqDir string, isPrereq b
 	ctx.env = &cmdEnv
 	if ctx.container != "" {
 		if f, err := os.CreateTemp("", "construct-env-"); err == nil {
-			for _, kv := range cmdEnv {
+			for _, kv := range containerForwardedEnv(cmdEnv) {
 				fmt.Fprintln(f, kv)
 			}
 			f.Close()
@@ -2115,6 +2137,9 @@ func (e *Executor) runShellOnce(ctx *execContext, stmt BodyStatement) error {
 		stdout, stderr, err = capture(cmd)
 	} else {
 		stdout, err = cmd.Output()
+		if ee, ok := err.(*exec.ExitError); ok && len(ee.Stderr) > 0 {
+			stderr = ee.Stderr
+		}
 	}
 	release()
 

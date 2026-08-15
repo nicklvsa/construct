@@ -558,3 +558,11 @@ func TestLSPEnvDefaultHover(t *testing.T) {
 		t.Errorf("hover = %q, want the default value shown", msg)
 	}
 }
+
+func TestLSPContainerHeader(t *testing.T) {
+	text := "build container \"golang:1.26\" in src produces app < main.go {\n    $ go build -o app .\n}\nuse < build {\n    $ echo &build\n}\n"
+	msg, ok := hoverAt(t, text, 0, 2)
+	if !ok || !strings.Contains(msg, "**build**") || !strings.Contains(msg, "container: `golang:1.26`") {
+		t.Errorf("hover over container header = %q (ok=%v)", msg, ok)
+	}
+}
