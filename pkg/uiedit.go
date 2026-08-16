@@ -804,8 +804,11 @@ func uiStmtBlockBounds(lines []string, header int, isIf bool) (int, bool) {
 
 func uiStmtSummary(s *BodyStatement) string {
 	prefix := ""
+	if s.Timeout != "" {
+		prefix += fmt.Sprintf("timeout<%s> ", s.Timeout)
+	}
 	if s.Retry > 0 {
-		prefix = fmt.Sprintf("retry<%d> ", s.Retry)
+		prefix += fmt.Sprintf("retry<%d> ", s.Retry)
 	}
 	switch s.Type {
 	case StmtShell:

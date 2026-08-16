@@ -606,8 +606,8 @@ build_matrix {
 
 The `<...>` modifier slot is shared by keyword modifiers: `parallel<N>`
 (iteration cap), `lock<5m>` (bounded lock wait), `retry<3, 2s>` (retry
-count plus optional backoff base), and `switch<strict>` (fail on no
-match).
+count plus optional backoff base), `switch<strict>` (fail on no match),
+and `timeout<30s>` (statement timeout).
 
 ### Build Matrices
 
@@ -720,12 +720,13 @@ deploy {
 
 ### Timeouts
 
-A command or a single statement can be capped with a duration:
+A command or a single statement can be capped with a duration. Commands take
+the duration in their header; statements use the `<...>` modifier form:
 
 ```
 build timeout 120s {
     $ go build
-    timeout 30s $ go test
+    timeout<30s> $ go test
 }
 ```
 
@@ -757,8 +758,9 @@ CLI; the container itself is removed via `--rm`.
 file dependencies, unused globals, and unreferenced commands. It also flags
 misused keywords before they silently misparse: `produces`/`container`/
 `timeout` written after the prerequisite list (where they are treated as
-prerequisites instead of modifiers), header or statement `timeout` values
-that are not valid durations, `break`/`continue` outside a loop, `break` inside a `parallel`
+prerequisites instead of modifiers), header `timeout` values
+that are not valid durations, statement timeouts written with the removed
+space form (`timeout 30s $ cmd`), `break`/`continue` outside a loop, `break` inside a `parallel`
 loop (it cannot stop concurrent iterations), references like `&svc-`
 whose trailing `-` is swallowed into the name, `&name` references that
 resolve to nothing (typos — they substitute to empty silently), `case`

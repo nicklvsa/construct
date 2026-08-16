@@ -49,8 +49,8 @@
 		"keywords": {
 			"patterns": [
 				{
-					"comment": "keyword modifier value: parallel<4>, retry<3, 2s>, lock<5m>, switch<strict>",
-					"match": "\\b(parallel|lock|retry|switch)(<)([^>]+)(>)",
+					"comment": "keyword modifier value: parallel<4>, retry<3, 2s>, lock<5m>, switch<strict>, timeout<30s>",
+					"match": "\\b(parallel|lock|retry|switch|timeout)(<)([^>]+)(>)",
 					"captures": {
 						"1": {
 							"name": "keyword.control.constfile"

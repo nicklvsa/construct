@@ -58,7 +58,7 @@ migrate {
 # timeout caps a whole command or a single statement (exit 124 on a hit).
 bench timeout 30s {
     $ echo "benchmarking..."
-    timeout 5s $ sleep 10
+    timeout<5s> $ sleep 10
 }
 
 # &last.exit / &last.output report the previous statement's outcome.

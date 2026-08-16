@@ -10,7 +10,7 @@ build-lsp in editor/vscode/server {
 }
 
 # Builds the actual construct binary
-manual build-construct { 
+manual build-construct {
     $ go build -o construct .
 }
 
@@ -30,7 +30,7 @@ build-ext in editor/vscode < build-lsp, install {
     }
     ! $ mv server/construct-lsp.exe server/construct-lsp.exe.stash
     ! $ mv server/construct-lsp server/construct-lsp.stash
-    timeout 10m $ npx @vscode/vsce@latest package --no-yarn
+    timeout<10m> $ npx @vscode/vsce@latest package --no-yarn
     ! $ mv server/construct-lsp.exe.stash server/construct-lsp.exe
     ! $ mv server/construct-lsp.stash server/construct-lsp
     $ code --install-extension constfile-&vsix_version.vsix --force as final_out
@@ -57,10 +57,10 @@ manual build-all < install {
         rm<kill> editor/vscode/server/construct-lsp editor/vscode/server/construct-lsp.exe
         in editor/vscode/server {
             env { GOOS=&goos, GOARCH=&arch }
-            timeout 5m $ go build -o construct-lsp@SUFFIX .
+            timeout<5m> $ go build -o construct-lsp@SUFFIX .
         }
         in editor/vscode {
-            timeout 10m $ npx @vscode/vsce@latest package --target "@VSCEOS-@VSCEARCH" --no-yarn
+            timeout<10m> $ npx @vscode/vsce@latest package --target "@VSCEOS-@VSCEARCH" --no-yarn
         }
     }
 }

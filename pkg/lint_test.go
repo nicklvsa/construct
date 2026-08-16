@@ -172,7 +172,7 @@ func TestLintStatementPrefixMisuse(t *testing.T) {
 	issues := lintText(t, "build {\n    timeout 30x $ go test\n}\n")
 	timeouts := 0
 	for _, is := range issues {
-		if is.Severity == LintError && strings.Contains(is.Message, "invalid timeout duration") {
+		if is.Severity == LintError && strings.Contains(is.Message, "statement timeout is written with a modifier now") {
 			timeouts++
 		}
 	}
@@ -181,8 +181,8 @@ func TestLintStatementPrefixMisuse(t *testing.T) {
 	}
 
 	for _, is := range lintText(t, "build {\n    timeout 5 ./server\n    retry<3> $ go test\n}\n") {
-		if strings.Contains(is.Message, "runs as a plain shell line") {
-			t.Errorf("false positive: %v", is)
+		if strings.Contains(is.Message, "statement timeout is written with a modifier now") {
+			t.Errorf("false positive on plain shell line: %v", is)
 		}
 	}
 }
@@ -307,7 +307,7 @@ func TestLintStatementKeywordCommands(t *testing.T) {
 
 	for _, is := range lintText(t, "build {\n    $ echo hi\n}\n") {
 		if strings.Contains(is.Message, "statement keyword") {
-			t.Errorf("false positive: %v", is)
+			t.Errorf("false positive on plain shell line: %v", is)
 		}
 	}
 }
@@ -344,7 +344,7 @@ use (env) < gen {
 `
 	for _, is := range lintText(t, in) {
 		if strings.Contains(is.Message, "unknown reference") {
-			t.Errorf("false positive: %v", is)
+			t.Errorf("false positive on plain shell line: %v", is)
 		}
 	}
 }

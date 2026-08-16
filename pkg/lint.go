@@ -310,20 +310,15 @@ func lintStatementPrefixes(lines []string) []LintIssue {
 			continue
 		}
 		value, tail := rest[:sp], strings.TrimSpace(rest[sp:])
-		if !strings.HasPrefix(tail, "$") && !strings.HasPrefix(tail, "! $") {
+		if !strings.HasPrefix(tail, "$") && !strings.HasPrefix(tail, "!") {
 			continue // likely a shell command that happens to start with the keyword
 		}
-		col := strings.Index(raw, value)
-		if col < 0 {
-			col = 0
-		}
-		if _, err := time.ParseDuration(value); err != nil {
-			issues = append(issues, LintIssue{
-				Line: lineIdx, Col: col, EndCol: col + len(value),
-				Severity: LintError,
-				Message:  fmt.Sprintf("invalid timeout duration %q — the statement runs as a plain shell line (expected e.g. `timeout 30s $ cmd`)", value),
-			})
-		}
+		col := max(strings.Index(raw, value), 0)
+		issues = append(issues, LintIssue{
+			Line: lineIdx, Col: col, EndCol: col + len(value),
+			Severity: LintError,
+			Message:  fmt.Sprintf("statement timeout is written with a modifier now: timeout<%s> (the space form was removed)", value),
+		})
 	}
 	return issues
 }

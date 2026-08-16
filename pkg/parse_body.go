@@ -344,13 +344,30 @@ func (p *Parser) parseBodyStatements(raw []rawLine, scope string) ([]BodyStateme
 		}
 
 		timeoutDur := ""
-		if strings.HasPrefix(line, "timeout ") {
+		if strings.HasPrefix(line, "timeout<") {
+			rest := strings.TrimSpace(strings.TrimPrefix(line, "timeout"))
+			rest2, mod, ok, err := peelModifier(rest)
+			if err != nil {
+				return nil, NewParseError(p.InputFile, lineNum, 1, fmt.Sprintf("timeout modifier: %v", err), line)
+			}
+			if !ok {
+				return nil, NewParseError(p.InputFile, lineNum, 1, "timeout requires a duration modifier, e.g. timeout<30s>", line)
+			}
+			if _, derr := time.ParseDuration(mod); derr != nil {
+				return nil, NewParseError(p.InputFile, lineNum, 1, fmt.Sprintf("invalid timeout duration %q (expected e.g. 30s, 5m)", mod), line)
+			}
+			timeoutDur = mod
+			line = strings.TrimSpace(rest2)
+		} else if strings.HasPrefix(line, "timeout ") {
+			// old space form: hard error so leftover files fail loudly
 			rest := strings.TrimSpace(strings.TrimPrefix(line, "timeout"))
 			if sp := strings.IndexAny(rest, " \t"); sp > 0 {
-				dur := rest[:sp]
-				if _, err := time.ParseDuration(dur); err == nil {
-					timeoutDur = dur
-					line = strings.TrimSpace(rest[sp:])
+				tail := strings.TrimSpace(rest[sp:])
+				if strings.HasPrefix(tail, "$") || strings.HasPrefix(tail, "!") {
+					if _, err := time.ParseDuration(rest[:sp]); err == nil {
+						return nil, NewParseError(p.InputFile, lineNum, 1,
+							fmt.Sprintf("statement timeout is written with a modifier now: timeout<%s> (the space form was removed)", rest[:sp]), line)
+					}
 				}
 			}
 		}

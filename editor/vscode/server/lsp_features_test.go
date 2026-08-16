@@ -179,7 +179,7 @@ func TestLSPKeywordCompletion(t *testing.T) {
 	for _, it := range items {
 		labels[it.Label] = true
 	}
-	for _, want := range []string{"switch", "lock", "state", "cp", "timeout"} {
+	for _, want := range []string{"switch", "lock", "state", "cp", "timeout<30s>"} {
 		if !labels[want] {
 			t.Errorf("completion missing %q: %v", want, items)
 		}
@@ -432,6 +432,9 @@ func TestLSPDidCloseForgetsDocument(t *testing.T) {
 // this keeps hover coverage from silently rotting as the language grows.
 func TestLSPKeywordHoverCoverage(t *testing.T) {
 	for _, kw := range statementKeywords {
+		if i := strings.Index(kw, "<"); i >= 0 {
+			kw = kw[:i] // completion labels carry modifier templates; hover uses the bare word
+		}
 		if _, ok := keywordHover(kw); !ok {
 			t.Errorf("keywordHover(%q) has no documentation", kw)
 		}

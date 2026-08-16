@@ -505,6 +505,7 @@ const SNIPPETS = [
 	["env", "env { KEY=value }\n$ "],
 	["invoke", "invoke other"],
 	["retry", "retry<3> $ "],
+	["timeout", "timeout<30s> $ "],
 	["in dir", "in subdir {\n    $ \n}"],
 	["onfail", "onfail {\n    $ cleanup\n}"],
 	["confirm", 'confirm "proceed?"'],

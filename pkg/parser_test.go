@@ -1519,13 +1519,38 @@ func TestParseBuiltinModifier(t *testing.T) {
 		t.Errorf("unexpected statement: %+v", stmt)
 	}
 
-	data, err = parse([]string{"t {\n    timeout 5s rm<kill> a.txt\n}"})
+	data, err = parse([]string{"t {\n    timeout<5s> rm<kill> a.txt\n}"})
 	if err != nil {
 		t.Fatalf("timeout rm<kill> should parse: %v", err)
 	}
 	stmt = data.Commands[0].Body[0]
 	if stmt.Timeout != "5s" || stmt.Modifier != "kill" {
 		t.Errorf("unexpected statement: %+v", stmt)
+	}
+
+	data, err = parse([]string{"t {\n    timeout<30s> $ go test\n}"})
+	if err != nil {
+		t.Fatalf("timeout modifier should parse: %v", err)
+	}
+	stmt = data.Commands[0].Body[0]
+	if stmt.Timeout != "30s" || stmt.Type != StmtShell || stmt.Shell != "$ go test" {
+		t.Errorf("unexpected statement: %+v", stmt)
+	}
+
+	if _, err = parse([]string{"t {\n    timeout 30s $ go test\n}"}); err == nil {
+		t.Error("old space-form statement timeout should be a parse error")
+	} else if !strings.Contains(err.Error(), "timeout<30s>") {
+		t.Errorf("migration hint missing: %v", err)
+	}
+
+	for _, bad := range []string{
+		"t {\n    timeout<30x> $ go test\n}",
+		"t {\n    timeout<> $ go test\n}",
+		"t {\n    timeout<30s\n}",
+	} {
+		if _, err = parse([]string{bad}); err == nil {
+			t.Errorf("invalid timeout modifier should fail: %q", bad)
+		}
 	}
 
 	data, err = parse([]string{"t {\n    rm a.txt\n}"})

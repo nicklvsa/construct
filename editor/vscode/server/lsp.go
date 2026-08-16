@@ -896,7 +896,7 @@ func (s *server) handleCompletion(params json.RawMessage) (any, error) {
 
 var statementKeywords = []string{
 	"var", "import", "switch", "case", "default", "in", "lock", "state",
-	"confirm", "prompt", "input", "timeout",
+	"confirm", "prompt", "input", "timeout<30s>",
 	"cp", "rm", "mkdir", "touch", "download", "extract",
 	"for", "if", "matrix", "env", "invoke", "fail", "global", "parallel",
 	"require_env", "retry", "onfail", "continue", "break",
@@ -1633,7 +1633,7 @@ func isPrereqListLine(line string) bool {
 	if strings.HasPrefix(trimmed, "$") {
 		return false
 	}
-	for _, kw := range []string{"var ", "import ", "if ", "for ", "matrix ", "env ", "invoke ", "onfail ", "fail ", "global ", "require_env ", "retry ", "else", "continue", "break", "switch ", "case ", "default", "in ", "lock ", "state ", "confirm ", "prompt ", "input ", "timeout ", "cp ", "rm ", "mkdir ", "touch ", "download ", "extract "} {
+	for _, kw := range []string{"var ", "import ", "if ", "for ", "matrix ", "env ", "invoke ", "onfail ", "fail ", "global ", "require_env ", "retry ", "else", "continue", "break", "switch ", "case ", "default", "in ", "lock ", "state ", "confirm ", "prompt ", "input ", "timeout<", "cp ", "rm ", "mkdir ", "touch ", "download ", "extract "} {
 		if strings.HasPrefix(trimmed, kw) {
 			return false
 		}
@@ -1729,7 +1729,7 @@ func keywordHover(word string) (string, bool) {
 	case "input":
 		return "`input name \"question\"`\n\nReads a line from stdin into the variable `name`.", true
 	case "timeout":
-		return "`timeout 30s $ cmd` or `cmd timeout 30s { ... }`\n\nCaps the statement (or whole command) at the duration; a hit is reported as exit 124.", true
+		return "`timeout<30s> $ cmd` or `cmd timeout 30s { ... }`\n\nCaps the statement (or whole command) at the duration; a hit is reported as exit 124.", true
 	case "cp":
 		return "builtin: `cp <src> <dst>`\n\nCopies a file or directory recursively, cross-platform.\n\nBare `cp` runs the builtin; `$ cp` runs the shell's cp.", true
 	case "rm":
