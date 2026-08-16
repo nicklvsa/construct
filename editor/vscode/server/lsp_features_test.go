@@ -206,8 +206,8 @@ func TestLSPCommandNameWithTimeoutModifier(t *testing.T) {
 		line string
 		want string
 	}{
-		{"build timeout 30s {", "build"},
-		{"build (env) timeout 30s < setup {", "build"},
+		{"build timeout<30s> {", "build"},
+		{"build (env) timeout<30s> < setup {", "build"},
 		{"build", "build"},
 	} {
 		if got, ok := commandNameAtLine(c.line); !ok || got != c.want {
@@ -221,7 +221,7 @@ func TestLSPFullFeatureFileParsesCleanly(t *testing.T) {
 var total = 2 * 3 + 1
 state last = "0.0.0"
 
-build timeout 30s {
+build timeout<30s> {
     switch "&total" {
         case "7" {
             $ echo seven
@@ -345,7 +345,7 @@ func TestLSPCommandNameWithProducesOnChange(t *testing.T) {
 	}{
 		{"build produces dist/app < src {", "build"},
 		{"build onchange src/** {", "build"},
-		{"build produces a, b onchange src < dep.txt timeout 5s in dir {", "build"},
+		{"build produces a, b onchange src < dep.txt timeout<5s> in dir {", "build"},
 		{"|deploy| produces dist {", "deploy"},
 	} {
 		if got, ok := commandNameAtLine(c.line); !ok || got != c.want {

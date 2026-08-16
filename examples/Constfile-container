@@ -44,7 +44,7 @@ matrix-build container "golang:1.26" in src < main.go {
 
 // Containers compose with timeouts: a hit kills the container CLI and
 // --rm removes the container (this one finishes well inside the cap).
-timeout-demo container "alpine:latest" timeout 5s {
+timeout-demo container "alpine:latest" timeout<5s> {
     $ sleep 1 && echo finished inside the timeout
 }
 

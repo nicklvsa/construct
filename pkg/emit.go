@@ -36,8 +36,9 @@ func EmitHeader(c *Command) string {
 		b.WriteString(")")
 	}
 	if c.Timeout != "" {
-		b.WriteString(" timeout ")
+		b.WriteString(" timeout<")
 		b.WriteString(c.Timeout)
+		b.WriteString(">")
 	}
 	if c.Container != "" {
 		b.WriteString(" container \"")

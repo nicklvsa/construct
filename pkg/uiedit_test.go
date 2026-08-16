@@ -19,7 +19,7 @@ manual build produces dist/app < src/*.go, hello {
     $ go build
 }
 
-|deploy| (env, opt region, opt retries=3) timeout 120s container "golang:1.26" onchange **.go < build {
+|deploy| (env, opt region, opt retries=3) timeout<120s> container "golang:1.26" onchange **.go < build {
     $ echo deploy &env &region
 }
 

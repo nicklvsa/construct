@@ -16,7 +16,7 @@ func ParseCommandName(line string) string {
 		if endIdx > 0 {
 			name := line[1 : endIdx+1]
 			remainder := strings.TrimSpace(line[endIdx+2:])
-			for _, cont := range []string{"(", "<", "{", "in ", "produces ", "onchange ", "timeout ", ""} {
+			for _, cont := range []string{"(", "<", "{", "in ", "produces ", "onchange ", "timeout<", ""} {
 				if strings.HasPrefix(remainder, cont) {
 					return strings.TrimSpace(name)
 				}
@@ -27,7 +27,7 @@ func ParseCommandName(line string) string {
 	inIdx := strings.Index(line, " in ")
 	prodIdx := findProducesIdx(line)
 	ocIdx := findTopLevelKeyword(line, " onchange ")
-	timeoutIdx := findTopLevelKeyword(line, " timeout ")
+	timeoutIdx := findTopLevelKeyword(line, " timeout<")
 	contIdx := findTopLevelKeyword(line, " container ")
 	endIdx := len(line)
 	for _, c := range [3]byte{'(', '<', '{'} {
@@ -81,19 +81,34 @@ func findProducesIdx(line string) int {
 	return findTopLevelKeyword(line, " produces ")
 }
 
+// ltIndex returns the first '<' that is not the modifier bracket of
+// ` timeout<...>`; headers also use '<' for the prerequisite list.
+func ltIndex(s string) int {
+	for i := 0; i < len(s); i++ {
+		if s[i] != '<' {
+			continue
+		}
+		if i >= 7 && s[i-7:i] == "timeout" && (i == 7 || s[i-8] == ' ' || s[i-8] == '	') {
+			continue
+		}
+		return i
+	}
+	return -1
+}
+
 func headerSegmentAfter(line, kw string) string {
 	idx := findTopLevelKeyword(line, kw)
 	if idx < 0 {
 		return ""
 	}
 	segment := line[idx+len(kw):]
-	if lt := strings.IndexByte(segment, '<'); lt >= 0 {
+	if lt := ltIndex(segment); lt >= 0 {
 		segment = segment[:lt]
 	}
 	if brace := strings.IndexByte(segment, '{'); brace >= 0 {
 		segment = segment[:brace]
 	}
-	for _, other := range []string{" in ", " produces ", " onchange ", " timeout ", " container "} {
+	for _, other := range []string{" in ", " produces ", " onchange ", " timeout<", " container "} {
 		if other == kw {
 			continue
 		}
@@ -127,12 +142,38 @@ func extractContainer(line string) string {
 	return trimQuoted(strings.TrimSpace(headerSegmentAfter(line, " container ")))
 }
 
-func extractTimeout(line string) string {
-	segment := strings.TrimSpace(headerSegmentAfter(line, " timeout "))
-	if _, err := time.ParseDuration(segment); err != nil {
-		return ""
+func extractTimeout(line string) (string, error) {
+	idx := findTopLevelKeyword(line, " timeout<")
+	if idx < 0 {
+		return "", nil
 	}
-	return segment
+	rest := strings.TrimSpace(line[idx+len(" timeout"):])
+	_, mod, ok, err := peelModifier(rest)
+	if err != nil {
+		return "", fmt.Errorf("timeout modifier: %v", err)
+	}
+	if !ok {
+		return "", nil
+	}
+	if _, derr := time.ParseDuration(mod); derr != nil {
+		return "", fmt.Errorf("invalid timeout duration %q (expected e.g. 30s, 5m)", mod)
+	}
+	return mod, nil
+}
+
+func oldHeaderTimeout(line string) (string, bool) {
+	ti := findTopLevelKeyword(line, " timeout ")
+	if ti < 0 {
+		return "", false
+	}
+	seg := strings.TrimSpace(line[ti+len(" timeout "):])
+	if seg == "" || strings.HasPrefix(seg, "{") {
+		return "", false
+	}
+	if sp := strings.IndexAny(seg, " 	<{"); sp > 0 {
+		seg = seg[:sp]
+	}
+	return seg, seg != ""
 }
 
 func extractArgumentString(line string) string {
@@ -150,7 +191,7 @@ func extractArgumentString(line string) string {
 }
 
 func extractPrerequisites(line string) ([]string, map[string]string, error) {
-	start := strings.Index(line, "<")
+	start := ltIndex(line)
 	if start == -1 {
 		return nil, nil, nil
 	}
@@ -201,7 +242,7 @@ func extractWorkDir(line string) string {
 		return ""
 	}
 
-	if lt := strings.Index(before, "<"); lt >= 0 {
+	if lt := ltIndex(before); lt >= 0 {
 		before = before[:lt]
 	}
 

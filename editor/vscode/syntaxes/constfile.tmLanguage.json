@@ -286,7 +286,7 @@
 				},
 				{
 					"comment": "Default command: _ (args) < prereqs in dir {",
-					"match": "^(_)(?=\\s*[(<{]|\\s+in\\s|\\s+produces\\s|\\s+onchange\\s|\\s+container\\s|\\s+timeout\\s)",
+					"match": "^(_)(?=\\s*[(<{]|\\s+in\\s|\\s+produces\\s|\\s+onchange\\s|\\s+container\\s|\\s+timeout<)",
 					"captures": {
 						"1": {
 							"name": "entity.name.function.default.constfile"
@@ -295,7 +295,7 @@
 				},
 				{
 					"comment": "Manual entry point: manual name ... {",
-					"match": "^(manual)\\s+([A-Za-z_][A-Za-z0-9_-]*)(?=\\s*[(<{]|\\s+in\\s|\\s+produces\\s|\\s+onchange\\s|\\s+container\\s|\\s+timeout\\s)",
+					"match": "^(manual)\\s+([A-Za-z_][A-Za-z0-9_-]*)(?=\\s*[(<{]|\\s+in\\s|\\s+produces\\s|\\s+onchange\\s|\\s+container\\s|\\s+timeout<)",
 					"captures": {
 						"1": {
 							"name": "keyword.control.constfile"
@@ -307,7 +307,7 @@
 				},
 				{
 					"comment": "Regular command: name (args) produces files < prereqs in dir {",
-					"match": "^([A-Za-z_][A-Za-z0-9_-]*)(?=\\s*[(<{]|\\s+in\\s|\\s+produces\\s|\\s+onchange\\s|\\s+container\\s|\\s+timeout\\s)",
+					"match": "^([A-Za-z_][A-Za-z0-9_-]*)(?=\\s*[(<{]|\\s+in\\s|\\s+produces\\s|\\s+onchange\\s|\\s+container\\s|\\s+timeout<)",
 					"captures": {
 						"1": {
 							"name": "entity.name.function.constfile"
@@ -333,8 +333,8 @@
 					}
 				},
 				{
-					"comment": "container \"image\" and timeout modifiers in headers",
-					"match": "\\b(container)\\s+(\"[^\"]*\"|[^\\s{<,]+)|\\b(timeout)\\s+([^\\s{<,]+)",
+					"comment": "container \"image\" modifier in headers",
+					"match": "\\b(container)\\s+(\"[^\"]*\"|[^\\s{<,]+)",
 					"captures": {
 						"1": {
 							"name": "keyword.control.constfile"
@@ -347,6 +347,24 @@
 						},
 						"4": {
 							"name": "constant.numeric.constfile"
+						}
+					}
+				},
+				{
+					"comment": "timeout<30s> modifier in headers",
+					"match": "\\b(timeout)(<)([^>\\s,]+)(>)",
+					"captures": {
+						"1": {
+							"name": "keyword.control.constfile"
+						},
+						"2": {
+							"name": "punctuation.definition.modifier.constfile"
+						},
+						"3": {
+							"name": "constant.other.modifier.constfile"
+						},
+						"4": {
+							"name": "punctuation.definition.modifier.constfile"
 						}
 					}
 				},
@@ -423,7 +441,7 @@
 					"include": "#variable-declaration"
 				},
 				{
-					"comment": "switch <expr> { case v { } default { } } \u2014 keyword plus block",
+					"comment": "switch <expr> { case v { } default { } } — keyword plus block",
 					"name": "meta.block.switch.constfile",
 					"begin": "^\\s*(switch)(<[^>\\s]*>)?\\s*([^{]+)(\\{)",
 					"beginCaptures": {
@@ -555,7 +573,7 @@
 					}
 				},
 				{
-					"comment": "as <name> output tag \u2014 must precede keywords so 'as' is claimed here",
+					"comment": "as <name> output tag — must precede keywords so 'as' is claimed here",
 					"match": "(\\s+)(as)(\\s+)([A-Za-z_][A-Za-z0-9_]*)\\s*$",
 					"captures": {
 						"2": {
@@ -567,7 +585,7 @@
 					}
 				},
 				{
-					"comment": "env { KEY=value } block \u2014 scoped distinctly from shell text",
+					"comment": "env { KEY=value } block — scoped distinctly from shell text",
 					"name": "meta.block.env.constfile",
 					"begin": "^\\s*(env)(\\s*)(\\{)",
 					"beginCaptures": {
@@ -643,7 +661,7 @@
 					]
 				},
 				{
-					"comment": "invoke <command> \u2014 keyword plus highlighted target name. Stops at the target so a trailing 'as <name>' capture falls to the as-tag pattern.",
+					"comment": "invoke <command> — keyword plus highlighted target name. Stops at the target so a trailing 'as <name>' capture falls to the as-tag pattern.",
 					"match": "^\\s*(invoke)(\\s+)([A-Za-z_][A-Za-z0-9_.-]*)",
 					"captures": {
 						"1": {
@@ -692,7 +710,7 @@
 					"match": "[{}]"
 				},
 				{
-					"comment": "Body text \u2014 shell commands, paths, flags. Stops before 'as <name>' tag.",
+					"comment": "Body text — shell commands, paths, flags. Stops before 'as <name>' tag.",
 					"name": "string.unquoted.constfile",
 					"match": "[^{}\\s][^{}]*?(?=\\s+as\\s+[A-Za-z_][A-Za-z0-9_]*\\s*$|$)"
 				}

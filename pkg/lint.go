@@ -6,7 +6,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"time"
 )
 
 type LintIssue struct {
@@ -275,24 +274,6 @@ func lintHeaderKeywordMisuse(lines []string, data *ParsedData) []LintIssue {
 			}
 		}
 
-		if ti := findTopLevelKeyword(line, " timeout "); ti >= 0 && ti < brace {
-			seg := line[ti+len(" timeout "):]
-			for _, stop := range []string{"<", "{", " produces ", " onchange ", " container ", " in "} {
-				if c := strings.Index(seg, stop); c >= 0 {
-					seg = seg[:c]
-				}
-			}
-			seg = strings.TrimSpace(seg)
-			if seg != "" {
-				if _, err := time.ParseDuration(seg); err != nil {
-					issues = append(issues, LintIssue{
-						Line: lineIdx, Col: ti, EndCol: ti + len(" timeout "),
-						Severity: LintError,
-						Message:  fmt.Sprintf("invalid timeout duration %q (expected e.g. 30s, 5m)", seg),
-					})
-				}
-			}
-		}
 	}
 	return issues
 }

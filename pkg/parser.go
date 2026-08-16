@@ -243,7 +243,13 @@ func (p *Parser) parseCommand(idx int, line string, isDefault, manual bool, line
 
 	workDir := extractWorkDir(line)
 	container := extractContainer(line)
-	timeout := extractTimeout(line)
+	if tok, old := oldHeaderTimeout(line); old {
+		return 0, fmt.Errorf("header timeout is written with a modifier now: timeout<%s> (the space form was removed)", tok)
+	}
+	timeout, terr := extractTimeout(line)
+	if terr != nil {
+		return 0, fmt.Errorf("failed to parse timeout for '%s': %w", commandName, terr)
+	}
 	produces := extractProduces(line)
 	onChange := extractOnChange(line)
 

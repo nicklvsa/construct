@@ -107,7 +107,7 @@ deploy {
     state last_release = "9.9.9"
 }
 
-slow timeout 1s {
+slow timeout<1s> {
     $ sleep 5
 }
 

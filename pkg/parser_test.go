@@ -1332,11 +1332,11 @@ func TestParseCommandNameHeaderModifiers(t *testing.T) {
 	}{
 		{"|deploy| produces dist {", "deploy"},
 		{"|deploy| onchange src/** {", "deploy"},
-		{"|deploy| timeout 5s {", "deploy"},
+		{"|deploy| timeout<5s> {", "deploy"},
 		{"build produces dist/app.js, dist/lib.js < src/main.go {", "build"},
 		{"build onchange src/** < src/main.go {", "build"},
-		{"build timeout 5s {", "build"},
-		{"build produces dist timeout 5s in dir {", "build"},
+		{"build timeout<5s> {", "build"},
+		{"build produces dist timeout<5s> in dir {", "build"},
 		{"build < dep.txt produces dist {", "build"},
 	}
 	for _, tc := range tests {
@@ -1348,13 +1348,20 @@ func TestParseCommandNameHeaderModifiers(t *testing.T) {
 
 func TestExtractProducesCutAtTimeout(t *testing.T) {
 	// `produces` used to swallow a following `timeout` modifier.
-	line := "build produces dist timeout 5s {"
+	line := "build produces dist timeout<5s> {"
 	got := extractProduces(line)
 	if len(got) != 1 || got[0] != "dist" {
 		t.Errorf("extractProduces = %v, want [dist]", got)
 	}
-	if timeout := extractTimeout("build timeout 5s produces dist {"); timeout != "5s" {
-		t.Errorf("extractTimeout = %q, want 5s", timeout)
+	timeout, terr := extractTimeout("build timeout<5s> produces dist {")
+	if terr != nil || timeout != "5s" {
+		t.Errorf("extractTimeout = %q, %v; want 5s, <nil>", timeout, terr)
+	}
+	if _, terr := extractTimeout("build timeout<5x> {"); terr == nil {
+		t.Error("invalid duration should fail extractTimeout")
+	}
+	if _, terr := extractTimeout("build < timeout {"); terr != nil {
+		t.Errorf("prereq named timeout misread as modifier: %v", terr)
 	}
 }
 
@@ -1439,7 +1446,7 @@ func TestParseContainerHeader(t *testing.T) {
 	p := NewParserFromContent("Constfile", `build container "golang:1.26" < src/main.go {
     $ go build ./...
 }
-mixed container "alpine" produces out.txt timeout 5s in dir {
+mixed container "alpine" produces out.txt timeout<5s> in dir {
     $ echo hi
 }
 `)
@@ -1451,7 +1458,7 @@ mixed container "alpine" produces out.txt timeout 5s in dir {
 	if c.Container != "golang:1.26" {
 		t.Errorf("build.Container = %q", c.Container)
 	}
-	if got := ParseCommandName(`mixed container "alpine" produces out.txt timeout 5s in dir {`); got != "mixed" {
+	if got := ParseCommandName(`mixed container "alpine" produces out.txt timeout<5s> in dir {`); got != "mixed" {
 		t.Errorf("ParseCommandName with container = %q, want mixed", got)
 	}
 	m, _ := data.GetCommand("mixed")
@@ -1541,6 +1548,14 @@ func TestParseBuiltinModifier(t *testing.T) {
 		t.Error("old space-form statement timeout should be a parse error")
 	} else if !strings.Contains(err.Error(), "timeout<30s>") {
 		t.Errorf("migration hint missing: %v", err)
+	}
+	if _, err = parse([]string{"build timeout 30s {\n    $ x\n}"}); err == nil {
+		t.Error("old space-form header timeout should be a parse error")
+	} else if !strings.Contains(err.Error(), "timeout<30s>") {
+		t.Errorf("header migration hint missing: %v", err)
+	}
+	if _, err = parse([]string{"build < timeout {\n    $ x\n}"}); err == nil {
+		t.Errorf("prereq named timeout should still parse: %v", err)
 	}
 
 	for _, bad := range []string{

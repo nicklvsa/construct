@@ -1729,7 +1729,7 @@ func keywordHover(word string) (string, bool) {
 	case "input":
 		return "`input name \"question\"`\n\nReads a line from stdin into the variable `name`.", true
 	case "timeout":
-		return "`timeout<30s> $ cmd` or `cmd timeout 30s { ... }`\n\nCaps the statement (or whole command) at the duration; a hit is reported as exit 124.", true
+		return "`timeout<30s> $ cmd` or `cmd timeout<30s> { ... }`\n\nCaps the statement (or whole command) at the duration; a hit is reported as exit 124.", true
 	case "cp":
 		return "builtin: `cp <src> <dst>`\n\nCopies a file or directory recursively, cross-platform.\n\nBare `cp` runs the builtin; `$ cp` runs the shell's cp.", true
 	case "rm":

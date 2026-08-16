@@ -720,11 +720,12 @@ deploy {
 
 ### Timeouts
 
-A command or a single statement can be capped with a duration. Commands take
-the duration in their header; statements use the `<...>` modifier form:
+A command or a single statement can be capped with a duration, written with
+the `timeout<...>` modifier in both places - the header caps the whole
+command, a body statement caps just that line:
 
 ```
-build timeout 120s {
+build timeout<120s> {
     $ go build
     timeout<30s> $ go test
 }
@@ -758,9 +759,8 @@ CLI; the container itself is removed via `--rm`.
 file dependencies, unused globals, and unreferenced commands. It also flags
 misused keywords before they silently misparse: `produces`/`container`/
 `timeout` written after the prerequisite list (where they are treated as
-prerequisites instead of modifiers), header `timeout` values
-that are not valid durations, statement timeouts written with the removed
-space form (`timeout 30s $ cmd`), `break`/`continue` outside a loop, `break` inside a `parallel`
+prerequisites instead of modifiers), timeouts written with the removed
+space form (`timeout 30s $ cmd` or `build timeout 30s {`), `break`/`continue` outside a loop, `break` inside a `parallel`
 loop (it cannot stop concurrent iterations), references like `&svc-`
 whose trailing `-` is swallowed into the name, `&name` references that
 resolve to nothing (typos — they substitute to empty silently), `case`

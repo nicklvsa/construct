@@ -150,21 +150,21 @@ func TestLintHeaderKeywordAfterPrereqs(t *testing.T) {
 }
 
 func TestLintHeaderInvalidTimeout(t *testing.T) {
-	issues := lintText(t, "build timeout 30x {\n    $ echo hi\n}\n")
-	found := false
-	for _, is := range issues {
-		if is.Severity == LintError && strings.Contains(is.Message, "invalid timeout duration") {
-			found = true
-		}
-	}
-	if !found {
-		t.Errorf("no invalid-timeout error in %v", issues)
+	// the old space form is a parse error now, valid or invalid duration alike
+	if _, err := NewParserFromContent("Constfile", "build timeout 30x {\n    $ echo hi\n}\n").Parse(); err == nil {
+		t.Error("old header timeout form should be a parse error")
+	} else if !strings.Contains(err.Error(), "timeout<") {
+		t.Errorf("migration hint missing: %v", err)
 	}
 
-	for _, is := range lintText(t, "build timeout 30s {\n    $ echo hi\n}\n") {
-		if strings.Contains(is.Message, "invalid timeout duration") {
-			t.Errorf("false positive on valid timeout: %v", is)
-		}
+	if _, err := NewParserFromContent("Constfile", "build timeout<30x> {\n    $ echo hi\n}\n").Parse(); err == nil {
+		t.Error("invalid header timeout duration should be a parse error")
+	} else if !strings.Contains(err.Error(), "invalid timeout duration") {
+		t.Errorf("duration error missing: %v", err)
+	}
+
+	if _, err := NewParserFromContent("Constfile", "build timeout<30s> {\n    $ echo hi\n}\n").Parse(); err != nil {
+		t.Errorf("valid header timeout should parse: %v", err)
 	}
 }
 

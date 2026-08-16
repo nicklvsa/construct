@@ -259,7 +259,7 @@ cmd {
 
 func TestParseTimeout(t *testing.T) {
 	p := NewParserFromContent("Constfile", `
-build timeout 120s < setup {
+build timeout<120s> < setup {
     $ go build
     timeout<30s> $ go test
 }
@@ -487,7 +487,7 @@ slow {
 
 func TestExecCommandTimeout(t *testing.T) {
 	exec, _ := newExecutorFor(t, `
-slow timeout 1s {
+slow timeout<1s> {
     $ sleep 5
 }
 `)
