@@ -52,6 +52,8 @@ type options struct {
 	containerOverride string
 	tui               bool
 	dash              *dashboard
+	uiPort            int
+	uiNoOpen          bool
 }
 
 func printUsage() {
@@ -59,7 +61,7 @@ func printUsage() {
 
 Usage:
   construct [options] [Constfile] [commands...]
-  construct <init|import|shell|doctor|stats|cloud|clean|lint|graph|fmt|completion> [args...]
+  construct <init|import|shell|doctor|stats|cloud|clean|lint|graph|fmt|completion|ui> [args...]
 
 Commands:
   list              List all available commands
@@ -73,6 +75,7 @@ Commands:
   graph [targets]   Print the dependency tree (--dot, --json)
   fmt [files]       Canonicalize Constfile indentation (--check for CI)
   completion SHELL  Emit bash/zsh/fish completions
+  ui [Constfile]    Edit the Constfile in the browser (drag and drop; --port, --no-open)
   cloud             Manage cloud commands and GitHub Actions jobs (see below)
 
 Options:
@@ -106,6 +109,8 @@ Options:
   --ref BRANCH      Git ref to dispatch cloud jobs on (default: current branch)
   --wait            Follow a cloud job and stream its logs
   --notify          Desktop notification when the run finishes
+  --port N          ui: serve on this port (default: random free port)
+  --no-open         ui: print the URL without opening a browser
 
 Cloud subcommands:
   cloud list|pull|push                    cloud command definitions
@@ -169,6 +174,8 @@ func defineFlags(fs *flag.FlagSet, o *options) {
 	fs.StringVar(&o.envFile, "env-file", "", "Load environment from file")
 	fs.StringVar(&o.containerOverride, "container", "", "`shell`: run in this container image instead of the command's")
 	fs.BoolVar(&o.tui, "tui", false, "Live dashboard for the run (requires a terminal)")
+	fs.IntVar(&o.uiPort, "port", 0, "`ui`: port to serve on (default: random)")
+	fs.BoolVar(&o.uiNoOpen, "no-open", false, "`ui`: print the URL instead of opening a browser")
 	fs.StringVar(&o.shell, "shell", "", "Shell to run statements with (default: $SHELL)")
 	fs.StringArrayVarP(&o.overrides, "env", "e", []string{}, "Override variable (key=value)")
 }

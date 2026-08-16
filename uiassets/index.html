@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>construct</title>
+<link rel="stylesheet" href="/app.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%235cadff' d='M12 2l8.5 5v10L12 22l-8.5-5V7L12 2zm0 4.3L7 9.2v5.6l5 2.9 5-2.9V9.2l-5-2.9z'/%3E%3C/svg%3E">
+</head>
+<body>
+<header>
+	<div class="logo">
+		<svg width="18" height="18" viewBox="0 0 24 24"><path fill="#5cadff" d="M12 2l8.5 5v10L12 22l-8.5-5V7L12 2zm0 4.3L7 9.2v5.6l5 2.9 5-2.9V9.2l-5-2.9z"/></svg>
+		construct <span class="v">ui</span>
+	</div>
+	<nav class="filetabs" id="filetabs"></nav>
+	<div class="toolbar">
+		<div class="viewtoggle">
+			<button id="viewEdit" class="active" title="Edit commands">Edit</button>
+			<button id="viewGraph" title="Dependency graph">Graph</button>
+		</div>
+		<button class="tbtn" id="btnUndo" title="Undo (Ctrl-Z)">↺</button>
+		<button class="tbtn" id="btnRedo" title="Redo (Ctrl-Y)">↻</button>
+		<button class="tbtn primary" id="btnSave" title="Save (Ctrl-S)">Save</button>
+	</div>
+</header>
+<main>
+	<aside class="sidebar">
+		<div class="search"><input id="search" type="text" placeholder="Filter commands…"></div>
+		<div class="cmdlist" id="cmdlist"></div>
+		<div class="sideactions">
+			<button class="tbtn" id="btnAdd">+ Command</button>
+			<button class="tbtn" id="btnAddImport">+ Import</button>
+		</div>
+	</aside>
+	<section class="editor" id="editorpane"></section>
+</main>
+<div class="lintbar" id="lintbar"></div>
+<footer class="statusbar" id="statusbar"></footer>
+<div class="toasts" id="toasts"></div>
+<script src="/app.js"></script>
+</body>
+</html>

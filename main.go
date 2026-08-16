@@ -87,7 +87,7 @@ func exitError(err error) {
 	os.Exit(1)
 }
 
-var subcommandNames = []string{"init", "import", "shell", "doctor", "stats", "cloud", "clean", "lint", "graph", "completion", "fmt"}
+var subcommandNames = []string{"init", "import", "shell", "doctor", "stats", "cloud", "clean", "lint", "graph", "completion", "fmt", "ui"}
 
 func isSubcommandName(s string) bool {
 	return slices.Contains(subcommandNames, s)
@@ -195,6 +195,8 @@ func main() {
 			err = runCompletion(positionals[1:], &o)
 		case "fmt":
 			err = runFmt(positionals[1:], &o)
+		case "ui":
+			err = runUI(positionals[1:], &o)
 		}
 		if err != nil {
 			exitError(err)

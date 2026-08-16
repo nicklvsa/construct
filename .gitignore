@@ -17,3 +17,6 @@ debug.json
 # LSP server build outputs (binaries, go-tool ~ renames, packaging stash)
 editor/vscode/server/construct-lsp*
 editor/vscode/*.vsix
+
+# Native gui shell build output
+/editor/gui/construct-gui*

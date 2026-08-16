@@ -35,6 +35,7 @@ construct [options] [Constfile] [commands...]
 | `graph [targets...]` | Print the dependency tree (`--dot` for Graphviz, `--json` for tools) |
 | `completion <shell>` | Emit bash/zsh/fish completion (flags + your Constfile's commands) |
 | `fmt [files...]` | Canonicalize Constfile indentation (`--check` for CI) |
+| `ui [Constfile]` | Edit the Constfile (and its imports) in a drag-and-drop browser editor |
 
 ### Options
 
@@ -70,6 +71,8 @@ construct [options] [Constfile] [commands...]
 | `--cache` | `clean`: also remove `.construct-cache` |
 | `--dot` | `graph`: emit Graphviz DOT |
 | `--check` | `fmt`: exit 1 when files are not formatted |
+| `--port N` | `ui`: serve on this port (default: a random free port) |
+| `--no-open` | `ui`: print the URL without opening a browser |
 
 ### Examples
 
@@ -1006,6 +1009,60 @@ The dashboard requires a terminal and is disabled automatically (with a
 notice) for `--watch`, `--repeat`, `--choose`, `--dry-run`, `--debug`,
 `--explain`, `--quiet`, `--resume`, GitHub Actions output, or Constfiles
 using `confirm`/`prompt`/`input`.
+
+## Web Editor
+
+`construct ui` opens a drag-and-drop editor for the Constfile and its whole
+import closure in your browser:
+
+```bash
+construct ui                  # edit Constfile (or Constfile-$GOOS)
+construct ui --port 8080      # pick the port
+construct ui --no-open        # print the URL without launching a browser
+```
+
+- Commands render as cards — drag to reorder, drop one card onto another's
+  prerequisite area to connect them (`deploy < build` without touching the
+  text), edit headers as forms (arguments, prerequisites, `produces`,
+  `container`, `timeout`, `onchange`, workdir), and edit bodies in a
+  monospace editor with Constfile syntax highlighting and a statement
+  palette (`if`, `for`, `parallel for`, `env`, `invoke`, `retry<3>`, …).
+- Bodies also have a **Structure** view: the parsed statement tree as an
+  outline — drag statements to reorder them, drop one onto a block's
+  "nest inside" zone to move it into `if`/`for`/`env`/… bodies, click a
+  row to jump to its code.
+- Imported files get their own tab and are fully editable; namespaced
+  imports show the name they are referenced by. Adding an import line
+  registers the file immediately.
+- The graph view lays out the dependency DAG per file — drag nodes to
+  arrange them, drag the ● handle of one node onto another to connect a
+  prerequisite, click an edge and press Delete to remove it.
+- A lint panel surfaces the same checks as `construct lint` with
+  click-to-jump.
+- Variables, state, and import lines keep their raw text — the editor never
+  re-serializes lines it did not change, so comments and expressions are
+  preserved byte-for-byte. Saving formats the file like `construct fmt`.
+- Every edit is validated through the real parser before it applies
+  (circular dependencies, duplicate names, and broken references are
+  rejected with the parse error), with undo/redo and Ctrl-S to save.
+  `Dry-run` on a command shows what it would execute without running it.
+- The server binds to 127.0.0.1 only and requires a per-session token from
+  the printed URL; it refuses to overwrite files that changed on disk since
+  they were loaded.
+
+## Native Editor (optional)
+
+`editor/gui` is an optional native shell built with Gio (pure Go, no cgo),
+kept in its own Go module so its dependencies never touch the main binary:
+
+```bash
+go install github.com/nicklvsa/construct/editor/gui@latest
+construct-gui [Constfile]
+```
+
+It edits name, prerequisites, and body through the same validation gate and
+save rules as the web editor. The web editor remains the full-featured
+surface; the native shell is for quick edits without a browser.
 
 ## Platform-Specific Files
 

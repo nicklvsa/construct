@@ -14,6 +14,8 @@ type Parser struct {
 	Lines       []string
 	importStack map[string]bool // recursion path, for cycle detection
 	imported    map[string]bool // files already merged, for diamond dedup
+
+	ImportReader func(path string) ([]byte, error)
 }
 
 func NewParser(file string) (*Parser, error) {
@@ -162,7 +164,6 @@ func (c parserEvalContext) BaseDir() string {
 	return importBaseDir(c.p.InputFile)
 }
 
-// evalVarValue evaluates a variable value, with list metadata when it is a list.
 func (p *Parser) evalVarValue(value string, varName *string, varScope *string, lineNum int) (string, bool, []string, error) {
 	value = strings.TrimSpace(value)
 	ctx := parserEvalContext{p: p, scope: *varScope}

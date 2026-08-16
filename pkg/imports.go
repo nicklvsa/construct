@@ -56,7 +56,11 @@ func (p *Parser) processImport(line string) error {
 	defer delete(p.importStack, cleanPath)
 	p.imported[dedupKey] = true
 
-	content, err := os.ReadFile(cleanPath)
+	readImport := p.ImportReader
+	if readImport == nil {
+		readImport = os.ReadFile
+	}
+	content, err := readImport(cleanPath)
 	if err != nil {
 		return fmt.Errorf("failed to read import %q: %w", spec, err)
 	}
@@ -64,6 +68,7 @@ func (p *Parser) processImport(line string) error {
 	imported := NewParserFromContent(cleanPath, string(content))
 	imported.importStack = p.importStack
 	imported.imported = p.imported
+	imported.ImportReader = p.ImportReader
 	if err := imported.parseLines(); err != nil {
 		return err
 	}
