@@ -1,6 +1,12 @@
 # Builds the construct-lsp language server binary for the current platform.
 build-lsp in editor/vscode/server {
-    $ go build -o construct-lsp .
+    rm<kill> construct-lsp construct-lsp.exe construct-lsp.exe~
+    var win = env("OS")
+    env { SUFFIX= }
+    if "&win" == "Windows_NT" {
+        env { SUFFIX=.exe }
+    }
+    $ go build -o construct-lsp@SUFFIX .
 }
 
 # Builds the actual construct binary
@@ -13,11 +19,20 @@ install in editor/vscode {
     retry<2, 1s> $ npm install --silent
 }
 
-# Packages and installs the host-platform extension.
+# Packages and installs the host-platform extension. The server binary is
+# stashed out of the package (the dev marker points at this copy) and put
+# back afterwards.
 build-ext in editor/vscode < build-lsp, install {
     var vsix_version = $ cd editor/vscode && node -p "require('./package.json').version"
-    rm server/construct-lsp.exe
+    onfail {
+        ! $ mv server/construct-lsp.exe.stash server/construct-lsp.exe
+        ! $ mv server/construct-lsp.stash server/construct-lsp
+    }
+    ! $ mv server/construct-lsp.exe server/construct-lsp.exe.stash
+    ! $ mv server/construct-lsp server/construct-lsp.stash
     timeout 10m $ npx @vscode/vsce@latest package --no-yarn
+    ! $ mv server/construct-lsp.exe.stash server/construct-lsp.exe
+    ! $ mv server/construct-lsp.stash server/construct-lsp
     $ code --install-extension constfile-&vsix_version.vsix --force as final_out
 }
 
@@ -39,7 +54,7 @@ manual build-all < install {
             env { VSCEARCH=x64 }
         }
         $ echo "==> @VSCEOS-@VSCEARCH (GOOS=&goos GOARCH=&arch)"
-        rm editor/vscode/server/construct-lsp editor/vscode/server/construct-lsp.exe
+        rm<kill> editor/vscode/server/construct-lsp editor/vscode/server/construct-lsp.exe
         in editor/vscode/server {
             env { GOOS=&goos, GOARCH=&arch }
             timeout 5m $ go build -o construct-lsp@SUFFIX .

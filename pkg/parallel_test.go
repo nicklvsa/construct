@@ -196,7 +196,7 @@ func TestParallelForError(t *testing.T) {
 	dir := t.TempDir()
 	in := `build {
     parallel for x in a, b, c, d, e, f {
-        $ touch ` + filepath.Join(dir, `&x.done`) + `
+        $ touch ` + filepath.ToSlash(filepath.Join(dir, `&x.done`)) + `
         if "&x" == "b" {
             fail "boom"
         }

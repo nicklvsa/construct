@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -20,7 +21,11 @@ func TestMain(m *testing.M) {
 	if err != nil {
 		panic(err)
 	}
-	constructBin = filepath.Join(dir, "construct")
+	name := "construct"
+	if runtime.GOOS == "windows" {
+		name += ".exe" // exec.LookPath ignores extensionless binaries
+	}
+	constructBin = filepath.Join(dir, name)
 	out, err := exec.Command("go", "build", "-o", constructBin, ".").CombinedOutput()
 	if err != nil {
 		panic("build construct: " + err.Error() + "\n" + string(out))
@@ -465,7 +470,7 @@ func TestE2ECloudSubmitInitsWorkflow(t *testing.T) {
 	if code == 0 {
 		t.Fatalf("expected exit 1 after creating the workflow, got %d: %s", code, out)
 	}
-	if !strings.Contains(out, "created .github/workflows/construct.yml") {
+	if !strings.Contains(out, "created "+filepath.FromSlash(".github/workflows/construct.yml")) {
 		t.Errorf("output = %q", out)
 	}
 	if _, err := os.Stat(filepath.Join(dir, ".github", "workflows", "construct.yml")); err != nil {

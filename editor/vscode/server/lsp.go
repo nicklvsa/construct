@@ -1739,7 +1739,7 @@ func keywordHover(word string) (string, bool) {
 	case "cp":
 		return "builtin: `cp <src> <dst>`\n\nCopies a file or directory recursively, cross-platform.\n\nBare `cp` runs the builtin; `$ cp` runs the shell's cp.", true
 	case "rm":
-		return "builtin: `rm <path>`\n\nRemoves a file or directory recursively; refuses to remove the base directory or its ancestors.\n\nBare `rm` runs the builtin; `$ rm` runs the shell's rm.", true
+		return "builtin: `rm <path>`\n\nRemoves a file or directory recursively; refuses to remove the base directory or its ancestors. `rm<kill> <path>` also terminates any process still running from the file first (Windows refuses to delete a running executable; elsewhere the modifier is a no-op).\n\nBare `rm` runs the builtin; `$ rm` runs the shell's rm.", true
 	case "mkdir":
 		return "builtin: `mkdir <path>`\n\nCreates a directory (and its parents).\n\nBare `mkdir` runs the builtin; `$ mkdir` runs the shell's mkdir.", true
 	case "touch":

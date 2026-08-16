@@ -267,6 +267,7 @@ func chooseTargets(data *pkg.ParsedData) ([]string, error) {
 		return nil, fmt.Errorf("failed to enter raw mode: %w", err)
 	}
 
+	enableANSI(os.Stdout)
 	fmt.Print("\x1b[?1049h")
 	defer func() {
 		fmt.Print("\x1b[?1049l")

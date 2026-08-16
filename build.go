@@ -171,7 +171,11 @@ func printDryRunBody(body []pkg.BodyStatement, indent int) {
 			if stmt.Timeout != "" {
 				args = fmt.Sprintf("timeout %s %s", stmt.Timeout, args)
 			}
-			fmt.Printf("%s%s %s\n", prefix, stmt.Shell, args)
+			name := stmt.Shell
+			if stmt.Modifier != "" {
+				name = fmt.Sprintf("%s<%s>", name, stmt.Modifier)
+			}
+			fmt.Printf("%s%s %s\n", prefix, name, args)
 		case pkg.StmtConfirm:
 			fmt.Printf("%sconfirm %q\n", prefix, stmt.Message)
 		case pkg.StmtPrompt:

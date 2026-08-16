@@ -1495,3 +1495,55 @@ manual {
 		t.Errorf("StripManual on a command named manual = %q %v", rest, ok)
 	}
 }
+
+func TestParseBuiltinModifier(t *testing.T) {
+	parse := func(lines []string) (*ParsedData, error) {
+		return (&Parser{Data: &ParsedData{}, Lines: lines}).Parse()
+	}
+
+	data, err := parse([]string{"t {\n    rm<kill> a.txt b.txt\n}"})
+	if err != nil {
+		t.Fatalf("rm<kill> should parse: %v", err)
+	}
+	stmt := data.Commands[0].Body[0]
+	if stmt.Type != StmtBuiltin || stmt.Shell != "rm" || stmt.Modifier != "kill" || stmt.BuiltinArgs != "a.txt b.txt" {
+		t.Errorf("unexpected statement: %+v", stmt)
+	}
+
+	data, err = parse([]string{"t {\n    !rm<kill> a.txt\n}"})
+	if err != nil {
+		t.Fatalf("!rm<kill> should parse: %v", err)
+	}
+	stmt = data.Commands[0].Body[0]
+	if !stmt.Tolerant || stmt.Modifier != "kill" {
+		t.Errorf("unexpected statement: %+v", stmt)
+	}
+
+	data, err = parse([]string{"t {\n    timeout 5s rm<kill> a.txt\n}"})
+	if err != nil {
+		t.Fatalf("timeout rm<kill> should parse: %v", err)
+	}
+	stmt = data.Commands[0].Body[0]
+	if stmt.Timeout != "5s" || stmt.Modifier != "kill" {
+		t.Errorf("unexpected statement: %+v", stmt)
+	}
+
+	data, err = parse([]string{"t {\n    rm a.txt\n}"})
+	if err != nil {
+		t.Fatalf("plain rm should parse: %v", err)
+	}
+	if stmt := data.Commands[0].Body[0]; stmt.Modifier != "" {
+		t.Errorf("plain rm should have no modifier: %+v", stmt)
+	}
+
+	for _, bad := range []string{
+		"t {\n    rm<bogus> a.txt\n}",
+		"t {\n    cp<kill> a b\n}",
+		"t {\n    rm<kill a.txt\n}",
+		"t {\n    rm<> a.txt\n}",
+	} {
+		if _, err := parse([]string{bad}); err == nil {
+			t.Errorf("expected parse error for %q", bad)
+		}
+	}
+}

@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -71,19 +72,23 @@ func (e *Executor) SetShell(name string) {
 	}
 }
 
-func (e *Executor) shellArgsFor(ctx *execContext, script string) (argv []string, display string) {
+func (e *Executor) shellArgsFor(ctx *execContext, script string) (argv []string, display string, cleanup func()) {
+	noop := func() {}
 	if ctx.container == "" {
+		if f, ok := e.scriptFile(script); ok {
+			return f, e.shellName + " " + script, func() { os.Remove(f[1]) }
+		}
 		argv = append([]string{e.shellName}, slices.Clone(e.shellArgs)...)
 		argv = append(argv, script)
-		return argv, e.shellName + " " + strings.Join(argv[1:], " ")
+		return argv, e.shellName + " " + strings.Join(argv[1:], " "), noop
 	}
 	fields := strings.Fields(ctx.container)
 	if len(fields) != 2 {
-		return nil, ctx.container
+		return nil, ctx.container, noop
 	}
 	rt, image := fields[0], fields[1]
 	if rt == "none" {
-		return nil, image
+		return nil, image, noop
 	}
 	argv = []string{rt, "run", "--rm"}
 	if ctx.envFile != "" {
@@ -98,7 +103,28 @@ func (e *Executor) shellArgsFor(ctx *execContext, script string) (argv []string,
 		argv = append(argv, "-w", "/work/"+filepath.ToSlash(ctx.workDir))
 	}
 	argv = append(argv, image, "/bin/sh", "-c", script)
-	return argv, rt + " run " + image + " /bin/sh -c " + script
+	return argv, rt + " run " + image + " /bin/sh -c " + script, noop
+}
+
+func (e *Executor) scriptFile(script string) ([]string, bool) {
+	if runtime.GOOS != "windows" {
+		return nil, false
+	}
+	base := path.Base(strings.ReplaceAll(e.shellName, "\\", "/"))
+	if base != "bash" && base != "bash.exe" {
+		return nil, false
+	}
+	f, err := os.CreateTemp("", "construct-*.sh")
+	if err != nil {
+		return nil, false
+	}
+	if _, err := f.WriteString(script); err != nil {
+		f.Close()
+		os.Remove(f.Name())
+		return nil, false
+	}
+	f.Close()
+	return []string{e.shellName, filepath.ToSlash(f.Name())}, true
 }
 
 func (e *Executor) resolveShellLine(ctx *execContext, line string) string {
@@ -148,15 +174,17 @@ func needsShellIsolation(line string) bool {
 	if strings.Contains(line, "((") {
 		return true
 	}
-	// Leading assignment (VAR=value …) defines a shell variable.
+
 	name, _, ok := strings.Cut(line, "=")
 	if !ok {
 		return false
 	}
+
 	name = strings.TrimSpace(name)
 	if name == "" {
 		return false
 	}
+
 	for i := 0; i < len(name); i++ {
 		c := name[i]
 		if c == '_' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || i > 0 && c >= '0' && c <= '9' {
@@ -224,10 +252,11 @@ func (e *Executor) runShellBatch(ctx *execContext, stmts []BodyStatement) error 
 		if supportsPipefail(e.shellName) {
 			script = "set -o pipefail\n" + script
 		}
-		argv, fullCommand := e.shellArgsFor(ctx, script)
+		argv, fullCommand, cleanup := e.shellArgsFor(ctx, script)
 		if argv == nil {
 			return fmt.Errorf("command %q needs container runtime but neither docker nor podman was found", ctx.target.Name)
 		}
+		defer cleanup()
 		cmd := e.command(ctx, argv)
 
 		var buf bytes.Buffer
@@ -339,10 +368,11 @@ func (e *Executor) runShellOnce(ctx *execContext, stmt BodyStatement) error {
 
 	stmtCtx, cancel := e.statementCtx(ctx, stmt.Timeout)
 	defer cancel()
-	argv, fullCommand := e.shellArgsFor(ctx, cmdLine)
+	argv, fullCommand, cleanup := e.shellArgsFor(ctx, cmdLine)
 	if argv == nil {
 		return fmt.Errorf("command %q needs container runtime but neither docker nor podman was found", ctx.target.Name)
 	}
+	defer cleanup()
 	cmd := e.command(stmtCtx, argv)
 	if e.debug {
 		switch {

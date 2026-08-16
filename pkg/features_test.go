@@ -16,6 +16,25 @@ import (
 	"github.com/spf13/pflag"
 )
 
+// chdir changes the process working directory for the rest of the test and
+// restores it afterwards: Windows refuses to delete a directory that is any
+// process's cwd, so t.TempDir cleanup fails without the restore.
+func chdir(t *testing.T, dir string) {
+	t.Helper()
+	orig, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chdir(orig); err != nil {
+			t.Errorf("restore cwd: %v", err)
+		}
+	})
+}
+
 func TestElseIfParsing(t *testing.T) {
 	in := `build {
     if "1" == "1" {
@@ -1191,9 +1210,7 @@ func TestWorkDirBaseDir(t *testing.T) {
 
 	// Run from a DIFFERENT directory to prove the base dir is used.
 	other := t.TempDir()
-	if err := os.Chdir(other); err != nil {
-		t.Fatalf("chdir: %v", err)
-	}
+	chdir(t, other)
 
 	data := &ParsedData{
 		Commands: []*Command{
@@ -1220,9 +1237,7 @@ func TestDefaultWorkDirAnchorsToBase(t *testing.T) {
 
 	// Run from a different directory to prove the base dir is used.
 	other := t.TempDir()
-	if err := os.Chdir(other); err != nil {
-		t.Fatalf("chdir: %v", err)
-	}
+	chdir(t, other)
 
 	data := &ParsedData{
 		Commands: []*Command{
@@ -1254,9 +1269,7 @@ func TestBuiltinConditionFunctionsBase(t *testing.T) {
 	os.WriteFile(filepath.Join(base, "src", "artifact.bin"), []byte("x"), 0644)
 
 	other := t.TempDir()
-	if err := os.Chdir(other); err != nil {
-		t.Fatalf("chdir: %v", err)
-	}
+	chdir(t, other)
 
 	data := &ParsedData{
 		Commands: []*Command{
@@ -1429,9 +1442,7 @@ func TestProducesParsing(t *testing.T) {
 
 func TestCacheKeyIncludesArgs(t *testing.T) {
 	dir := t.TempDir()
-	if err := os.Chdir(dir); err != nil {
-		t.Fatalf("chdir: %v", err)
-	}
+	chdir(t, dir)
 	os.WriteFile("dep.txt", []byte("x"), 0644)
 
 	data := &ParsedData{
@@ -1580,9 +1591,7 @@ func TestPerPrereqWorkDir(t *testing.T) {
 	}
 	data.buildIndexMaps()
 	executor := NewExecutor(data, false, false)
-	if err := os.Chdir(dir); err != nil {
-		t.Fatalf("chdir: %v", err)
-	}
+	chdir(t, dir)
 	if err := executor.Execute([]string{"main"}); err != nil {
 		t.Fatalf("exec failed: %v", err)
 	}
@@ -2109,7 +2118,7 @@ func TestOnFailSeesFailureContext(t *testing.T) {
 	if !strings.Contains(out, "line: 4") {
 		t.Errorf("fail.line missing: %q", out)
 	}
-	if !strings.Contains(out, "exit: 1") {
+	if !strings.Contains(out, "exit: 3") {
 		t.Errorf("fail.exit missing: %q", out)
 	}
 }

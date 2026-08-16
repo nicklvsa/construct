@@ -81,12 +81,12 @@ func TestRetryBackoff(t *testing.T) {
 
 func TestRetryBackoffRecovers(t *testing.T) {
 	dir := t.TempDir()
-	marker := filepath.Join(dir, "m")
+	marker := filepath.ToSlash(filepath.Join(dir, "m"))
 	in := "build {\n    retry<3, 20ms> $ test -f " + marker + " || { touch " + marker + "; exit 1; }\n}"
 	if _, err := runParsed(t, in); err != nil {
 		t.Fatalf("second attempt should succeed: %v", err)
 	}
-	if _, err := os.Stat(marker); err != nil {
+	if _, err := os.Stat(filepath.Join(dir, "m")); err != nil {
 		t.Errorf("marker missing: %v", err)
 	}
 }

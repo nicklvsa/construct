@@ -94,7 +94,7 @@ func renderFlame(rows []pkg.FlameRow) {
 	labelW := min(width/3, 34)
 	barW := max(width-labelW-19, 20)
 	rowW := labelW + barW + 19
-	useColor := os.Getenv("NO_COLOR") == "" && term.IsTerminal(int(os.Stdout.Fd()))
+	useColor := os.Getenv("NO_COLOR") == "" && term.IsTerminal(int(os.Stdout.Fd())) && enableANSI(os.Stdout)
 
 	fmt.Printf("\n flame · %d statement(s) · %s total\n", len(sorted), flameDur(total))
 	sep := strings.Repeat("─", rowW)

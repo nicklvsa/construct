@@ -459,7 +459,9 @@ cmd {
 	if !strings.Contains(out, "in-prod") || strings.Contains(out, "in-other") {
 		t.Fatalf("switch output = %q", out)
 	}
-	if !strings.Contains(out, subDir) {
+	// Git Bash reports a MSYS-mapped path (/tmp/...) on Windows, so compare
+	// the tail instead of the full absolute path.
+	if !strings.HasSuffix(strings.ReplaceAll(strings.TrimSpace(out), "\\", "/"), "/sub") {
 		t.Fatalf("in-dir did not change working directory: %q", out)
 	}
 }

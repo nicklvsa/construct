@@ -823,7 +823,9 @@ provision {
 
 - `cp src dst` — copies a file or directory (recursive)
 - `rm path...` — removes recursively; refuses to remove the base directory or
-  its ancestors
+  its ancestors. `rm<kill> path...` also terminates any process still running
+  from the file first (Windows refuses to delete a running executable;
+  elsewhere the modifier is a no-op)
 - `mkdir path...`, `touch path...` — directory/file helpers
 - `download url dst` — fetches with a progress bar on TTYs
 - `extract archive dir` — `.zip`, `.tar`, `.tar.gz`/`.tgz`, `.tar.bz2`

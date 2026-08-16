@@ -18,7 +18,7 @@ func (e *Executor) runBuiltin(ctx *execContext, stmt BodyStatement) error {
 	ignoreErr := stmt.Tolerant
 	parts := splitArgs(stmt.BuiltinArgs)
 	release := e.acquire()
-	err := e.builtinExec(ctx, stmt.Shell, parts)
+	err := e.builtinExec(ctx, stmt.Shell, parts, stmt.Modifier)
 	release()
 	code := 0
 	if err != nil {
@@ -51,12 +51,12 @@ func (e *Executor) builtinPath(ctx *execContext, p string) string {
 	return filepath.Join(e.builtinDir(ctx), p)
 }
 
-func (e *Executor) builtinExec(ctx *execContext, name string, args []string) error {
+func (e *Executor) builtinExec(ctx *execContext, name string, args []string, modifier string) error {
 	switch name {
 	case "cp":
 		return e.builtinCp(ctx, args)
 	case "rm":
-		return e.builtinRm(ctx, args)
+		return e.builtinRm(ctx, args, modifier == "kill")
 	case "mkdir":
 		return e.builtinMkdir(ctx, args)
 	case "touch":
@@ -91,15 +91,19 @@ func (e *Executor) builtinCp(ctx *execContext, args []string) error {
 	return copyFile(src, dst)
 }
 
-func (e *Executor) builtinRm(ctx *execContext, args []string) error {
-	if len(args) < 1 {
-		return fmt.Errorf("rm requires a path")
-	}
-	base, _ := filepath.Abs(e.baseDir)
+func (e *Executor) builtinRm(ctx *execContext, args []string, kill bool) error {
+	var paths []string
 	for _, a := range args {
 		if strings.HasPrefix(a, "-") {
 			continue
 		}
+		paths = append(paths, a)
+	}
+	if len(paths) < 1 {
+		return fmt.Errorf("rm requires a path")
+	}
+	base, _ := filepath.Abs(e.baseDir)
+	for _, a := range paths {
 		p := e.builtinPath(ctx, a)
 		abs, err := filepath.Abs(p)
 		if err != nil {
@@ -108,11 +112,37 @@ func (e *Executor) builtinRm(ctx *execContext, args []string) error {
 		if base != "" && (abs == base || strings.HasPrefix(base, abs+string(os.PathSeparator))) {
 			return fmt.Errorf("refusing to remove %q (the base directory or an ancestor)", a)
 		}
+		if kill {
+			if err := removeKillingProcesses(abs); err != nil {
+				return err
+			}
+			continue
+		}
 		if err := os.RemoveAll(abs); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// removeKillingProcesses deletes p even when a process is still running from
+// it, which Windows refuses to allow; elsewhere it is a plain remove.
+func removeKillingProcesses(p string) error {
+	err := os.RemoveAll(p)
+	if err == nil || !isDeletionLocked(err) {
+		return err
+	}
+	if kerr := terminateProcessesUsing(p); kerr != nil {
+		return kerr
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		err = os.RemoveAll(p)
+		if err == nil || !isDeletionLocked(err) || time.Now().After(deadline) {
+			return err
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
 }
 
 func (e *Executor) builtinMkdir(ctx *execContext, args []string) error {

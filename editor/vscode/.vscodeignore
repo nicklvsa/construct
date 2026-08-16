@@ -8,3 +8,4 @@ server/go.sum
 server/server
 server/server.exe
 *.vsix
+server/*.stash

@@ -355,11 +355,18 @@ func (p *Parser) parseBodyStatements(raw []rawLine, scope string) ([]BodyStateme
 			}
 		}
 
-		if builtinName, args, tolerant, ok := parseBuiltinLine(line); ok {
+		if builtinName, args, mod, tolerant, ok, err := parseBuiltinLine(line); ok || err != nil {
+			if err != nil {
+				return nil, NewParseError(p.InputFile, lineNum, 1, err.Error(), line)
+			}
+			if mod != "" && (builtinName != "rm" || mod != "kill") {
+				return nil, NewParseError(p.InputFile, lineNum, 1, fmt.Sprintf("unknown modifier <%s> for %s (only rm<kill> is supported)", mod, builtinName), line)
+			}
 			stmts = append(stmts, BodyStatement{
 				Type:        StmtBuiltin,
 				Shell:       builtinName,
 				BuiltinArgs: args,
+				Modifier:    mod,
 				Tolerant:    tolerant,
 				Timeout:     timeoutDur,
 				SourceLine:  lineNum,
@@ -389,7 +396,7 @@ var builtinCommands = []string{"cp", "rm", "mkdir", "touch", "download", "extrac
 
 var headerOnlyKeywords = []string{"manual", "produces", "container", "onchange", "import"}
 
-func parseBuiltinLine(line string) (name, args string, tolerant bool, ok bool) {
+func parseBuiltinLine(line string) (name, args, mod string, tolerant, ok bool, err error) {
 	rest := line
 	if strings.HasPrefix(rest, "!") {
 		tolerant = true
@@ -397,10 +404,17 @@ func parseBuiltinLine(line string) (name, args string, tolerant bool, ok bool) {
 	}
 	for _, b := range builtinCommands {
 		if strings.HasPrefix(rest, b+" ") || rest == b {
-			return b, strings.TrimSpace(rest[len(b):]), tolerant, true
+			return b, strings.TrimSpace(rest[len(b):]), "", tolerant, true, nil
+		}
+		if strings.HasPrefix(rest, b+"<") {
+			r, m, _, perr := peelModifier(rest[len(b):])
+			if perr != nil {
+				return "", "", "", false, true, fmt.Errorf("%s modifier: %v", b, perr)
+			}
+			return b, strings.TrimSpace(r), m, tolerant, true, nil
 		}
 	}
-	return "", "", false, false
+	return "", "", "", false, false, nil
 }
 
 func trimQuoted(s string) string {

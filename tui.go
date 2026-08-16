@@ -274,6 +274,7 @@ func (d *dashboard) start() {
 		d.mu.Unlock()
 		return
 	}
+	enableANSI(os.Stdout)
 	fmt.Print("\x1b[?1049h\x1b[?25l")
 	d.mu.Lock()
 	d.restoreTerm = func() {

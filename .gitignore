@@ -13,3 +13,7 @@ debug.json
 
 # LSP dev mode marker (points to source server binary)
 .construct-lsp-dev
+
+# LSP server build outputs (binaries, go-tool ~ renames, packaging stash)
+editor/vscode/server/construct-lsp*
+editor/vscode/*.vsix

@@ -3,6 +3,7 @@ package pkg
 import (
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -82,12 +83,13 @@ func TestInteractiveShellWorkDir(t *testing.T) {
 	if err != nil || code != 0 {
 		t.Fatalf("code=%d err=%v", code, err)
 	}
-	if !strings.Contains(string(out), strings.ReplaceAll(dir+"/"+"/sub", "//", "/")) {
-		wd, _ := os.Getwd()
-		_ = wd
-		t.Errorf("workdir not applied, pwd output: %q (want under %s)", string(out), dir)
+
+	pwd := strings.ReplaceAll(strings.TrimSpace(string(out)), "\\", "/")
+	if !strings.HasSuffix(pwd, "/sub") {
+		t.Errorf("workdir not applied, pwd output: %q (want under %s)", pwd, dir)
 	}
-	if _, err := os.Stat(dir + "/sub"); err != nil {
+
+	if _, err := os.Stat(filepath.Join(dir, "sub")); err != nil {
 		t.Errorf("workdir not created: %v", err)
 	}
 }

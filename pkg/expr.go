@@ -729,7 +729,7 @@ var lengthDef = builtinDef{arity: arity(1, 1), fn: func(args []Value, _ EvalCont
 
 var builtins = map[string]builtinDef{
 	"basename": unaryStr(func(s string) string { return filepath.Base(s) }),
-	"dirname":  unaryStr(func(s string) string { return filepath.Dir(s) }),
+	"dirname":  unaryStr(func(s string) string { return filepath.ToSlash(filepath.Dir(s)) }),
 	"ext":      unaryStr(func(s string) string { return filepath.Ext(s) }),
 	"stem": unaryStr(func(s string) string {
 		base := filepath.Base(s)

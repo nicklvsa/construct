@@ -420,10 +420,7 @@ func TestEvaluateCommandFailure(t *testing.T) {
 }
 
 func exitNonZero() string {
-	if runtime.GOOS == "windows" {
-		return "exit /b 3"
-	}
-	return "false"
+	return "exit 3"
 }
 
 // shellBody builds a []BodyStatement from plain shell lines, for test brevity.
@@ -1327,12 +1324,20 @@ func TestContainerArgs(t *testing.T) {
 
 	// Plain shell mode.
 	shCtx := &execContext{target: &Command{Name: "x"}, env: &env}
-	argv, display := e.shellArgsFor(shCtx, "echo hi")
+	argv, display, cleanup := e.shellArgsFor(shCtx, "echo hi")
+	defer cleanup()
 	if argv[0] != e.shellName || display == "" {
 		t.Errorf("plain argv = %v display = %q", argv, display)
 	}
-	if argv[len(argv)-1] != "echo hi" {
-		t.Errorf("script not last arg: %v", argv)
+	if last := argv[len(argv)-1]; last != "echo hi" {
+		if runtime.GOOS != "windows" {
+			t.Errorf("script not last arg: %v", argv)
+		} else {
+			b, err := os.ReadFile(last)
+			if err != nil || string(b) != "echo hi" {
+				t.Errorf("script file %q content = %q err = %v", last, b, err)
+			}
+		}
 	}
 
 	// Container mode via a stubbed runtime path.
@@ -1340,7 +1345,8 @@ func TestContainerArgs(t *testing.T) {
 	f, _ := os.CreateTemp(t.TempDir(), "env")
 	f.Close()
 	cCtx := &execContext{target: &Command{Name: "x"}, env: &env, container: "docker alpine:latest", envFile: f.Name(), workDir: "sub"}
-	argv, display = e.shellArgsFor(cCtx, "echo hi")
+	argv, display, cleanup = e.shellArgsFor(cCtx, "echo hi")
+	defer cleanup()
 	joined := strings.Join(argv, " ")
 	for _, want := range []string{"docker run --rm", "--env-file", "-v " + dir + ":/work", "-w /work/sub", "alpine:latest", "/bin/sh -c", "echo hi"} {
 		if !strings.Contains(joined, want) {
