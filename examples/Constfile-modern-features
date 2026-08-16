@@ -4,12 +4,12 @@ import "Constfile-shared-other" as other
 
 # Doc comment: shown by `construct --list`.
 # Builds everything and prints the shared versions.
-build-all < lib.build, other.build {
+manual build-all < lib.build, other.build {
     $ echo "lib version: &lib.version"
     $ echo "other version: &other.version"
 }
 
-deploy {
+manual deploy {
     env { REGION=us-east-1, CI=true }
     $ echo "deploying to @REGION with CI=@CI"
     if "@REGION" == "us-east-1" {

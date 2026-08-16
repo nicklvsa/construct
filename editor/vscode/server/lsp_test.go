@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -1042,4 +1043,26 @@ func namedOutputAt(data *pkg.ParsedData, cmdName string, idx int) string {
 		}
 	}
 	return ""
+}
+
+func TestDiagnosticsFilterImportedIssues(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "Constfile-lib"), []byte("check {\n  $ echo ok\n}\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	uri := pathToURI(filepath.Join(dir, "Constfile"))
+	text := "import \"Constfile-lib\" as lib\norphan {\n  $ echo hi\n}\n_ {\n  $ echo ok\n}\n"
+
+	var buf bytes.Buffer
+	s := newServer()
+	s.out = &buf
+	s.updateDoc(uri, text)
+	out := buf.String()
+
+	if strings.Contains(out, "lib.check") {
+		t.Errorf("imported-file issue leaked into this document's diagnostics: %s", out)
+	}
+	if !strings.Contains(out, "orphan") {
+		t.Errorf("same-file issue missing from diagnostics: %s", out)
+	}
 }

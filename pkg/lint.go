@@ -10,6 +10,7 @@ import (
 )
 
 type LintIssue struct {
+	File     string `json:"file,omitempty"`
 	Line     int    `json:"line"`
 	Col      int    `json:"col"`
 	EndCol   int    `json:"end_col"`
@@ -35,6 +36,9 @@ func severityLabel(sev int) string {
 }
 
 func FormatLintIssue(file string, i LintIssue) string {
+	if i.File != "" {
+		file = i.File
+	}
 	return fmt.Sprintf("%s:%d:%d: %s: %s", file, i.Line+1, i.Col+1, severityLabel(i.Severity), i.Message)
 }
 
@@ -155,8 +159,8 @@ func lintUnknownVarRefs(lines []string, data *ParsedData) []LintIssue {
 
 func lintSwitchAndOutputs(data *ParsedData) []LintIssue {
 	var issues []LintIssue
-	var walk func(body []BodyStatement)
-	walk = func(body []BodyStatement) {
+	var walk func(file string, body []BodyStatement)
+	walk = func(file string, body []BodyStatement) {
 		seen := map[string]bool{}
 		for _, stmt := range body {
 			switch stmt.Type {
@@ -164,6 +168,7 @@ func lintSwitchAndOutputs(data *ParsedData) []LintIssue {
 				if stmt.OutputName != "" {
 					if seen[stmt.OutputName] {
 						issues = append(issues, LintIssue{
+							File: file,
 							Line: max(stmt.SourceLine-1, 0), Col: 0, EndCol: 0,
 							Severity: LintError,
 							Message:  fmt.Sprintf("duplicate named output %q — `&cmd.%s` resolves to only one of them", stmt.OutputName, stmt.OutputName),
@@ -179,27 +184,28 @@ func lintSwitchAndOutputs(data *ParsedData) []LintIssue {
 				for _, c := range stmt.Cases {
 					if !c.IsDefault && len(c.Values) == 0 {
 						issues = append(issues, LintIssue{
+							File: file,
 							Line: max(c.SourceLine-1, 0), Col: 0, EndCol: 0,
 							Severity: LintWarning,
 							Message:  "case without values never matches",
 						})
 					}
-					walk(c.Body)
+					walk(file, c.Body)
 				}
 			case StmtIf:
-				walk(stmt.ThenBody)
-				walk(stmt.ElseBody)
+				walk(file, stmt.ThenBody)
+				walk(file, stmt.ElseBody)
 			case StmtFor:
-				walk(stmt.LoopBody)
+				walk(file, stmt.LoopBody)
 			case StmtOnFail:
-				walk(stmt.OnFailBody)
+				walk(file, stmt.OnFailBody)
 			case StmtInDir, StmtLock:
-				walk(stmt.ThenBody)
+				walk(file, stmt.ThenBody)
 			}
 		}
 	}
 	for _, cmd := range data.Commands {
-		walk(cmd.Body)
+		walk(cmd.SourceFile, cmd.Body)
 	}
 	return issues
 }
@@ -221,6 +227,7 @@ func lintStatementKeywordCommands(data *ParsedData) []LintIssue {
 			continue
 		}
 		issues = append(issues, LintIssue{
+			File: cmd.SourceFile,
 			Line: max(cmd.SourceLine-1, 0), Col: 0, EndCol: len(cmd.Name),
 			Severity: LintError,
 			Message:  fmt.Sprintf("`%s` is a statement keyword — this line defines a command literally named `%s`; the statement belongs inside a command body", cmd.Name, cmd.Name),
@@ -323,42 +330,44 @@ func lintStatementPrefixes(lines []string) []LintIssue {
 
 func lintLoopControl(data *ParsedData) []LintIssue {
 	var issues []LintIssue
-	var walk func(body []BodyStatement, inLoop, parallel bool)
-	walk = func(body []BodyStatement, inLoop, parallel bool) {
+	var walk func(file string, body []BodyStatement, inLoop, parallel bool)
+	walk = func(file string, body []BodyStatement, inLoop, parallel bool) {
 		for _, stmt := range body {
 			switch stmt.Type {
 			case StmtContinue, StmtBreak:
 				if !inLoop {
 					issues = append(issues, LintIssue{
+						File: file,
 						Line: max(stmt.SourceLine-1, 0), Col: 0, EndCol: 0,
 						Severity: LintError,
 						Message:  fmt.Sprintf("`%s` outside a loop", stmt.Type),
 					})
 				} else if stmt.Type == StmtBreak && parallel {
 					issues = append(issues, LintIssue{
+						File: file,
 						Line: max(stmt.SourceLine-1, 0), Col: 0, EndCol: 0,
 						Severity: LintError,
 						Message:  "`break` cannot stop the concurrent iterations of a parallel loop — use `continue if` to skip items instead",
 					})
 				}
 			case StmtIf:
-				walk(stmt.ThenBody, inLoop, parallel)
-				walk(stmt.ElseBody, inLoop, parallel)
+				walk(file, stmt.ThenBody, inLoop, parallel)
+				walk(file, stmt.ElseBody, inLoop, parallel)
 			case StmtFor:
-				walk(stmt.LoopBody, true, stmt.Parallel)
+				walk(file, stmt.LoopBody, true, stmt.Parallel)
 			case StmtOnFail:
-				walk(stmt.OnFailBody, inLoop, parallel)
+				walk(file, stmt.OnFailBody, inLoop, parallel)
 			case StmtSwitch:
 				for _, c := range stmt.Cases {
-					walk(c.Body, inLoop, parallel)
+					walk(file, c.Body, inLoop, parallel)
 				}
 			case StmtInDir, StmtLock:
-				walk(stmt.ThenBody, inLoop, parallel)
+				walk(file, stmt.ThenBody, inLoop, parallel)
 			}
 		}
 	}
 	for _, cmd := range data.Commands {
-		walk(cmd.Body, false, false)
+		walk(cmd.SourceFile, cmd.Body, false, false)
 	}
 	return issues
 }
@@ -556,6 +565,7 @@ func lintMissingFileDeps(data *ParsedData, baseDir string) []LintIssue {
 		for _, dep := range expandFileDeps(cmd.FileDeps, workDirBase(baseDir, cmd.WorkDir)) {
 			if _, err := os.Stat(dep); err != nil {
 				issues = append(issues, LintIssue{
+					File: cmd.SourceFile,
 					Line: max(cmd.SourceLine-1, 0), Col: 0, EndCol: 0,
 					Severity: LintWarning,
 					Message:  fmt.Sprintf("command `%s`: file dependency %q does not exist", cmd.Name, dep),
@@ -602,6 +612,29 @@ func lintUnusedGlobals(data *ParsedData) []LintIssue {
 
 func lintUnreferencedCommands(data *ParsedData) []LintIssue {
 	referenced := map[string]bool{}
+	var collectInvokes func(body []BodyStatement)
+	collectInvokes = func(body []BodyStatement) {
+		for _, stmt := range body {
+			if stmt.Type == StmtInvoke {
+				referenced[strings.TrimSpace(stmt.Shell)] = true
+			}
+			switch stmt.Type {
+			case StmtIf:
+				collectInvokes(stmt.ThenBody)
+				collectInvokes(stmt.ElseBody)
+			case StmtFor:
+				collectInvokes(stmt.LoopBody)
+			case StmtOnFail:
+				collectInvokes(stmt.OnFailBody)
+			case StmtSwitch:
+				for _, c := range stmt.Cases {
+					collectInvokes(c.Body)
+				}
+			case StmtInDir, StmtLock:
+				collectInvokes(stmt.ThenBody)
+			}
+		}
+	}
 	for _, cmd := range data.Commands {
 		if cmd.IsDefault {
 			referenced[cmd.Name] = true
@@ -609,11 +642,7 @@ func lintUnreferencedCommands(data *ParsedData) []LintIssue {
 		for _, p := range cmd.Prereqs {
 			referenced[p] = true
 		}
-		for _, stmt := range ShellStatements(cmd.Body) {
-			if stmt.Type == StmtInvoke {
-				referenced[strings.TrimSpace(stmt.Shell)] = true
-			}
-		}
+		collectInvokes(cmd.Body)
 	}
 	var issues []LintIssue
 	for _, cmd := range data.Commands {
@@ -621,6 +650,7 @@ func lintUnreferencedCommands(data *ParsedData) []LintIssue {
 			continue
 		}
 		issues = append(issues, LintIssue{
+			File: cmd.SourceFile,
 			Line: max(cmd.SourceLine-1, 0), Col: 0, EndCol: 0,
 			Severity: LintInfo,
 			Message:  fmt.Sprintf("command %q is never referenced (not a prerequisite, invoke target, or default)", cmd.Name),

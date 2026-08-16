@@ -224,7 +224,16 @@ func (s *server) updateDoc(uri, text string) {
 	}
 
 	s.docs[uri] = &docState{text: text, lines: lines, data: data}
-	s.publishDiagnostics(uri, lintDiagnostics(pkg.Lint(lines, data, uriToPathDir(uri)), lines))
+	docPath := uriToPath(uri)
+	var issues []pkg.LintIssue
+	for _, is := range pkg.Lint(lines, data, uriToPathDir(uri)) {
+		// Issues from imported files keep their own coordinates — publishing
+		// them here would pin their line numbers onto unrelated lines.
+		if is.File == "" || is.File == uri || is.File == docPath {
+			issues = append(issues, is)
+		}
+	}
+	s.publishDiagnostics(uri, lintDiagnostics(issues, lines))
 }
 
 func (s *server) publishDiagnostics(uri string, diags []diagnostic) {
@@ -292,9 +301,6 @@ func parseErrorToDiagnostics(err error, uri string, lines []string) []diagnostic
 	}}
 }
 
-// lintDiagnostics renders pkg.Lint issues as LSP diagnostics. Token-range
-// issues (EndCol > 0) underline the reference; others cover their line;
-// file-wide issues cover the whole document.
 func lintDiagnostics(issues []pkg.LintIssue, lines []string) []diagnostic {
 	sevMap := map[int]int{pkg.LintError: sevError, pkg.LintWarning: sevWarning, pkg.LintInfo: sevWarning}
 	diags := []diagnostic{}
@@ -440,7 +446,6 @@ func (s *server) handleHover(params json.RawMessage) (interface{}, error) {
 		}
 	}
 
-	// Keywords/builtins — never in shell text after a `$`.
 	if word, ok := wordAtPosition(line, char); ok && !shellLineContentAt(line, char) {
 		// A word used as a call (`env("X")`) is a function, not a keyword.
 		if strings.Contains(line, word+"(") {
@@ -922,8 +927,6 @@ func lineStartWord(line string, char int) (string, bool) {
 	return trimmed, true
 }
 
-// headerArgAtPosition reports the word under char inside a header's argument
-// list, e.g. `deploy (env, opt region) {`.
 func headerArgAtPosition(line string, char int) (string, bool) {
 	open := strings.IndexByte(line, '(')
 	if open < 0 {
@@ -1354,8 +1357,6 @@ func isIdentRune(r rune) bool {
 	return r == '_' || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z')
 }
 
-// commandNameAtLine guesses the header's command name via the parser's own
-// header logic. Callers must validate with GetCommand; shell lines match nothing.
 func commandNameAtLine(line string) (string, bool) {
 	line, _ = pkg.StripManual(line)
 	name := pkg.ParseCommandName(line)
@@ -1596,7 +1597,6 @@ func completionVarItems(data *pkg.ParsedData, lines []string, lineIdx int, prefi
 		}
 	}
 
-	// Inside an onfail block, &fail.* context refs are available.
 	if strings.HasPrefix(prefix, "fail.") && inOnFailBlock(lines, lineIdx) {
 		for _, f := range []string{"fail.message", "fail.line", "fail.exit"} {
 			if strings.HasPrefix(f, prefix) {
@@ -1615,7 +1615,6 @@ func completionVarItems(data *pkg.ParsedData, lines []string, lineIdx int, prefi
 	return items
 }
 
-// resolveCommandRef finds name itself or its longest command prefix.
 func resolveCommandRef(data *pkg.ParsedData, name string) *pkg.Command {
 	if cmdName, _, ok := pkg.SplitCommandRef(data, name); ok {
 		name = cmdName
@@ -1642,8 +1641,6 @@ func isPrereqListLine(line string) bool {
 	return strings.Contains(line, "<")
 }
 
-// netBraces counts braces on a line, ignoring shell lines (starting with `$`
-// or `!`) so `awk '{print}'` and `${var}` don't skew the depth.
 func netBraces(line string) int {
 	trimmed := strings.TrimLeft(line, " \t")
 	if strings.HasPrefix(trimmed, "$") || strings.HasPrefix(trimmed, "!") {
@@ -1652,8 +1649,6 @@ func netBraces(line string) int {
 	return strings.Count(line, "{") - strings.Count(line, "}")
 }
 
-// inOnFailBlock reports whether lineIdx is inside an `onfail` block, walking
-// up counting braces until an unmatched closer appears.
 func inOnFailBlock(lines []string, lineIdx int) bool {
 	depth := 0
 	for i := lineIdx; i >= 0; i-- {
@@ -1706,7 +1701,6 @@ func linePrefixHover(line string, char int) (string, bool) {
 	return "", false
 }
 
-// shellLineContentAt reports whether char sits after the `$` shell marker.
 func shellLineContentAt(line string, char int) bool {
 	if idx := strings.IndexByte(line, '$'); idx >= 0 && char > idx {
 		return true

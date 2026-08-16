@@ -383,3 +383,41 @@ func TestLintDuplicateNamedOutputs(t *testing.T) {
 		t.Errorf("no duplicate-output error in %v", issues)
 	}
 }
+
+func TestLintInvokeCountsAsReference(t *testing.T) {
+	text := "gen {\n  $ echo hi\n}\nrun {\n  if \"1\" == \"1\" {\n    invoke gen\n  }\n}\n_ < run {\n  $ echo ok\n}\n"
+	for _, is := range lintText(t, text) {
+		if strings.Contains(is.Message, "never referenced") {
+			t.Errorf("invoked command flagged: %s", is.Message)
+		}
+	}
+}
+
+func TestLintImportedCommandAttribution(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "Constfile-lib"), []byte("check {\n  $ echo ok\n}\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	main := "import \"Constfile-lib\" as lib\nrun {\n  $ echo hi\n}\n_ < run {\n  $ echo ok\n}\n"
+	data, err := NewParserFromContent(filepath.Join(dir, "Constfile"), main).Parse()
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	issues := Lint(strings.Split(main, "\n"), data, dir)
+	found := false
+	for _, is := range issues {
+		if !strings.Contains(is.Message, `"lib.check" is never referenced`) {
+			continue
+		}
+		found = true
+		if is.File != filepath.Join(dir, "Constfile-lib") {
+			t.Errorf("issue attributed to %q, want the imported file", is.File)
+		}
+		if is.Line != 0 {
+			t.Errorf("issue line = %d, want 0 (line 1 of the import)", is.Line)
+		}
+	}
+	if !found {
+		t.Errorf("unreferenced imported command not flagged: %v", issues)
+	}
+}
