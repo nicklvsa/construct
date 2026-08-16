@@ -1050,20 +1050,6 @@ construct ui --no-open        # print the URL without launching a browser
   the printed URL; it refuses to overwrite files that changed on disk since
   they were loaded.
 
-## Native Editor (optional)
-
-`editor/gui` is an optional native shell built with Gio (pure Go, no cgo),
-kept in its own Go module so its dependencies never touch the main binary:
-
-```bash
-go install github.com/nicklvsa/construct/editor/gui@latest
-construct-gui [Constfile]
-```
-
-It edits name, prerequisites, and body through the same validation gate and
-save rules as the web editor. The web editor remains the full-featured
-surface; the native shell is for quick edits without a browser.
-
 ## Platform-Specific Files
 
 Construct automatically looks for platform-specific Constfiles:
