@@ -1,0 +1,25 @@
+# Persistent state: values survive across runs in .construct-cache/state.json.
+#
+#   construct Constfile-state release      # run it a few times
+#   construct Constfile-state stats        # per-command timing history
+#   construct Constfile-state --resume     # rerun only the commands that failed
+
+state last_release = "0.0.0"
+state built_count = 0
+
+# Reads and bumps persisted state; state values are runtime expressions.
+release {
+    $ echo "previous release: @state("last_release")"
+    $ echo "build count so far: @state("built_count")"
+    state last_release = date("2006.01.02")
+    state built_count = @state("built_count") + 1
+    $ echo "count now: @state("built_count")"
+}
+
+# Fails sometimes; `construct --resume` reruns just this after a failure.
+flaky {
+    if "&built_count" >= "3" {
+        fail "deliberate failure at build 3"
+    }
+    $ echo "flaky passed"
+}

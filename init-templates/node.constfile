@@ -1,0 +1,20 @@
+var app = myapp
+
+# Installs dependencies
+setup {
+    $ npm install
+}
+
+# Builds the bundle
+build produces dist/ < setup, src/**, package.json {
+    $ npm run build
+}
+
+# Runs the test suite
+test < setup {
+    $ npm test
+}
+
+_ < build, test {
+    $ echo "all checks passed"
+}

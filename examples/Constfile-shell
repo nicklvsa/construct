@@ -1,0 +1,33 @@
+// Interactive shells with a command's environment
+// Demonstrates: construct shell (env blocks, header workdirs, containers),
+//               the ad-hoc --container override
+// Run with:
+//   construct shell Constfile-shell dev          # env + workdir of 'dev'
+//   construct shell Constfile-shell deploy       # deploy's env (asks for API_TOKEN)
+//   construct shell Constfile-shell              # bare shell at examples/
+//   construct shell Constfile-shell --container alpine:latest
+//
+// 'shell' reuses the environment of any command: the resolved env { }
+// block, the header workdir (created when missing), and the container
+// image when one is declared. The child's exit code becomes construct's.
+
+// Dev shell: API_ENV and REGION (a &var ref) are exported into the shell.
+dev in src {
+    env { API_ENV=development, REGION=&region, LOG_LEVEL=debug }
+    $ echo "build step (run normally with: construct Constfile-shell dev)"
+}
+
+// Prod parity: the same env block the deploy path uses.
+deploy (env) in src {
+    env { API_ENV=&env, REGION=&region, LOG_LEVEL=info }
+    require_env API_TOKEN "needed to talk to the API"
+    $ echo "deploying to &env/&REGION"
+}
+
+// Container-defined command: construct shell build drops into
+// docker/podman -it with /work mounted here.
+build container "golang:1.26" < **.go {
+    $ go build ./...
+}
+
+var region = us-east-1

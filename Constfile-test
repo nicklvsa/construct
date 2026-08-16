@@ -6,6 +6,14 @@ ls in examples {
     $ ls -l as out
 }
 
+test {
+    onfail {
+        $ echo "Failure on line &fail.line"
+    }
+
+    $ exit 1
+}
+
 _ < log, ls {
     echo "&log.out"
     echo "&ls.out"

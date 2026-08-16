@@ -1,0 +1,34 @@
+# Monorepo: shared variables and per-package commands
+
+var version = 0.1.0
+
+# Builds every package
+build {
+    for pkg in api, web, worker {
+        in &pkg {
+            $ make build
+        }
+    }
+}
+
+# Runs every package's tests
+test {
+    for pkg in api, web, worker {
+        in &pkg {
+            $ make test
+        }
+    }
+}
+
+# Installs all dependencies up front
+setup {
+    for pkg in api, web, worker {
+        in &pkg {
+            $ make setup
+        }
+    }
+}
+
+_ < build, test {
+    $ echo "monorepo ready: &version"
+}

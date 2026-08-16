@@ -1,0 +1,78 @@
+var branch = main
+var version = 0.0.0
+// Config guards, retries, and CI-friendly flags
+// Demonstrates: require_env, global writes, retry<N> (+ retry<N, 2s> backoff), string condition ops
+//               (starts_with/ends_with/matches), onchange watch globs,
+//               bare key=value overrides, --quiet, --explain, --json,
+//               --jobs auto, concurrent output prefixing, SIGINT cleanup
+// Run with:
+//   construct Constfile-modern-flags --list --json
+//   CI=1 construct Constfile-modern-flags build               # require_env passes
+//   construct Constfile-modern-flags build                    # fails: CI unset
+//   CI=1 construct Constfile-modern-flags build env=prod      # bare key=value override
+//   CI=1 construct Constfile-modern-flags gen --explain       # cache reasons
+//   CI=1 construct Constfile-modern-flags gen --explain       # second run: cached
+//   CI=1 construct Constfile-modern-flags gen --no-cache
+//   CI=1 construct Constfile-modern-flags gen --quiet
+//   construct Constfile-modern-flags deploy --jobs auto       # parallel, prefixed output
+//   construct Constfile-modern-flags gen --watch              # reruns on src/*.c changes
+//   construct Constfile-modern-flags deploy                   # Ctrl-C runs onfail cleanup
+
+// A hard requirement: refuse to run unless CI is set.
+build {
+    require_env CI "CI must be set to run builds"
+
+    // global writes a variable other commands can read.
+    global commit = $ git rev-parse --short HEAD
+
+    $ echo "building &commit"
+}
+
+// String condition operators: prefix, suffix, and regex tests.
+deploy {
+    onfail {
+        $ echo "deploy failed: &fail.message (line &fail.line)"
+    }
+
+    if "&branch" ends_with "-rc" {
+        $ echo "release-candidate branch"
+    } else if "&branch" starts_with "feature/" {
+        $ echo "feature branch"
+    }
+    if "&version" matches "^[0-9]+\.[0-9]+$" {
+        $ echo "valid version &version"
+    }
+
+    $ echo "deploying &branch"
+}
+
+// A flaky network step: retry<3> instead of failing on the first blip.
+fetch {
+    retry<3> $ curl -sf https://example.com/manifest.json
+    $ echo "manifest fetched"
+}
+
+// The same step with backoff: waits 2s, then 4s, then 8s between attempts
+// (the backoff base is given after a comma and doubles each retry).
+fetch-with-backoff {
+    retry<3, 2s> $ curl -sf https://example.com/manifest.json
+    $ echo "manifest fetched"
+}
+
+// Cached file deps plus extra watch-only globs: reruns in --watch mode
+// when src files change, without participating in the skip-cache.
+gen < src/VERSION.txt onchange src/*.c {
+    $ echo "generating"
+}
+
+// Parallel targets: each command's output is prefixed with its name.
+job1 {
+    $ echo job1-done
+}
+job2 {
+    $ echo job2-done
+}
+
+stage < build, gen {
+    $ echo "staging complete"
+}

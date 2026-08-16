@@ -1,0 +1,16 @@
+# Minimal Construct file
+
+# Builds the project
+build {
+    $ echo "building"
+}
+
+# Runs the test suite
+test {
+    $ echo "testing"
+}
+
+# Default command (runs when no command is given)
+_ < test {
+    $ echo "done"
+}

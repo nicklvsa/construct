@@ -1,0 +1,55 @@
+# Lists, arithmetic, ternaries, and the builtin function library.
+#
+#   construct Constfile-expressions --dry-run banner
+#   construct Constfile-expressions banner sources
+
+var platforms = [linux, windows, macos]
+var version = 3
+var release = &version >= 3 ? "stable" : "beta"
+var total = &version * 10 + len(&platforms)
+var sorted = sort([&platforms.2, &platforms.0])
+var joined = join(&platforms, " | ")
+var tag = upper(&release)
+var stamp = date("20060102")
+var count = len(&platforms)
+
+# Echoes the computed values.
+banner {
+    $ echo "release: &release tag: &tag total: &total"
+    $ echo "sorted: &sorted"
+    $ echo "joined: &joined"
+    $ echo "stamp: &stamp count: &count first: &platforms.0"
+}
+
+# Iterates a list variable; `in` checks membership.
+matrix-build {
+    for p in &platforms {
+        if "&p" in "linux, windows" {
+            $ echo "building &p"
+        } else {
+            $ echo "skipping &p"
+        }
+    }
+}
+
+# Files as data: lines() yields a list, file() reads contents, sha256() hashes.
+sources {
+    var names = lines("sources.txt")
+    var count = len(&names)
+    $ echo "found &count sources"
+    for s in &names {
+        $ echo "source: &s"
+    }
+}
+
+# String and path helpers, wired through variables.
+paths {
+    var base = basename("src/main.go")
+    var dir = dirname("src/main.go")
+    var ext = ext("src/main.go")
+    var stem = stem("src/main.go")
+    var squashed = replace("a.b.c", ".", "-")
+    var padded = trim("  hello  ")
+    $ echo "base: &base dir: &dir ext: &ext stem: &stem"
+    $ echo "squashed: &squashed padded: &padded"
+}

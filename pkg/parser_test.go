@@ -1,6 +1,8 @@
 package pkg
 
 import (
+	"fmt"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -61,9 +63,9 @@ func TestParseCommandName(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := parseCommandName(tt.input)
+			result := ParseCommandName(tt.input)
 			if result != tt.expected {
-				t.Errorf("parseCommandName(%q) = %q, want %q", tt.input, result, tt.expected)
+				t.Errorf("ParseCommandName(%q) = %q, want %q", tt.input, result, tt.expected)
 			}
 		})
 	}
@@ -511,7 +513,7 @@ func TestParseCommand(t *testing.T) {
 				Lines: lines,
 			}
 
-			_, err := parser.parseCommand(0, tt.input, tt.isDefault, 1, "")
+			_, err := parser.parseCommand(0, tt.input, tt.isDefault, false, 1, "")
 			if err != nil {
 				t.Errorf("unexpected error: %v", err)
 			}
@@ -555,7 +557,7 @@ func TestParseUnclosedBrace(t *testing.T) {
 		Lines: lines,
 	}
 
-	_, err := parser.parseCommand(0, input, false, 1, "")
+	_, err := parser.parseCommand(0, input, false, false, 1, "")
 	if err == nil {
 		t.Errorf("expected error for unclosed brace, got nil")
 	}
@@ -592,9 +594,9 @@ func TestParseMalformedSyntax(t *testing.T) {
 			expectError: true,
 		},
 		{
-			name:        "command without body",
+			name:        "bare word with no command body",
 			input:       []string{"test"},
-			expectError: false,
+			expectError: true,
 		},
 	}
 
@@ -764,7 +766,7 @@ func TestPrereqWhitespace(t *testing.T) {
 		Lines: lines,
 	}
 
-	_, err := parser.parseCommand(0, input, false, 1, "")
+	_, err := parser.parseCommand(0, input, false, false, 1, "")
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}
@@ -828,7 +830,7 @@ func TestArgumentParsing(t *testing.T) {
 		Lines: lines,
 	}
 
-	_, err := parser.parseCommand(0, input, false, 1, "")
+	_, err := parser.parseCommand(0, input, false, false, 1, "")
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}
@@ -870,7 +872,7 @@ func TestScopedVariableParsing(t *testing.T) {
 		Lines: lines,
 	}
 
-	_, err := parser.parseCommand(0, input, false, 1, "")
+	_, err := parser.parseCommand(0, input, false, false, 1, "")
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}
@@ -1059,7 +1061,7 @@ func TestParseCommandWorkDir(t *testing.T) {
 	lines := strings.Split(input, "\n")
 	parser := &Parser{Data: &ParsedData{}, Lines: lines}
 
-	if _, err := parser.parseCommand(0, input, false, 1, ""); err != nil {
+	if _, err := parser.parseCommand(0, input, false, false, 1, ""); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if len(parser.Data.Commands) != 1 {
@@ -1084,7 +1086,7 @@ func TestParseIfBlock(t *testing.T) {
 	lines := strings.Split(input, "\n")
 	parser := &Parser{Data: &ParsedData{}, Lines: lines}
 
-	if _, err := parser.parseCommand(0, "build {", false, 1, ""); err != nil {
+	if _, err := parser.parseCommand(0, "build {", false, false, 1, ""); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if len(parser.Data.Commands) != 1 {
@@ -1125,7 +1127,7 @@ func TestParseIfBlockNoElse(t *testing.T) {
 	lines := strings.Split(input, "\n")
 	parser := &Parser{Data: &ParsedData{}, Lines: lines}
 
-	if _, err := parser.parseCommand(0, "build {", false, 1, ""); err != nil {
+	if _, err := parser.parseCommand(0, "build {", false, false, 1, ""); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	cmd := parser.Data.Commands[0]
@@ -1149,7 +1151,7 @@ func TestParseForBlock(t *testing.T) {
 	lines := strings.Split(input, "\n")
 	parser := &Parser{Data: &ParsedData{}, Lines: lines}
 
-	if _, err := parser.parseCommand(0, "build {", false, 1, ""); err != nil {
+	if _, err := parser.parseCommand(0, "build {", false, false, 1, ""); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if len(parser.Data.Commands) != 1 {
@@ -1195,7 +1197,7 @@ func TestParseForBlockWithIf(t *testing.T) {
 	lines := strings.Split(input, "\n")
 	parser := &Parser{Data: &ParsedData{}, Lines: lines}
 
-	if _, err := parser.parseCommand(0, "build {", false, 1, ""); err != nil {
+	if _, err := parser.parseCommand(0, "build {", false, false, 1, ""); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	cmd := parser.Data.Commands[0]
@@ -1242,7 +1244,7 @@ func TestParseForBlockNestedFor(t *testing.T) {
 	lines := strings.Split(input, "\n")
 	parser := &Parser{Data: &ParsedData{}, Lines: lines}
 
-	if _, err := parser.parseCommand(0, "build {", false, 1, ""); err != nil {
+	if _, err := parser.parseCommand(0, "build {", false, false, 1, ""); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	cmd := parser.Data.Commands[0]
@@ -1320,5 +1322,176 @@ func TestExtractOutputName(t *testing.T) {
 				t.Errorf("name = %q, want %q", name, tt.wantName)
 			}
 		})
+	}
+}
+
+func TestParseCommandNameHeaderModifiers(t *testing.T) {
+	tests := []struct {
+		input    string
+		expected string
+	}{
+		{"|deploy| produces dist {", "deploy"},
+		{"|deploy| onchange src/** {", "deploy"},
+		{"|deploy| timeout 5s {", "deploy"},
+		{"build produces dist/app.js, dist/lib.js < src/main.go {", "build"},
+		{"build onchange src/** < src/main.go {", "build"},
+		{"build timeout 5s {", "build"},
+		{"build produces dist timeout 5s in dir {", "build"},
+		{"build < dep.txt produces dist {", "build"},
+	}
+	for _, tc := range tests {
+		if got := ParseCommandName(tc.input); got != tc.expected {
+			t.Errorf("ParseCommandName(%q) = %q, want %q", tc.input, got, tc.expected)
+		}
+	}
+}
+
+func TestExtractProducesCutAtTimeout(t *testing.T) {
+	// `produces` used to swallow a following `timeout` modifier.
+	line := "build produces dist timeout 5s {"
+	got := extractProduces(line)
+	if len(got) != 1 || got[0] != "dist" {
+		t.Errorf("extractProduces = %v, want [dist]", got)
+	}
+	if timeout := extractTimeout("build timeout 5s produces dist {"); timeout != "5s" {
+		t.Errorf("extractTimeout = %q, want 5s", timeout)
+	}
+}
+
+func TestIndentedDefaultCommand(t *testing.T) {
+	p := NewParserFromContent("Constfile", "build {\n  $ echo hi\n}\n\n  _ < build {\n    $ echo default\n  }\n")
+	data, err := p.Parse()
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	def, err := data.GetDefaultCommand()
+	if err != nil {
+		t.Fatalf("indented `_` not detected as default: %v", err)
+	}
+	if def.Name != "_" {
+		t.Errorf("default command name = %q, want _", def.Name)
+	}
+}
+
+func TestExecuteNoDefaultCommandErrors(t *testing.T) {
+	data := &ParsedData{
+		Commands: []*Command{
+			{Name: "build", Body: shellBody("echo hi")},
+		},
+	}
+	data.buildIndexMaps()
+	executor := NewExecutor(data, false, false)
+	if err := executor.Execute(nil); err == nil {
+		t.Fatal("Execute with no targets and no default should error")
+	}
+}
+
+func TestCacheKeyWithoutRegisteredFlags(t *testing.T) {
+	// An executor built without RegisterArgumentFlags used to panic in
+	// cacheKey when a command had file deps and arguments.
+	cmd := &Command{
+		Name:      "c",
+		FileDeps:  []string{"dep.txt"},
+		Arguments: []*Argument{{Name: "a"}},
+	}
+	data := &ParsedData{Commands: []*Command{cmd}}
+	data.buildIndexMaps()
+	e := NewExecutor(data, false, false)
+	e.SetBaseDir(t.TempDir())
+	if err := e.Execute([]string{"c"}); err != nil {
+		t.Fatalf("Execute failed: %v", err)
+	}
+}
+
+func TestResolveCloudFileDefaultName(t *testing.T) {
+	dir := t.TempDir()
+	e := NewExecutor(&ParsedData{}, false, false)
+	e.SetBaseDir(dir)
+	if got := e.resolveCloudFile(); got != filepath.Join(dir, "construct-cloud.json") {
+		t.Errorf("resolveCloudFile = %q, want %q", got, filepath.Join(dir, "construct-cloud.json"))
+	}
+	t.Setenv("CONSTRUCT_CLOUD_FILE", "custom.json")
+	if got := e.resolveCloudFile(); got != "custom.json" {
+		t.Errorf("resolveCloudFile with env override = %q, want custom.json", got)
+	}
+}
+
+func BenchmarkParse(b *testing.B) {
+	var sb strings.Builder
+	sb.WriteString("var os = linux\nvar arch = arm64\n\n")
+	for i := 0; i < 250; i++ {
+		fmt.Fprintf(&sb, "build%d (env, opt region) produces dist/app%d < src/main.go in cmd%d {\n", i, i, i%10)
+		sb.WriteString("    if \"&os\" == \"linux\" && \"&arch\" == \"arm64\" {\n")
+		sb.WriteString("        for f in src/*.go {\n            $ echo building &f\n        }\n    }\n")
+		sb.WriteString("    switch \"&os\" {\n        case \"linux\" { $ echo lnx }\n        default { $ echo other }\n    }\n}\n\n")
+	}
+	content := sb.String()
+	b.SetBytes(int64(len(content)))
+
+	for b.Loop() {
+		if _, err := NewParserFromContent("Constfile", content).Parse(); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func TestParseContainerHeader(t *testing.T) {
+	p := NewParserFromContent("Constfile", `build container "golang:1.26" < src/main.go {
+    $ go build ./...
+}
+mixed container "alpine" produces out.txt timeout 5s in dir {
+    $ echo hi
+}
+`)
+	data, err := p.Parse()
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	c, _ := data.GetCommand("build")
+	if c.Container != "golang:1.26" {
+		t.Errorf("build.Container = %q", c.Container)
+	}
+	if got := ParseCommandName(`mixed container "alpine" produces out.txt timeout 5s in dir {`); got != "mixed" {
+		t.Errorf("ParseCommandName with container = %q, want mixed", got)
+	}
+	m, _ := data.GetCommand("mixed")
+	if m.Container != "alpine" || len(m.Produces) != 1 || m.Timeout != "5s" || m.WorkDir != "dir" {
+		t.Errorf("mixed modifiers: container=%q produces=%v timeout=%q workdir=%q", m.Container, m.Produces, m.Timeout, m.WorkDir)
+	}
+}
+
+func TestParseManualCommand(t *testing.T) {
+	p := NewParserFromContent("Constfile", `manual build-construct {
+    $ go build -o construct .
+}
+manual deploy (env) < build-construct {
+    $ echo deploy
+}
+manual {
+    $ echo a command literally named manual
+}
+`)
+	data, err := p.Parse()
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	c, _ := data.GetCommand("build-construct")
+	if c == nil || !c.Manual {
+		t.Errorf("build-construct Manual = %v", c)
+	}
+	d, _ := data.GetCommand("deploy")
+	if d == nil || !d.Manual || len(d.Arguments) != 1 || len(d.Prereqs) != 1 {
+		t.Errorf("manual deploy modifiers: %+v", d)
+	}
+	m, _ := data.GetCommand("manual")
+	if m == nil || m.Manual {
+		t.Errorf("command literally named manual: %+v", m)
+	}
+
+	if rest, ok := StripManual("manual build {"); !ok || rest != "build {" {
+		t.Errorf("StripManual = %q %v", rest, ok)
+	}
+	if rest, ok := StripManual("manual {"); ok || rest != "manual {" {
+		t.Errorf("StripManual on a command named manual = %q %v", rest, ok)
 	}
 }

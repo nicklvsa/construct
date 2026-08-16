@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -39,12 +40,6 @@ type rpcError struct {
 	Message string `json:"message"`
 }
 
-type rpcNotification struct {
-	JSONRPC string          `json:"jsonrpc"`
-	Method  string          `json:"method"`
-	Params  json.RawMessage `json:"params,omitempty"`
-}
-
 func serve(in io.Reader, out io.Writer, srv *server) {
 	reader := bufio.NewReader(in)
 	for {
@@ -63,14 +58,25 @@ func serve(in io.Reader, out io.Writer, srv *server) {
 			continue
 		}
 
+		isNotification := len(req.ID) == 0 || string(req.ID) == "null"
 		result, err := srv.dispatch(req.Method, req.Params)
 		if err != nil {
-			writeResponse(out, req.ID, nil, &rpcError{Code: -32603, Message: err.Error()})
+			if isNotification {
+				// Notifications get no response; unknown ones (exit, $/...) are routine.
+				if !errors.Is(err, errMethodNotFound) {
+					log.Printf("%s handler error: %v", req.Method, err)
+				}
+				continue
+			}
+			code := -32603 // internal error
+			if errors.Is(err, errMethodNotFound) {
+				code = -32601 // method not found
+			}
+			writeResponse(out, req.ID, nil, &rpcError{Code: code, Message: err.Error()})
 			continue
 		}
 
-		// Notifications (no id) don't get a response.
-		if len(req.ID) == 0 || string(req.ID) == "null" {
+		if isNotification {
 			continue
 		}
 
@@ -78,7 +84,6 @@ func serve(in io.Reader, out io.Writer, srv *server) {
 	}
 }
 
-// readMessage reads a single LSP message (Content-Length framed) from r.
 func readMessage(r *bufio.Reader) ([]byte, error) {
 	var contentLength int
 	for {
@@ -111,26 +116,23 @@ func readMessage(r *bufio.Reader) ([]byte, error) {
 }
 
 func writeResponse(out io.Writer, id json.RawMessage, result interface{}, errResp *rpcError) {
-	var idVal interface{}
+	var idVal any
 	if len(id) > 0 && string(id) != "null" {
 		_ = json.Unmarshal(id, &idVal)
 	}
 
-	// JSON-RPC requires exactly one of result/error. When there's an error we
-	// must omit result entirely; when there's no error, result must always be
-	// present (even if null) so the client doesn't reject the response.
 	var body []byte
 	if errResp != nil {
 		body, _ = json.Marshal(struct {
-			JSONRPC string      `json:"jsonrpc"`
-			ID      interface{} `json:"id"`
-			Error   *rpcError   `json:"error"`
+			JSONRPC string    `json:"jsonrpc"`
+			ID      any       `json:"id"`
+			Error   *rpcError `json:"error"`
 		}{"2.0", idVal, errResp})
 	} else {
 		body, _ = json.Marshal(struct {
-			JSONRPC string      `json:"jsonrpc"`
-			ID      interface{} `json:"id"`
-			Result  interface{} `json:"result"`
+			JSONRPC string `json:"jsonrpc"`
+			ID      any    `json:"id"`
+			Result  any    `json:"result"`
 		}{"2.0", idVal, result})
 	}
 	fmt.Fprintf(out, "Content-Length: %d\r\n\r\n", len(body))
@@ -138,20 +140,11 @@ func writeResponse(out io.Writer, id json.RawMessage, result interface{}, errRes
 }
 
 func writeNotification(out io.Writer, method string, params interface{}) {
-	notif := rpcNotification{
-		JSONRPC: "2.0",
-		Method:  method,
-		Params:  nil,
-	}
-	body, _ := json.Marshal(notif)
-	if params != nil {
-		n := struct {
-			JSONRPC string      `json:"jsonrpc"`
-			Method  string      `json:"method"`
-			Params  interface{} `json:"params,omitempty"`
-		}{"2.0", method, params}
-		body, _ = json.Marshal(n)
-	}
+	body, _ := json.Marshal(struct {
+		JSONRPC string `json:"jsonrpc"`
+		Method  string `json:"method"`
+		Params  any    `json:"params,omitempty"`
+	}{"2.0", method, params})
 	fmt.Fprintf(out, "Content-Length: %d\r\n\r\n", len(body))
 	out.Write(body)
 }

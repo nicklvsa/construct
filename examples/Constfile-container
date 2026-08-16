@@ -1,0 +1,61 @@
+// Container isolation: run a command's shell statements inside a docker
+// (or podman) image. The Constfile's directory is mounted at /work and
+// statements run there with /bin/sh; the environment passes through via
+// --env-file. Builtins (cp, rm, mkdir, ...) still run on the host, so
+// artifact handling stays fast and cross-platform.
+// Requires: docker or podman on PATH; first runs pull the images.
+// Run with:
+//   construct Constfile-container env-check
+//   construct Constfile-container toolchain
+//   construct Constfile-container build
+//   construct Constfile-container matrix-build
+//   construct Constfile-container --dry-run
+
+// Smallest possible containerized command: prove the runtime and mount.
+env-check container "alpine:latest" {
+    $ cat /etc/os-release | head -1
+    $ ls /work | head -3
+}
+
+// The official Go toolchain without installing Go on the host.
+toolchain container "golang:1.26" {
+    $ go version
+    $ go env GOOS GOARCH
+}
+
+// Containerized build with ordinary file-dep caching: it reruns only when
+// the sources change. File deps and produces are evaluated on the host,
+// relative to the command's workdir, exactly like non-container commands.
+build container "golang:1.26" in src produces app < main.go {
+    $ go build -o app .
+}
+
+// Cross-compile from any host OS: a matrix over GOOS builds one binary per
+// target inside the same image.
+matrix-build container "golang:1.26" in src < main.go {
+    matrix goos in linux, darwin, windows {
+        env { EXT= }
+        if "&goos" == "windows" {
+            env { EXT=.exe }
+        }
+        $ GOOS=&goos GOARCH=amd64 go build -o app-&goos&EXT .
+    }
+}
+
+// Containers compose with timeouts: a hit kills the container CLI and
+// --rm removes the container (this one finishes well inside the cap).
+timeout-demo container "alpine:latest" timeout 5s {
+    $ sleep 1 && echo finished inside the timeout
+}
+
+// A containerized build followed by host-side packaging: builtins (mkdir,
+// cp) run on the host even though `build` ran in a container.
+package < build {
+    mkdir dist
+    cp src/app dist/app
+    $ cksum dist/app as digest
+}
+
+_ < env-check {
+    $ echo container tooling verified
+}

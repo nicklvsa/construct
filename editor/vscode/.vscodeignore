@@ -5,3 +5,6 @@ server/**/*.go
 server/go.sum
 **/*.ts
 **/*.map
+server/server
+server/server.exe
+*.vsix

@@ -4,25 +4,26 @@ build-lsp in editor/vscode/server {
 }
 
 # Builds the actual construct binary
-build-construct {
+manual build-construct { 
     $ go build -o construct .
 }
 
 # Installs the extension's npm dependencies.
 install in editor/vscode {
-    $ npm install --silent
+    retry<2, 1s> $ npm install --silent
 }
 
 # Packages and installs the host-platform extension.
 build-ext in editor/vscode < build-lsp, install {
     var vsix_version = $ cd editor/vscode && node -p "require('./package.json').version"
-    $ npx @vscode/vsce@latest package --no-yarn
+    rm server/construct-lsp.exe
+    timeout 10m $ npx @vscode/vsce@latest package --no-yarn
     $ code --install-extension constfile-&vsix_version.vsix --force as final_out
 }
 
 # Cross-compiles construct-lsp and packages the extension for every target
 # (darwin/win32/linux x x64/arm64).
-build-all < install {
+manual build-all < install {
     matrix goos in darwin, linux, windows; arch in amd64, arm64 {
         env {
             SUFFIX=
@@ -38,12 +39,18 @@ build-all < install {
             env { VSCEARCH=x64 }
         }
         $ echo "==> @VSCEOS-@VSCEARCH (GOOS=&goos GOARCH=&arch)"
-        $ rm -f editor/vscode/server/construct-lsp editor/vscode/server/construct-lsp.exe
-        $ cd editor/vscode/server && GOOS=&goos GOARCH=&arch go build -o construct-lsp@SUFFIX .
-        $ cd editor/vscode && npx @vscode/vsce@latest package --target "@VSCEOS-@VSCEARCH" --no-yarn
+        rm editor/vscode/server/construct-lsp editor/vscode/server/construct-lsp.exe
+        in editor/vscode/server {
+            env { GOOS=&goos, GOARCH=&arch }
+            timeout 5m $ go build -o construct-lsp@SUFFIX .
+        }
+        in editor/vscode {
+            timeout 10m $ npx @vscode/vsce@latest package --target "@VSCEOS-@VSCEARCH" --no-yarn
+        }
     }
 }
 
 _ < build-ext {
     echo "&build-ext.final_out"
+    echo "reminder: reload open VS Code windows (Cmd+Shift+P -> 'Reload Window') to pick up the new grammar/server — same-version installs do not hot-reload"
 }

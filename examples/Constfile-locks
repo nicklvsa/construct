@@ -1,0 +1,51 @@
+# Real-world locks: a release pipeline whose migration step must never run
+# concurrently. Two developers running `construct release` at once would
+# otherwise race on the database schema.
+#
+#   construct Constfile-locks --no-cache --yes release
+#
+# To see the lock in action, start a release and a second one shortly after
+# (the migration step holds the lock for two seconds):
+#
+#   construct Constfile-locks --no-cache --yes release &
+#   sleep 0.5 && construct Constfile-locks --no-cache --yes release
+#
+# The second process prints:
+#   (release waiting for lock "release-migrations"...)
+# and proceeds only after the first one finishes.
+#
+# `rollback` bounds its lock wait with a duration modifier: if a release is
+# stuck mid-migration, the rollback fails after 5s instead of hanging.
+
+var app = webapp
+var region = us-east-1
+
+# The release path: build, confirm, then migrate under a named lock. Both
+# `release` and `rollback` share the same lock, so a rollback can never run
+# while a release is mid-migration.
+release < build {
+    confirm "migrate the production database?"
+    lock "release-migrations" {
+        # Stands in for real migration time — the lock is held for 2s.
+        $ sleep 2
+        $ echo "applying migrations for &app in &region"
+    }
+    $ echo "rolling out &app to &region"
+    onfail {
+        $ echo "release failed — run: construct Constfile-locks rollback"
+    }
+}
+
+build {
+    $ echo "building &app"
+}
+
+# Reuses the same lock so it waits for any in-flight release before
+# reverting — but only up to 5 seconds.
+rollback {
+    lock<5s> "release-migrations" {
+        $ sleep 2
+        $ echo "reverting schema for &app"
+    }
+    $ echo "rolled back &app"
+}

@@ -8,22 +8,28 @@ let client: LanguageClient | undefined;
 export function activate(context: vscode.ExtensionContext) {
 	const serverModule = process.platform === 'win32' ? 'construct-lsp.exe' : 'construct-lsp';
 
-	// Resolve the server binary. Priority:
-	// 1. CONSTRUCT_LSP_DEV env var (explicit dev path)
-	// 2. A .construct-lsp-dev marker file in the workspace root (dev mode)
-	// 3. The installed extension's server/ directory (production)
 	let serverPath: string;
 	const devEnv = process.env.CONSTRUCT_LSP_DEV;
-	const markerPath = path.join(vscode.workspace.rootPath || '', '.construct-lsp-dev');
+	const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+	const markerPath = workspaceRoot ? path.join(workspaceRoot, '.construct-lsp-dev') : undefined;
 
 	if (devEnv) {
 		serverPath = path.join(devEnv, serverModule);
-	} else if (vscode.workspace.rootPath && fs.existsSync(markerPath)) {
-		// Marker file contains the path to the server directory.
-		const devDir = fs.readFileSync(markerPath, 'utf8').trim();
+	} else if (markerPath && fs.existsSync(markerPath)) {
+		let devDir = fs.readFileSync(markerPath, 'utf8').trim();
+		if (devDir && !path.isAbsolute(devDir)) {
+			devDir = path.join(workspaceRoot!, devDir);
+		}
 		serverPath = path.join(devDir, serverModule);
 	} else {
 		serverPath = path.join(context.extensionPath, 'server', serverModule);
+	}
+
+	if (!fs.existsSync(serverPath)) {
+		void vscode.window.showErrorMessage(
+			`Constfile language server not found at ${serverPath}. ` +
+			'The extension may be installed for a different platform — reinstall it from a matching VSIX.');
+		return;
 	}
 
 	const serverOptions: ServerOptions = {
@@ -33,11 +39,12 @@ export function activate(context: vscode.ExtensionContext) {
 
 	const clientOptions: LanguageClientOptions = {
 		documentSelector: [{ scheme: 'file', language: 'constfile' }],
-		synchronize: {},
 	};
 
 	client = new LanguageClient('constfile', 'Constfile Language Server', serverOptions, clientOptions);
-	client.start();
+	void client.start().catch((err) => {
+		void vscode.window.showErrorMessage(`Constfile language server failed to start: ${err}`);
+	});
 }
 
 export function deactivate(): Thenable<void> | undefined {

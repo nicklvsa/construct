@@ -24,6 +24,19 @@ construct Constfile-<name> <command>    # run a command
 | `Constfile-parallel-build` | Any | DAG-parallel prerequisites (`--concurrent`), call-site `in <dir>` workdir overrides |
 | `Constfile-artifacts` (+ `example.env`) | Any | `produces` (make-style up-to-date checks), `--env-file` loading, `require()`, `--jobs`, `--watch` |
 | `Constfile-modern-features` (+ `Constfile-shared-lib`, `Constfile-shared-other`) | Multi-file | Namespaced imports (`import ... as ns`), doc comments (`--list`), per-command `env { }` blocks, `invoke` with output capture |
+| `Constfile-robustness` | Any | `@ENV:-default` env defaults, `fail "message"` guards, `onfail { }` cleanup blocks, `invoke` with arguments, `-k/--keep-going`, `--no-cache`, `--shell` |
+| `Constfile-modern-flags` | Any | `require_env`, `global` writes, `retry N`, `starts_with`/`ends_with`/`matches`, `onchange` watch globs, bare `key=value` overrides, `--explain`, `--quiet`, `--list --json`, `--jobs auto`, concurrent output prefixing, SIGINT cleanup |
+| `Constfile-expressions` | Any | List values (`[...]`), arithmetic (`+ - * / %`), ternaries, `in` membership, builtin function library (`sort`, `join`, `len`, `upper`, `replace`, `basename`, `lines`, `date`, ...) |
+| `Constfile-control-flow` | Any | `switch`/`case`/`default`, `in <dir> { }` scoped workdirs, `lock`, `timeout` (command + statement), `confirm`/`prompt`/`input`, `&last.exit`/`&last.output` |
+| `Constfile-builtins` | Any | Cross-platform builtin commands `cp`/`rm`/`mkdir`/`touch`/`download`/`extract`, error-tolerant builtins, `&last.exit` reporting |
+| `Constfile-state` | Any | Persistent `state` variables, `@state("name")` reads, runtime state expressions, `--resume`, `stats` |
+| `Constfile-cloud` (+ `example-cloud.json`) | Any | Cloud commands (`\|name\|`), `invoke` cloud fallback, pure cloud commands, `cloud list/pull/push` |
+| `Constfile-locks` | Any | Real-world `lock` usage: a release/rollback pipeline serialized on a shared named lock (`lock<5s>` bounded waits), composed with `confirm` and `onfail` |
+| `Constfile-container` (+ `src/`) | Any | Container isolation (`container "image"`): containerized builds, cross-compile matrices, host/container composition, timeouts |
+| `Constfile-parallel` | Any | `parallel for` / `parallel<N>` / `parallel matrix`: concurrent iterations, per-item output prefixes, `continue if`, composition with env/workdirs/nested loops |
+| `Makefile` | Any | Import demo: run `construct import examples/Makefile` to convert it (vars, `.PHONY`, automatic vars, file targets; ifeq/`$(shell)`/pattern rule show up as flagged comments) |
+| `Constfile-shell` | Any | `construct shell`: interactive shells with a command's env block, workdir, or container; ad-hoc `--container` |
+| `Constfile-dashboard` | Any | `--tui` live dashboard over a multi-command DAG: statuses, durations, output tails, detach, cached skips, failure tails |
 
 ## Feature Coverage
 
@@ -53,3 +66,25 @@ construct Constfile-<name> <command>    # run a command
 - **`invoke` with output capture** — `Constfile-modern-features`
 - **Error tolerance (`!`)** — `Constfile-advanced-control`
 - **DAG-parallel prerequisites** — `Constfile-parallel-build`
+- **List values + list operators** — `Constfile-expressions`
+- **Arithmetic + ternaries** — `Constfile-expressions`
+- **Builtin function library** — `Constfile-expressions`
+- **`switch`/`case`/`default`** — `Constfile-control-flow`
+- **Scoped workdir blocks (`in`)** — `Constfile-control-flow`
+- **`lock` mutual exclusion** — `Constfile-control-flow`, `Constfile-locks` (real-world release/rollback)
+- **Keyword modifiers (`parallel<N>`, `lock<5s>`, `retry<2s>`, `switch<strict>`)** — `Constfile-parallel`, `Constfile-locks`, `Constfile-modern-flags`, `Constfile-control-flow`
+- **`timeout` (command + statement)** — `Constfile-control-flow`
+- **`confirm`/`prompt`/`input` + `--yes`** — `Constfile-control-flow`
+- **`&last.exit`/`&last.output`** — `Constfile-control-flow`, `Constfile-builtins`
+- **Builtin commands (`cp`/`rm`/`mkdir`/`touch`/`download`/`extract`)** — `Constfile-builtins`
+- **Persistent `state` variables** — `Constfile-state`
+- **`--resume` / `--only-failed`** — `Constfile-state`
+- **`--repeat`, `--flame`, `--github-actions`** — `Constfile-state`, any example
+- **Cloud commands (`|name|`, `invoke` fallback)** — `Constfile-cloud`
+- **Parallel loops (`parallel for`, `parallel<N>`, `parallel matrix`)** — `Constfile-parallel`
+- **`retry<2s>` backoff** — `Constfile-modern-flags`
+- **`switch<strict>`** — `Constfile-control-flow`
+- **Makefile import (`construct import`)** — `Makefile`
+- **Interactive shells (`construct shell`, `--container`)** — `Constfile-shell`
+- **Live dashboard (`--tui`)** — `Constfile-dashboard`
+- **`init`/`doctor`/`stats`/`cloud` subcommands** — any example

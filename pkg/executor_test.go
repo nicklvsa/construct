@@ -3,6 +3,7 @@ package pkg
 import (
 	"io"
 	"os"
+	"path/filepath"
 	"runtime"
 	"slices"
 	"strings"
@@ -82,7 +83,7 @@ func TestBuildCommand(t *testing.T) {
 }
 
 func defaultShellName() string {
-	name, _ := defaultShell()
+	name, _ := DefaultShell()
 	return name
 }
 
@@ -559,7 +560,7 @@ func TestParseCommandBodyBraceInString(t *testing.T) {
 	lines := strings.Split(input, "\n")
 	parser := &Parser{Data: &ParsedData{}, Lines: lines}
 
-	_, err := parser.parseCommand(0, input, false, 1, "")
+	_, err := parser.parseCommand(0, input, false, false, 1, "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -630,38 +631,51 @@ func TestResolveVarRefs(t *testing.T) {
 	}
 }
 
-func TestResolveRefsByteRuneParity(t *testing.T) {
+// TestResolveRefsBehavior pins the &ref / @ENV scanner semantics: unicode
+// identifiers, dot-segment fallback, escapes, and literal unset env refs.
+func TestResolveRefsBehavior(t *testing.T) {
 	lookup := func(name string) (string, bool) {
 		vals := map[string]string{"g": "GV", "name": "nick", "build-lsp.0": "output1", "café": "nonascii"}
 		v, ok := vals[name]
 		return v, ok
 	}
 
-	t.Setenv("CONSTRUCT_PARITY_ENV", "envval")
+	t.Setenv("CONSTRUCT_TEST_ENV", "envval")
 
-	cases := []string{
-		"echo hi",
-		"echo &g and &name",
-		"echo &build-lsp.0",
-		"x &nope y",
-		"a & b",
-		"& at start &name at end",
-		"tail &g&name",
-		"&g.5",
-		"echo @CONSTRUCT_PARITY_ENV",
-		"@ & @CONSTRUCT_PARITY_ENV x",
-		"mix &g and @CONSTRUCT_PARITY_ENV",
-		"café &café café",
-		"日本語 &name テスト",
-		"line with trailing &",
+	varRefs := []struct{ in, want string }{
+		{"echo hi", "echo hi"},
+		{"echo &g and &name", "echo GV and nick"},
+		{"echo &build-lsp.0", "echo output1"},
+		{"x &nope y", "x &nope y"}, // unknown stays literal
+		{"a & b", "a & b"},
+		{"& at start &name at end", "& at start nick at end"},
+		{"tail &g&name", "tail GVnick"},
+		{"&g.5", "GV.5"},               // full name misses, first segment resolves
+		{"echo \\&name", "echo &name"}, // escaped stays literal
+		{"café &café café", "café nonascii café"},
+		{"日本語 &name テスト", "日本語 nick テスト"},
+		{"line with trailing &", "line with trailing &"},
 	}
-	for _, tc := range cases {
-		if got, want := resolveVarRefs(tc, lookup), resolveVarRefsRunes(tc, lookup); got != want {
-			t.Errorf("resolveVarRefs(%q): byte=%q rune=%q", tc, got, want)
+	for _, tc := range varRefs {
+		if got := resolveVarRefs(tc.in, lookup); got != tc.want {
+			t.Errorf("resolveVarRefs(%q) = %q, want %q", tc.in, got, tc.want)
 		}
-		if got, want := resolveEnvRefs(tc), resolveEnvRefsRunes(tc); got != want {
-			t.Errorf("resolveEnvRefs(%q): byte=%q rune=%q", tc, got, want)
+	}
+
+	envCases := []struct{ in, want string }{
+		{"echo @CONSTRUCT_TEST_ENV", "echo envval"},
+		{"echo @NOPE", "echo "}, // unset => empty
+		{"@ & @CONSTRUCT_TEST_ENV x", "@ & envval x"},
+		{"echo \\@CONSTRUCT_TEST_ENV", "echo @CONSTRUCT_TEST_ENV"}, // escaped stays literal
+	}
+	for _, tc := range envCases {
+		if got := ResolveEnvRefs(tc.in); got != tc.want {
+			t.Errorf("ResolveEnvRefs(%q) = %q, want %q", tc.in, got, tc.want)
 		}
+	}
+
+	if got := resolveEnvRefsKeepUnset("echo @NOPE and @CONSTRUCT_TEST_ENV"); got != "echo @NOPE and envval" {
+		t.Errorf("resolveEnvRefsKeepUnset = %q", got)
 	}
 }
 
@@ -776,8 +790,10 @@ func TestEvaluateCommandLazyVariable(t *testing.T) {
 	data.buildIndexMaps()
 
 	executor := NewExecutor(data, false, false)
-	if err := executor.Execute(nil); err != nil {
-		t.Fatalf("Execute failed: %v", err)
+	// Global lazy variables evaluate even when no target is requested, but
+	// Execute still reports that there was nothing to run.
+	if err := executor.Execute(nil); err == nil {
+		t.Fatal("Execute(nil) with no default command should fail")
 	}
 
 	v, err := data.GetVariable("dyn", "global")
@@ -919,8 +935,17 @@ func TestEvaluateCommandUnsetArgEmpty(t *testing.T) {
 	}
 }
 
-func TestTryApplyCloudBody(t *testing.T) {
-	t.Setenv("CONSTRUCT_CLOUD_FILE", "testdata/cloud_test.json")
+func TestBodyFor(t *testing.T) {
+	dir := t.TempDir()
+	cloudFile := filepath.Join(dir, "cloud.json")
+	defs := map[string]Command{
+		"fetch": {Name: "fetch", Body: []BodyStatement{{Type: StmtShell, Shell: "echo remote"}}},
+	}
+	cloudData, _ := jsonMarshal(defs)
+	if err := os.WriteFile(cloudFile, cloudData, 0644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CONSTRUCT_CLOUD_FILE", cloudFile)
 
 	data := &ParsedData{
 		Commands: []*Command{
@@ -934,11 +959,30 @@ func TestTryApplyCloudBody(t *testing.T) {
 	t.Run("non-cloud command unchanged", func(t *testing.T) {
 		cmd := &Command{Name: "local", Body: shellBody("echo local")}
 		before := append([]BodyStatement(nil), cmd.Body...)
-		if err := executor.tryApplyCloudBody(cmd); err != nil {
-			t.Fatalf("unexpected error: %v", err)
+		body := executor.bodyFor(cmd)
+		if len(body) != len(before) {
+			t.Errorf("body changed: %#v vs %#v", body, before)
 		}
 		if len(cmd.Body) != len(before) {
-			t.Errorf("body changed: %#v vs %#v", cmd.Body, before)
+			t.Errorf("cmd.Body mutated: %#v vs %#v", cmd.Body, before)
+		}
+	})
+
+	t.Run("cloud body combined without mutating cmd", func(t *testing.T) {
+		cmd := &Command{Name: "fetch", CloudAccessible: true, Body: shellBody("echo local")}
+		body := executor.bodyFor(cmd)
+		if len(cmd.Body) != 1 {
+			t.Errorf("cmd.Body mutated: %d stmts, want 1", len(cmd.Body))
+		}
+		if len(body) != 2 {
+			t.Errorf("combined body = %d stmts, want 2", len(body))
+		}
+	})
+
+	t.Run("cloud command with no definition unchanged", func(t *testing.T) {
+		cmd := &Command{Name: "missing", CloudAccessible: true, Body: shellBody("echo local")}
+		if body := executor.bodyFor(cmd); len(body) != 1 {
+			t.Errorf("body = %d stmts, want 1", len(body))
 		}
 	})
 }
@@ -1077,4 +1121,245 @@ func TestNamedOutput(t *testing.T) {
 	if gen.NamedOutput == nil || gen.NamedOutput["greeting"] != "hello" {
 		t.Errorf("named output = %#v, want greeting=\"hello\"", gen.NamedOutput)
 	}
+}
+
+func TestConcurrentSharedPrereq(t *testing.T) {
+	// Two parents sharing one prereq exercise the concurrent paths around
+	// IsPrereq/WorkDir mutation and prereq output collection; run with
+	// -race to catch data races.
+	data := &ParsedData{
+		Commands: []*Command{
+			{Name: "a", Prereqs: []string{"shared"}, Body: nil},
+			{Name: "b", Prereqs: []string{"shared"}, Body: nil},
+			{Name: "shared", Body: shellBody("echo shared")},
+		},
+	}
+	data.buildIndexMaps()
+	e := NewExecutor(data, true, false)
+	if err := e.Execute([]string{"a", "b"}); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+}
+
+func TestPrereqModeNotStickyAcrossRuns(t *testing.T) {
+	shared := &Command{Name: "shared", Body: shellBody("echo shared")}
+	data := &ParsedData{
+		Commands: []*Command{
+			{Name: "parent", Prereqs: []string{"shared"}},
+			shared,
+		},
+	}
+	data.buildIndexMaps()
+	e := NewExecutor(data, false, false)
+
+	if err := e.Execute([]string{"parent"}); err != nil {
+		t.Fatalf("first execute: %v", err)
+	}
+	if len(shared.PrereqOutput) != 1 {
+		t.Fatalf("prereq output after prereq run = %v, want 1 entry", shared.PrereqOutput)
+	}
+
+	// Running `shared` as a top-level target in a fresh run must stream its
+	// output, not capture it again (IsPrereq used to be sticky).
+	out := captureStdout(t, func() {
+		if err := e.Execute([]string{"shared"}); err != nil {
+			t.Fatalf("second execute: %v", err)
+		}
+	})
+	if !strings.Contains(out, "shared") {
+		t.Errorf("top-level rerun streamed %q, want the shared output", out)
+	}
+	if shared.IsPrereq {
+		t.Error("shared.IsPrereq was mutated by the executor")
+	}
+}
+
+func captureStdout(t *testing.T, fn func()) string {
+	t.Helper()
+	old := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdout = w
+	defer func() { os.Stdout = old }()
+	fn()
+	w.Close()
+	out, _ := io.ReadAll(r)
+	return string(out)
+}
+
+func TestPrereqWorkDirNotMutated(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "sub"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	shared := &Command{Name: "shared", Body: shellBody("echo shared")}
+	data := &ParsedData{
+		Commands: []*Command{
+			{Name: "parent", Prereqs: []string{"shared"}, PrereqDirs: map[string]string{"shared": "sub"}},
+			shared,
+		},
+	}
+	data.buildIndexMaps()
+	e := NewExecutor(data, false, false)
+	e.SetBaseDir(dir)
+	if err := e.Execute([]string{"parent"}); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if shared.WorkDir != "" {
+		t.Errorf("shared.WorkDir mutated to %q; per-parent dirs must not touch the shared command", shared.WorkDir)
+	}
+}
+
+func TestCacheKeyIncludesSourceFile(t *testing.T) {
+	e := NewExecutor(&ParsedData{}, false, false)
+	a := &Command{Name: "build", SourceFile: "/x/Constfile"}
+	b := &Command{Name: "build", SourceFile: "/x/Constfile-build"}
+	if e.cacheKey(a) == e.cacheKey(b) {
+		t.Error("same-named commands in different Constfiles collide in the cache key")
+	}
+}
+
+func TestCacheKeyScopedToReferencedGlobals(t *testing.T) {
+	dir := t.TempDir()
+	dep := filepath.Join(dir, "dep.txt")
+	os.WriteFile(dep, []byte("v1\n"), 0644)
+
+	p := NewParserFromContent("Constfile", "var used = a\nvar unused = b\n\ncmd < dep.txt {\n  $ echo &used\n}\n")
+	data, err := p.Parse()
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	cmd, _ := data.GetCommand("cmd")
+	if !cmd.cacheGlobalsExact || len(cmd.cacheGlobals) != 1 || cmd.cacheGlobals[0] != "used" {
+		t.Fatalf("cacheGlobals = %v (exact=%v), want [used]", cmd.cacheGlobals, cmd.cacheGlobalsExact)
+	}
+
+	e := NewExecutor(data, false, false)
+	e.SetBaseDir(dir)
+	e.SetRecordRuns(true)
+	if err := e.Execute([]string{"cmd"}); err != nil {
+		t.Fatalf("first run: %v", err)
+	}
+
+	data.SetVariable("unused", "global", "changed")
+	if err := e.Execute([]string{"cmd"}); err != nil {
+		t.Fatalf("second run: %v", err)
+	}
+	if rec := e.RunRecords()["cmd"]; rec.Status != "skipped" {
+		t.Errorf("unrelated global change invalidated the cache: status %q", rec.Status)
+	}
+
+	data.SetVariable("used", "global", "changed")
+	if err := e.Execute([]string{"cmd"}); err != nil {
+		t.Fatalf("third run: %v", err)
+	}
+	if rec := e.RunRecords()["cmd"]; rec.Status == "skipped" {
+		t.Error("referenced global change did not invalidate the cache")
+	}
+}
+
+func TestCacheGlobalsClosureThroughVariables(t *testing.T) {
+	p := NewParserFromContent("Constfile", "var base = 1\nvar derived = &base\n\ncmd {\n  $ echo &derived\n}\n")
+	data, err := p.Parse()
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	cmd, _ := data.GetCommand("cmd")
+	if !cmd.cacheGlobalsExact || len(cmd.cacheGlobals) != 2 {
+		t.Errorf("cacheGlobals = %v, want base and derived via closure", cmd.cacheGlobals)
+	}
+}
+
+func TestProducesValidationWarning(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "src.txt"), []byte("x"), 0644)
+	data := &ParsedData{
+		Commands: []*Command{
+			{Name: "bad", Produces: []string{"ghost.txt"}, FileDeps: []string{"src.txt"}, Body: shellBody("echo hi")},
+		},
+	}
+	data.buildIndexMaps()
+	e := NewExecutor(data, false, false)
+	e.SetBaseDir(dir)
+
+	stderr := captureStderr(t, func() {
+		if err := e.Execute([]string{"bad"}); err != nil {
+			t.Fatalf("execute: %v", err)
+		}
+	})
+	if !strings.Contains(stderr, "declares produces") || !strings.Contains(stderr, "ghost.txt") {
+		t.Errorf("missing produces warning, stderr = %q", stderr)
+	}
+}
+
+func TestMissingFileDepWarning(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "src.txt"), []byte("x"), 0644)
+	data := &ParsedData{
+		Commands: []*Command{
+			{Name: "bogus", FileDeps: []string{"missing.txt"}, Body: shellBody("echo ran")},
+		},
+	}
+	data.buildIndexMaps()
+	e := NewExecutor(data, false, false)
+	e.SetBaseDir(dir)
+	e.SetNoCache(true)
+
+	stderr := captureStderr(t, func() {
+		if err := e.Execute([]string{"bogus"}); err != nil {
+			t.Fatalf("execute: %v", err)
+		}
+	})
+	if !strings.Contains(stderr, "file dependency") || !strings.Contains(stderr, "missing.txt") {
+		t.Errorf("missing dep warning absent, stderr = %q", stderr)
+	}
+}
+
+func TestContainerArgs(t *testing.T) {
+	dir, _ := filepath.Abs(t.TempDir())
+	data := &ParsedData{}
+	data.buildIndexMaps()
+	e := NewExecutor(data, false, false)
+	e.SetBaseDir(dir)
+	env := []string{"HOME=/tmp", "PATH=/usr/bin"}
+
+	// Plain shell mode.
+	shCtx := &execContext{target: &Command{Name: "x"}, env: &env}
+	argv, display := e.shellArgsFor(shCtx, "echo hi")
+	if argv[0] != e.shellName || display == "" {
+		t.Errorf("plain argv = %v display = %q", argv, display)
+	}
+	if argv[len(argv)-1] != "echo hi" {
+		t.Errorf("script not last arg: %v", argv)
+	}
+
+	// Container mode via a stubbed runtime path.
+	e.containerRT = "docker"
+	f, _ := os.CreateTemp(t.TempDir(), "env")
+	f.Close()
+	cCtx := &execContext{target: &Command{Name: "x"}, env: &env, container: "docker alpine:latest", envFile: f.Name(), workDir: "sub"}
+	argv, display = e.shellArgsFor(cCtx, "echo hi")
+	joined := strings.Join(argv, " ")
+	for _, want := range []string{"docker run --rm", "--env-file", "-v " + dir + ":/work", "-w /work/sub", "alpine:latest", "/bin/sh -c", "echo hi"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("container argv missing %q: %s", want, joined)
+		}
+	}
+	if !strings.HasPrefix(display, "docker run alpine:latest") {
+		t.Errorf("display = %q", display)
+	}
+}
+
+func captureStderr(t *testing.T, fn func()) string {
+	t.Helper()
+	old := os.Stderr
+	r, w, _ := os.Pipe()
+	os.Stderr = w
+	fn()
+	w.Close()
+	os.Stderr = old
+	out, _ := io.ReadAll(r)
+	return string(out)
 }

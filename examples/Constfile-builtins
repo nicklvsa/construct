@@ -1,0 +1,34 @@
+# Cross-platform builtin commands: cp, rm, mkdir, touch, download, extract.
+# Bare names run as builtins; prefix with `$` to use the shell version.
+#
+#   construct Constfile-builtins --dry-run package
+#   construct Constfile-builtins fetch
+#   construct Constfile-builtins cleanup
+
+var bundle = dist/app
+
+# Builtins run without a shell, so they behave identically on every OS.
+package {
+    rm -rf dist
+    mkdir dist
+    touch src/app.py
+    cp src/app.py dist/app.py
+    cp src dist/backup
+    touch dist/version.txt
+    $ echo "built: &bundle"
+}
+
+# download fetches a URL (with a progress bar on TTYs); extract unpacks.
+fetch {
+    download "https://example.com/data.zip" dist/data.zip
+    extract dist/data.zip dist/data
+    rm -rf dist/tmp
+}
+
+# Error-tolerant builtins report their outcome through &last.exit.
+cleanup {
+    ! cp nope.txt dist/nope.txt
+    if "&last.exit" != "0" {
+        $ echo "nothing to copy, continuing"
+    }
+}

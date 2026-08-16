@@ -1,0 +1,27 @@
+# Cloud commands: |name| marks a command whose body may come from the cloud
+# definitions file. The file is chosen from $CONSTRUCT_CLOUD_FILE, then
+# construct-cloud.json next to the Constfile.
+#
+#   CONSTRUCT_CLOUD_FILE=example-cloud.json construct Constfile-cloud --list
+#   CONSTRUCT_CLOUD_FILE=example-cloud.json construct Constfile-cloud use
+#   CONSTRUCT_CLOUD_FILE=example-cloud.json construct Constfile-cloud gen
+#   construct Constfile-cloud cloud list
+#   CONSTRUCT_CLOUD_FILE=example-cloud.json construct Constfile-cloud cloud pull
+#   construct Constfile-cloud cloud push --file example-cloud.json
+
+# An empty cloud command (`|gen| { }`) runs entirely from the cloud
+# definitions file.
+|gen| { }
+
+# A cloud command with a local body runs the local body first, then the
+# remote body.
+|healthcheck| {
+    $ echo "local healthcheck"
+}
+
+# invoke falls back to the cloud when the command isn't defined locally.
+use {
+    invoke gen
+}
+
+# `construct gen` also runs for pure cloud commands (no local definition).

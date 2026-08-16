@@ -18,7 +18,7 @@ main < gen in subdir, gen in other {
     echo done
 }`
 	data := parseForTest(t, text)
-	diags := duplicatePrereqWarnings(text, data)
+	diags := lintIssuesWith(t, strings.Split(text, "\n"), data, "duplicate prerequisite")
 	if len(diags) != 1 {
 		t.Fatalf("expected 1 duplicate warning, got %d: %v", len(diags), diags)
 	}
@@ -38,7 +38,7 @@ main < gen in subdir {
     echo done
 }`
 	data := parseForTest(t, text)
-	diags := duplicatePrereqWarnings(text, data)
+	diags := lintIssuesWith(t, strings.Split(text, "\n"), data, "duplicate prerequisite")
 	if len(diags) != 0 {
 		t.Fatalf("expected no duplicate warnings, got %v", diags)
 	}
@@ -99,7 +99,7 @@ func TestDefinitionAcrossImport(t *testing.T) {
 
 	uri := pathToURI(mainPath)
 	s := newServer()
-	s.updateDoc(uri, mainText, 1)
+	s.updateDoc(uri, mainText)
 
 	lines := strings.Split(mainText, "\n")
 	params, _ := json.Marshal(map[string]interface{}{
@@ -128,7 +128,7 @@ func TestDefinitionLocalCommandStillResolves(t *testing.T) {
 	text := "gen {\n    echo hi\n}\nmain < gen {\n    echo done\n}\n"
 	uri := "file:///x/main.constfile"
 	s := newServer()
-	s.updateDoc(uri, text, 1)
+	s.updateDoc(uri, text)
 
 	lines := strings.Split(text, "\n")
 	params, _ := json.Marshal(map[string]interface{}{
@@ -163,7 +163,7 @@ func TestDefinitionNamespacedPrereq(t *testing.T) {
 
 	uri := pathToURI(mainPath)
 	s := newServer()
-	s.updateDoc(uri, mainText, 1)
+	s.updateDoc(uri, mainText)
 
 	lines := strings.Split(mainText, "\n")
 	params, _ := json.Marshal(map[string]interface{}{
@@ -199,7 +199,7 @@ func TestDefinitionFileDepStillOpens(t *testing.T) {
 
 	uri := pathToURI(mainPath)
 	s := newServer()
-	s.updateDoc(uri, mainText, 1)
+	s.updateDoc(uri, mainText)
 
 	lines := strings.Split(mainText, "\n")
 	params, _ := json.Marshal(map[string]interface{}{
@@ -235,7 +235,7 @@ _ < log, ls {
 `
 	uri := "file:///x/main.constfile"
 	s := newServer()
-	s.updateDoc(uri, text, 1)
+	s.updateDoc(uri, text)
 
 	lines := strings.Split(text, "\n")
 	for i := 7; i <= 8; i++ {
@@ -273,7 +273,7 @@ use < lib.gen {
 	mainPath := filepath.Join(dir, "main.constfile")
 	uri := pathToURI(mainPath)
 	s := newServer()
-	s.updateDoc(uri, text, 1)
+	s.updateDoc(uri, text)
 
 	lines := strings.Split(text, "\n")
 	params, _ := json.Marshal(map[string]interface{}{
@@ -305,7 +305,7 @@ func TestDefinitionInvokeTarget(t *testing.T) {
 
 	uri := pathToURI(mainPath)
 	s := newServer()
-	s.updateDoc(uri, mainText, 1)
+	s.updateDoc(uri, mainText)
 
 	lines := strings.Split(mainText, "\n")
 	params, _ := json.Marshal(map[string]interface{}{
@@ -333,7 +333,7 @@ func TestDefinitionInvokeLocal(t *testing.T) {
 	text := "gen {\n    echo hi\n}\nuse {\n    invoke gen\n}\n"
 	uri := "file:///x/main.constfile"
 	s := newServer()
-	s.updateDoc(uri, text, 1)
+	s.updateDoc(uri, text)
 
 	lines := strings.Split(text, "\n")
 	params, _ := json.Marshal(map[string]interface{}{
@@ -361,7 +361,7 @@ func TestHoverInvokeTarget(t *testing.T) {
 	text := "gen {\n    echo hi\n}\nuse {\n    invoke gen\n}\n"
 	uri := "file:///x/main.constfile"
 	s := newServer()
-	s.updateDoc(uri, text, 1)
+	s.updateDoc(uri, text)
 
 	lines := strings.Split(text, "\n")
 	params, _ := json.Marshal(map[string]interface{}{
@@ -386,7 +386,7 @@ func TestCompletionInvokeTarget(t *testing.T) {
 	text := "gen {\n    echo hi\n}\nuse {\n    invoke \n}\n"
 	uri := "file:///x/main.constfile"
 	s := newServer()
-	s.updateDoc(uri, text, 1)
+	s.updateDoc(uri, text)
 
 	lines := strings.Split(text, "\n")
 	params, _ := json.Marshal(map[string]interface{}{
@@ -428,7 +428,7 @@ use {
 `
 	uri := "file:///x/main.constfile"
 	s := newServer()
-	s.updateDoc(uri, text, 1)
+	s.updateDoc(uri, text)
 
 	lines := strings.Split(text, "\n")
 	params, _ := json.Marshal(map[string]interface{}{
@@ -462,7 +462,7 @@ func TestHoverLoopVarUnknown(t *testing.T) {
 `
 	uri := "file:///x/main.constfile"
 	s := newServer()
-	s.updateDoc(uri, text, 1)
+	s.updateDoc(uri, text)
 
 	lines := strings.Split(text, "\n")
 	params, _ := json.Marshal(map[string]interface{}{
@@ -493,7 +493,7 @@ use {
 `
 	uri := "file:///x/main.constfile"
 	s := newServer()
-	s.updateDoc(uri, text, 1)
+	s.updateDoc(uri, text)
 
 	lines := strings.Split(text, "\n")
 	params, _ := json.Marshal(map[string]interface{}{
@@ -530,7 +530,7 @@ use {
 `
 	uri := "file:///x/main.constfile"
 	s := newServer()
-	s.updateDoc(uri, text, 1)
+	s.updateDoc(uri, text)
 
 	lines := strings.Split(text, "\n")
 	params, _ := json.Marshal(map[string]interface{}{
@@ -568,7 +568,7 @@ use {
 `
 	uri := "file:///x/main.constfile"
 	s := newServer()
-	s.updateDoc(uri, text, 1)
+	s.updateDoc(uri, text)
 
 	lines := strings.Split(text, "\n")
 	params, _ := json.Marshal(map[string]interface{}{
@@ -607,7 +607,7 @@ use {
 `
 	uri := "file:///x/main.constfile"
 	s := newServer()
-	s.updateDoc(uri, text, 1)
+	s.updateDoc(uri, text)
 
 	lines := strings.Split(text, "\n")
 	params, _ := json.Marshal(map[string]interface{}{
@@ -644,7 +644,7 @@ _ < log, ls {
 `
 	uri := "file:///x/main.constfile"
 	s := newServer()
-	s.updateDoc(uri, text, 1)
+	s.updateDoc(uri, text)
 
 	lines := strings.Split(text, "\n")
 	params, _ := json.Marshal(map[string]interface{}{
@@ -676,7 +676,7 @@ _ < log {
 `
 	uri := "file:///x/main.constfile"
 	s := newServer()
-	s.updateDoc(uri, text, 1)
+	s.updateDoc(uri, text)
 
 	lines := strings.Split(text, "\n")
 	params, _ := json.Marshal(map[string]interface{}{
@@ -692,8 +692,72 @@ _ < log {
 	}
 }
 
-// TestDefinitionNamedOutput verifies go-to-definition on &cmd.out jumps to
-// the producing shell statement.
+func TestNamedOutputHintsForLoop(t *testing.T) {
+	text := `gen {
+    $ echo one
+    for i in 1, 2 {
+        $ echo hi as out
+    }
+}
+_ < gen {
+    echo "&gen.out"
+}
+`
+	data := parseForTest(t, text)
+	gen, err := data.GetCommand("gen")
+	if err != nil {
+		t.Fatalf("gen missing: %v", err)
+	}
+	if len(pkg.ShellStatements(gen.Body)) != 2 {
+		t.Errorf("shell statements = %d, want 2", len(pkg.ShellStatements(gen.Body)))
+	}
+	if !pkg.HasNamedOutput(gen.Body, "out") {
+		t.Error("HasNamedOutput should find `out` inside the for loop")
+	}
+	if hint := namedOutputAt(data, "gen", 1); hint != "gen.out" {
+		t.Errorf("namedOutputAt(gen, 1) = %q, want gen.out", hint)
+	}
+
+	diags := lintIssues(t, strings.Split(text, "\n"), data)
+	for _, d := range diags {
+		if d.Severity == sevError {
+			t.Errorf("unexpected error diagnostic: %q", d.Message)
+		}
+	}
+}
+
+func TestNamedOutputHintsInvokeCapture(t *testing.T) {
+	text := `log {
+    $ echo hi
+}
+ls {
+    $ ls -l as out
+    invoke log as result
+}
+_ < log, ls {
+    echo "&ls.result"
+}
+`
+	data := parseForTest(t, text)
+	diags := lintIssues(t, strings.Split(text, "\n"), data)
+	found := false
+	for _, d := range diags {
+		if strings.Contains(d.Message, "result") {
+			found = true
+			if d.Severity != sevWarning {
+				t.Errorf("invoke capture should warn (local), got severity %d: %q", d.Severity, d.Message)
+			}
+			if !strings.Contains(d.Message, "only inside") {
+				t.Errorf("warning should mention locality: %q", d.Message)
+			}
+		}
+	}
+	if !found {
+		t.Errorf("expected a warning for &ls.result, got %v", diags)
+	}
+}
+
+// TestDefinitionNamedOutput verifies go-to-definition on &cmd.out jumps to// the producing shell statement.
 func TestDefinitionNamedOutput(t *testing.T) {
 	text := `log {
     $ echo hi as out
@@ -705,7 +769,7 @@ _ < log {
 `
 	uri := "file:///x/main.constfile"
 	s := newServer()
-	s.updateDoc(uri, text, 1)
+	s.updateDoc(uri, text)
 
 	lines := strings.Split(text, "\n")
 	params, _ := json.Marshal(map[string]interface{}{
@@ -736,4 +800,246 @@ func parseForTest(t *testing.T, text string) *pkg.ParsedData {
 		t.Fatalf("parse: %v", err)
 	}
 	return data
+}
+
+func TestDocumentSymbol(t *testing.T) {
+	text := `build {
+    $ echo hi
+}
+_ < build {
+    echo done
+}
+`
+	uri := "file:///x/main.constfile"
+	s := newServer()
+	s.updateDoc(uri, text)
+
+	params, _ := json.Marshal(map[string]interface{}{
+		"textDocument": map[string]string{"uri": uri},
+	})
+	res, err := s.handleDocumentSymbol(params)
+	if err != nil {
+		t.Fatalf("documentSymbol: %v", err)
+	}
+	syms, ok := res.([]documentSymbol)
+	if !ok {
+		t.Fatalf("expected []documentSymbol, got %T", res)
+	}
+	if len(syms) != 2 {
+		t.Fatalf("symbols = %+v, want 2", syms)
+	}
+	names := map[string]documentSymbol{}
+	for _, sym := range syms {
+		names[sym.Name] = sym
+	}
+	build, ok := names["build"]
+	if !ok {
+		t.Fatalf("missing build symbol: %v", names)
+	}
+	if build.SelectionRange.Start.Line != 0 {
+		t.Errorf("build selection line = %d", build.SelectionRange.Start.Line)
+	}
+	if build.Range.End.Line != 2 {
+		t.Errorf("build range end = %d, want 2 (closing brace)", build.Range.End.Line)
+	}
+	if _, ok := names["_"]; !ok {
+		t.Errorf("default command symbol missing: %v", names)
+	}
+}
+func TestEnvRefDefaultInWorkdir(t *testing.T) {
+	os.Unsetenv("CONSTRUCT_LSP_DEF_DIR")
+	defer os.Unsetenv("CONSTRUCT_LSP_DEF_DIR")
+	if got := pkg.ResolveEnvRefs("sub/@CONSTRUCT_LSP_DEF_DIR:-src"); got != "sub/src" {
+		t.Errorf("ResolveEnvRefs default = %q", got)
+	}
+	os.Setenv("CONSTRUCT_LSP_DEF_DIR", "real")
+	if got := pkg.ResolveEnvRefs("sub/@CONSTRUCT_LSP_DEF_DIR:-src"); got != "sub/real" {
+		t.Errorf("ResolveEnvRefs set = %q", got)
+	}
+}
+
+// TestDocumentSymbolImportedCommands verifies imported commands don't emit
+// symbols: their SourceLine belongs to the imported file, and a bogus
+// selection range would violate VS Code's containment validation.
+func TestDocumentSymbolImportedCommands(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "lib.constfile"), []byte("gen {\n    echo hi\n}\n"), 0644)
+	text := `import "lib.constfile" as lib
+main < lib.gen {
+    echo done
+}
+`
+	mainPath := filepath.Join(dir, "main.constfile")
+	uri := pathToURI(mainPath)
+	s := newServer()
+	s.updateDoc(uri, text)
+
+	params, _ := json.Marshal(map[string]interface{}{
+		"textDocument": map[string]string{"uri": uri},
+	})
+	res, err := s.handleDocumentSymbol(params)
+	if err != nil {
+		t.Fatalf("documentSymbol: %v", err)
+	}
+	syms, ok := res.([]documentSymbol)
+	if !ok {
+		t.Fatalf("expected []documentSymbol, got %T", res)
+	}
+	for _, sym := range syms {
+		if strings.Contains(sym.Name, "gen") && !strings.Contains(sym.Name, "main") {
+			t.Errorf("imported command leaked into symbols: %+v", sym)
+		}
+		for _, r := range []range_{sym.Range, sym.SelectionRange} {
+			if r.Start.Line > r.End.Line ||
+				(r.Start.Line == r.End.Line && r.Start.Character > r.End.Character) {
+				t.Errorf("inverted range for %s: %+v", sym.Name, r)
+			}
+		}
+	}
+}
+
+// TestHoverFailContext verifies &fail.* refs inside an onfail block get a
+// context hint, and stay quiet outside one.
+func TestHoverFailContext(t *testing.T) {
+	text := `deploy {
+    onfail {
+        $ echo "&fail.message at &fail.line"
+    }
+    $ echo "&fail.message"
+}
+`
+	uri := "file:///x/main.constfile"
+	s := newServer()
+	s.updateDoc(uri, text)
+	lines := strings.Split(text, "\n")
+
+	hover := func(line int, sub string) string {
+		params, _ := json.Marshal(map[string]interface{}{
+			"textDocument": map[string]string{"uri": uri},
+			"position":     map[string]int{"line": line, "character": strings.Index(lines[line], sub) + 2},
+		})
+		res, err := s.handleHover(params)
+		if err != nil {
+			t.Fatalf("hover %s: %v", sub, err)
+		}
+		if res == nil {
+			return ""
+		}
+		return res.(hoverResult).Contents.Value
+	}
+
+	if msg := hover(2, "fail.message"); !strings.Contains(msg, "triggered this") {
+		t.Errorf("inside onfail hover = %q", msg)
+	}
+	if msg := hover(2, "fail.line"); !strings.Contains(msg, "source line") {
+		t.Errorf("fail.line hover = %q", msg)
+	}
+	if msg := hover(4, "fail.message"); msg != "" {
+		t.Errorf("outside onfail should hover nothing, got %q", msg)
+	}
+}
+
+// TestHoverOnFailKeyword verifies the onfail header shows the available
+// failure context.
+func TestHoverOnFailKeyword(t *testing.T) {
+	text := "deploy {\n    onfail {\n        $ echo x\n    }\n}\n"
+	uri := "file:///x/main.constfile"
+	s := newServer()
+	s.updateDoc(uri, text)
+
+	params, _ := json.Marshal(map[string]interface{}{
+		"textDocument": map[string]string{"uri": uri},
+		"position":     map[string]int{"line": 1, "character": 3},
+	})
+	res, err := s.handleHover(params)
+	if err != nil {
+		t.Fatalf("hover: %v", err)
+	}
+	hr, ok := res.(hoverResult)
+	if !ok {
+		t.Fatalf("expected hoverResult, got %T", res)
+	}
+	if !strings.Contains(hr.Contents.Value, "&fail.message") {
+		t.Errorf("onfail hover should list context vars: %q", hr.Contents.Value)
+	}
+}
+
+// TestCompletionFailContext verifies &fail. completes inside onfail blocks
+// only.
+func TestCompletionFailContext(t *testing.T) {
+	text := `deploy {
+    onfail {
+        $ echo "&fail."
+    }
+    $ echo "&fail."
+}
+`
+	uri := "file:///x/main.constfile"
+	s := newServer()
+	s.updateDoc(uri, text)
+	lines := strings.Split(text, "\n")
+
+	complete := func(line int) []string {
+		params, _ := json.Marshal(map[string]interface{}{
+			"textDocument": map[string]string{"uri": uri},
+			"position":     map[string]int{"line": line, "character": len(lines[line]) - 1},
+		})
+		res, err := s.handleCompletion(params)
+		if err != nil {
+			t.Fatalf("completion: %v", err)
+		}
+		cl := res.(completionList)
+		var labels []string
+		for _, it := range cl.Items {
+			labels = append(labels, it.Label)
+		}
+		return labels
+	}
+
+	inside := complete(2)
+	found := false
+	for _, l := range inside {
+		if l == "fail.message" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("inside onfail should suggest fail.message: %v", inside)
+	}
+	for _, l := range complete(4) {
+		if l == "fail.message" {
+			t.Errorf("outside onfail should not suggest fail.*: %v", l)
+		}
+	}
+}
+
+// lintIssues runs the shared lint rules and converts them to diagnostics.
+func lintIssues(t *testing.T, lines []string, data *pkg.ParsedData) []diagnostic {
+	t.Helper()
+	return lintDiagnostics(pkg.Lint(lines, data, t.TempDir()), lines)
+}
+
+// lintIssuesWith filters lint output to messages containing substr.
+func lintIssuesWith(t *testing.T, lines []string, data *pkg.ParsedData, substr string) []diagnostic {
+	t.Helper()
+	var out []diagnostic
+	for _, d := range lintIssues(t, lines, data) {
+		if strings.Contains(d.Message, substr) {
+			out = append(out, d)
+		}
+	}
+	return out
+}
+
+func namedOutputAt(data *pkg.ParsedData, cmdName string, idx int) string {
+	cmd, err := data.GetCommand(cmdName)
+	if err != nil {
+		return ""
+	}
+	for shellIdx, stmt := range pkg.ShellStatements(cmd.Body) {
+		if stmt.OutputName != "" && shellIdx == idx {
+			return cmdName + "." + stmt.OutputName
+		}
+	}
+	return ""
 }
