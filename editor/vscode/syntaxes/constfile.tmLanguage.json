@@ -72,26 +72,30 @@
 				},
 				{
 					"comment": "Builtin with modifier: rm<kill> path (optionally after timeout/retry and/or !)",
-					"match": "^\\s*(?:(?:retry|timeout)<[^>]+>\\s+)*(?:(?:!)\\s*)?(cp|rm|mkdir|touch|download|extract)(<)([^>\\s]+)(>)(?=\\s|$)",
+					"match": "^\\s*(?:(retry|timeout)(<)([^>]+)(>)\\s+)*(?:(!)\\s*)?(cp|rm|mkdir|touch|download|extract)(<)([^>\\s]+)(>)(?=\\s|$)",
 					"captures": {
-						"1": {
-							"name": "support.function.builtin.constfile"
-						},
-						"2": {
-							"name": "punctuation.definition.modifier.constfile"
-						},
-						"3": {
-							"name": "constant.other.modifier.constfile"
-						},
-						"4": {
-							"name": "punctuation.definition.modifier.constfile"
-						}
+						"1": { "name": "keyword.control.constfile" },
+						"2": { "name": "punctuation.definition.modifier.constfile" },
+						"3": { "name": "constant.other.modifier.constfile" },
+						"4": { "name": "punctuation.definition.modifier.constfile" },
+						"5": { "name": "keyword.operator.error-tolerant.constfile" },
+						"6": { "name": "support.function.builtin.constfile" },
+						"7": { "name": "punctuation.definition.modifier.constfile" },
+						"8": { "name": "constant.other.modifier.constfile" },
+						"9": { "name": "punctuation.definition.modifier.constfile" }
 					}
 				},
 				{
 					"comment": "Builtin cross-platform commands (bare names in bodies)",
-					"name": "support.function.builtin.constfile",
-					"match": "^\\s*(?:(?:retry|timeout)<[^>]+>\\s+)*(?:(?:!)\\s*)?(cp|rm|mkdir|touch|download|extract)(?=\\s|$)"
+					"match": "^\\s*(?:(retry|timeout)(<)([^>]+)(>)\\s+)*(?:(!)\\s*)?(cp|rm|mkdir|touch|download|extract)(?=\\s|$)",
+					"captures": {
+						"1": { "name": "keyword.control.constfile" },
+						"2": { "name": "punctuation.definition.modifier.constfile" },
+						"3": { "name": "constant.other.modifier.constfile" },
+						"4": { "name": "punctuation.definition.modifier.constfile" },
+						"5": { "name": "keyword.operator.error-tolerant.constfile" },
+						"6": { "name": "support.function.builtin.constfile" }
+					}
 				},
 				{
 					"comment": "Expression function calls (var values, conditions)",
@@ -183,12 +187,25 @@
 			]
 		},
 		"shell-prefix": {
-			"name": "keyword.operator.shell.constfile",
-			"match": "^\\s*(?:(?:retry|timeout)<[^>]+>\\s+)*(\\$)\\s"
+			"comment": "Optional timeout/retry modifiers keep their own scopes via captures.",
+			"match": "^\\s*(?:(retry|timeout)(<)([^>]+)(>)\\s+)*(\\$)\\s",
+			"captures": {
+				"1": { "name": "keyword.control.constfile" },
+				"2": { "name": "punctuation.definition.modifier.constfile" },
+				"3": { "name": "constant.other.modifier.constfile" },
+				"4": { "name": "punctuation.definition.modifier.constfile" },
+				"5": { "name": "keyword.operator.shell.constfile" }
+			}
 		},
 		"error-tolerant-prefix": {
-			"name": "keyword.operator.error-tolerant.constfile",
-			"match": "^\\s*(?:(?:retry|timeout)<[^>]+>\\s+)*(?:\\$\\s*)?(!)(?=\\s)"
+			"match": "^\\s*(?:(retry|timeout)(<)([^>]+)(>)\\s+)*(?:\\$\\s*)?(!)(?=\\s)",
+			"captures": {
+				"1": { "name": "keyword.control.constfile" },
+				"2": { "name": "punctuation.definition.modifier.constfile" },
+				"3": { "name": "constant.other.modifier.constfile" },
+				"4": { "name": "punctuation.definition.modifier.constfile" },
+				"5": { "name": "keyword.operator.error-tolerant.constfile" }
+			}
 		},
 		"operators": {
 			"patterns": [
