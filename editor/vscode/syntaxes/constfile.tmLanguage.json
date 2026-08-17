@@ -71,8 +71,8 @@
 					"match": "\\b(manual|opt|parallel|if|else|for|matrix|in|contains|starts_with|ends_with|matches|import|continue|break|exists|missing|glob|require|produces|container|env|invoke|fail|onfail|global|require_env|retry|onchange|switch|case|default|lock|state|confirm|prompt|input|timeout)\\b"
 				},
 				{
-					"comment": "Builtin with modifier: rm<kill> path",
-					"match": "^\\s*(?:(?:!)\\s*)?(cp|rm|mkdir|touch|download|extract)(<)([^>\\s]+)(>)(?=\\s|$)",
+					"comment": "Builtin with modifier: rm<kill> path (optionally after timeout/retry and/or !)",
+					"match": "^\\s*(?:(?:retry|timeout)<[^>]+>\\s+)*(?:(?:!)\\s*)?(cp|rm|mkdir|touch|download|extract)(<)([^>\\s]+)(>)(?=\\s|$)",
 					"captures": {
 						"1": {
 							"name": "support.function.builtin.constfile"
@@ -91,7 +91,7 @@
 				{
 					"comment": "Builtin cross-platform commands (bare names in bodies)",
 					"name": "support.function.builtin.constfile",
-					"match": "^\\s*(?:(?:!)\\s*)?(cp|rm|mkdir|touch|download|extract)(?=\\s|$)"
+					"match": "^\\s*(?:(?:retry|timeout)<[^>]+>\\s+)*(?:(?:!)\\s*)?(cp|rm|mkdir|touch|download|extract)(?=\\s|$)"
 				},
 				{
 					"comment": "Expression function calls (var values, conditions)",
@@ -184,11 +184,11 @@
 		},
 		"shell-prefix": {
 			"name": "keyword.operator.shell.constfile",
-			"match": "^\\s*(\\$)\\s"
+			"match": "^\\s*(?:(?:retry|timeout)<[^>]+>\\s+)*(\\$)\\s"
 		},
 		"error-tolerant-prefix": {
 			"name": "keyword.operator.error-tolerant.constfile",
-			"match": "^\\s*(?:\\$\\s*)?(!)(?=\\s)"
+			"match": "^\\s*(?:(?:retry|timeout)<[^>]+>\\s+)*(?:\\$\\s*)?(!)(?=\\s)"
 		},
 		"operators": {
 			"patterns": [
