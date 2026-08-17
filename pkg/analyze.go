@@ -151,68 +151,47 @@ func (p *Parser) computeCacheGlobals() {
 			}
 			queue = append(queue, refsByName[n]...)
 		}
-		slices.Sort(slices.Compact(globals))
+		slices.Sort(globals)
+		globals = slices.Compact(globals)
 		cmd.cacheGlobals, cmd.cacheGlobalsExact = globals, true
 	}
 }
 
 // collectStmtRefs gathers every &name referenced by a statement tree.
 func collectStmtRefs(stmts []BodyStatement, out map[string]bool) {
-	for i := range stmts {
-		stmt := &stmts[i]
-		for _, str := range []string{stmt.Shell, stmt.Cond, stmt.LoopItems, stmt.SwitchExpr, stmt.Message, stmt.BuiltinArgs, stmt.Dir} {
-			for _, n := range VarRefNames(str) {
-				out[n] = true
-			}
-		}
-		for _, pair := range stmt.Env {
-			if _, val, ok := strings.Cut(pair, "="); ok {
-				for _, n := range VarRefNames(val) {
-					out[n] = true
-				}
-			}
-		}
-		for _, c := range stmt.Cases {
-			for _, v := range c.Values {
-				for _, n := range VarRefNames(v) {
-					out[n] = true
-				}
-			}
-			collectStmtRefs(c.Body, out)
-		}
-		collectStmtRefs(stmt.ThenBody, out)
-		collectStmtRefs(stmt.ElseBody, out)
-		collectStmtRefs(stmt.LoopBody, out)
-		collectStmtRefs(stmt.OnFailBody, out)
-	}
+	collectStmtRefsWith(stmts, out, VarRefNames)
 }
 
 func collectStmtWildcardRefs(stmts []BodyStatement, out map[string]bool) {
+	collectStmtRefsWith(stmts, out, wildcardRefNames)
+}
+
+func collectStmtRefsWith(stmts []BodyStatement, out map[string]bool, names func(string) []string) {
 	for i := range stmts {
 		stmt := &stmts[i]
 		for _, str := range []string{stmt.Shell, stmt.Cond, stmt.LoopItems, stmt.SwitchExpr, stmt.Message, stmt.BuiltinArgs, stmt.Dir} {
-			for _, n := range wildcardRefNames(str) {
+			for _, n := range names(str) {
 				out[n] = true
 			}
 		}
 		for _, pair := range stmt.Env {
 			if _, val, ok := strings.Cut(pair, "="); ok {
-				for _, n := range wildcardRefNames(val) {
+				for _, n := range names(val) {
 					out[n] = true
 				}
 			}
 		}
 		for _, c := range stmt.Cases {
 			for _, v := range c.Values {
-				for _, n := range wildcardRefNames(v) {
+				for _, n := range names(v) {
 					out[n] = true
 				}
 			}
-			collectStmtWildcardRefs(c.Body, out)
+			collectStmtRefsWith(c.Body, out, names)
 		}
-		collectStmtWildcardRefs(stmt.ThenBody, out)
-		collectStmtWildcardRefs(stmt.ElseBody, out)
-		collectStmtWildcardRefs(stmt.LoopBody, out)
-		collectStmtWildcardRefs(stmt.OnFailBody, out)
+		collectStmtRefsWith(stmt.ThenBody, out, names)
+		collectStmtRefsWith(stmt.ElseBody, out, names)
+		collectStmtRefsWith(stmt.LoopBody, out, names)
+		collectStmtRefsWith(stmt.OnFailBody, out, names)
 	}
 }

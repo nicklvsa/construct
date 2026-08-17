@@ -988,7 +988,13 @@ func (d *UIDoc) Save() (saved, conflicts []string, err error) {
 		if f.Text == f.OrigText {
 			continue
 		}
-		if disk, rerr := os.ReadFile(p); rerr == nil && uiNormalize(string(disk)) != f.OrigText {
+		disk, rerr := os.ReadFile(p)
+		if rerr != nil && !errors.Is(rerr, os.ErrNotExist) {
+			// An unreadable file must not silently pass the conflict check
+			// and get overwritten below.
+			return saved, nil, fmt.Errorf("conflict check %s: %w", p, rerr)
+		}
+		if rerr == nil && uiNormalize(string(disk)) != f.OrigText {
 			conflicts = append(conflicts, p)
 		}
 	}

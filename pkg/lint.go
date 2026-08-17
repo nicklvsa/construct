@@ -415,7 +415,8 @@ func lintRefRules(lines []string, data *ParsedData) []LintIssue {
 				continue
 			}
 
-			shellCount := len(ShellStatements(cmd.Body))
+			shells := ShellStatements(cmd.Body)
+			shellCount := len(shells)
 			if idx, err := strconv.Atoi(suffix); err == nil {
 				if idx < 0 || idx >= shellCount {
 					issues = append(issues, LintIssue{
@@ -425,7 +426,7 @@ func lintRefRules(lines []string, data *ParsedData) []LintIssue {
 					})
 					continue
 				}
-				for shellIdx, stmt := range ShellStatements(cmd.Body) {
+				for shellIdx, stmt := range shells {
 					if stmt.OutputName != "" && shellIdx == idx {
 						issues = append(issues, LintIssue{
 							Line: lineIdx, Col: absIdx, EndCol: absIdx + nameLen,

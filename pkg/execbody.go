@@ -135,6 +135,18 @@ func (c executorEvalContext) BaseDir() string {
 	return "."
 }
 
+// readStdinLine reads one line using a shared buffered reader. A fresh
+// bufio.Reader per statement would buffer ahead and swallow the input line
+// meant for the next prompt.
+func (e *Executor) readStdinLine() (string, error) {
+	e.stdinMu.Lock()
+	defer e.stdinMu.Unlock()
+	if e.stdinReader == nil {
+		e.stdinReader = bufio.NewReader(os.Stdin)
+	}
+	return e.stdinReader.ReadString('\n')
+}
+
 func (e *Executor) execBody(ctx *execContext, body []BodyStatement) (err error) {
 	defer func() {
 		if err != nil && !ctx.onFailRun &&
@@ -259,7 +271,7 @@ func (e *Executor) execBody(ctx *execContext, body []BodyStatement) (err error) 
 					return &FailError{Message: fmt.Sprintf("confirm \"%s\" aborted (stdin is not a terminal; pass --yes to approve)", stmt.Message), File: ctx.srcFile, Line: stmt.SourceLine}
 				}
 				fmt.Printf("%s [y/N]: ", stmt.Message)
-				line, _ := bufio.NewReader(os.Stdin).ReadString('\n')
+				line, _ := e.readStdinLine()
 				line = strings.TrimSpace(line)
 				if !strings.EqualFold(line, "y") && !strings.EqualFold(line, "yes") {
 					return &FailError{Message: "aborted by user: " + stmt.Message, File: ctx.srcFile, Line: stmt.SourceLine}
@@ -271,7 +283,7 @@ func (e *Executor) execBody(ctx *execContext, body []BodyStatement) (err error) 
 		case StmtPrompt:
 			if !e.yes && termIsTTY(os.Stdin) {
 				fmt.Printf("%s [press Enter to continue]: ", stmt.Message)
-				_, _ = bufio.NewReader(os.Stdin).ReadString('\n')
+				_, _ = e.readStdinLine()
 			} else {
 				fmt.Println(stmt.Message)
 			}
@@ -281,7 +293,7 @@ func (e *Executor) execBody(ctx *execContext, body []BodyStatement) (err error) 
 			if stmt.Message != "" {
 				fmt.Print(" ")
 			}
-			line, _ := bufio.NewReader(os.Stdin).ReadString('\n')
+			line, _ := e.readStdinLine()
 			line = strings.TrimSpace(line)
 			e.StructuredParse.SetVariable(stmt.Shell, ctx.target.Name, line)
 			e.debugf("input %s=%q\n", stmt.Shell, line)
@@ -482,7 +494,8 @@ func (e *Executor) runOnFails(ctx *execContext, cause error) error {
 
 	e.StructuredParse.SetVariable("fail.message", ctx.target.Name, cause.Error())
 	e.StructuredParse.SetVariable("fail.line", ctx.target.Name, strconv.Itoa(failLine(cause)))
-	if cmdErr, ok := cause.(*CommandError); ok {
+	var cmdErr *CommandError
+	if errors.As(cause, &cmdErr) {
 		e.StructuredParse.SetVariable("fail.exit", ctx.target.Name, strconv.Itoa(cmdErr.ExitCode))
 	}
 
@@ -513,16 +526,21 @@ func (e *Executor) invokeCommand(ctx *execContext, stmt BodyStatement) error {
 			return err
 		}
 	}
+	e.mu.Lock()
 	if e.invokeDepth == nil {
 		e.invokeDepth = make(map[string]int)
 	}
-	e.mu.Lock()
 	if e.invokeDepth[invoked.Name] > 0 {
 		e.mu.Unlock()
 		return fmt.Errorf("circular invoke of command '%s'", invoked.Name)
 	}
 	e.invokeDepth[invoked.Name]++
 	e.mu.Unlock()
+	defer func() {
+		e.mu.Lock()
+		e.invokeDepth[invoked.Name]--
+		e.mu.Unlock()
+	}()
 
 	sub := *ctx // invoke bodies run in the caller's context
 	sub.srcFile = invoked.SourceFile
@@ -561,9 +579,6 @@ func (e *Executor) invokeCommand(ctx *execContext, stmt BodyStatement) error {
 		invokeErr = e.execBody(&sub, body)
 	}
 
-	e.mu.Lock()
-	e.invokeDepth[invoked.Name]--
-	e.mu.Unlock()
 	return invokeErr
 }
 

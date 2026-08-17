@@ -1324,7 +1324,10 @@ func TestContainerArgs(t *testing.T) {
 
 	// Plain shell mode.
 	shCtx := &execContext{target: &Command{Name: "x"}, env: &env}
-	argv, display, cleanup := e.shellArgsFor(shCtx, "echo hi")
+	argv, display, cleanup, err := e.shellArgsFor(shCtx, "echo hi")
+	if err != nil {
+		t.Fatalf("plain shellArgsFor: %v", err)
+	}
 	defer cleanup()
 	if argv[0] != e.shellName || display == "" {
 		t.Errorf("plain argv = %v display = %q", argv, display)
@@ -1345,7 +1348,10 @@ func TestContainerArgs(t *testing.T) {
 	f, _ := os.CreateTemp(t.TempDir(), "env")
 	f.Close()
 	cCtx := &execContext{target: &Command{Name: "x"}, env: &env, container: "docker alpine:latest", envFile: f.Name(), workDir: "sub"}
-	argv, display, cleanup = e.shellArgsFor(cCtx, "echo hi")
+	argv, display, cleanup, err = e.shellArgsFor(cCtx, "echo hi")
+	if err != nil {
+		t.Fatalf("container shellArgsFor: %v", err)
+	}
 	defer cleanup()
 	joined := strings.Join(argv, " ")
 	for _, want := range []string{"docker run --rm", "--env-file", "-v " + dir + ":/work", "-w /work/sub", "alpine:latest", "/bin/sh -c", "echo hi"} {

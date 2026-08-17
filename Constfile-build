@@ -19,20 +19,12 @@ install in editor/vscode {
     retry<2, 1s> $ npm install --silent
 }
 
-# Packages and installs the host-platform extension. The server binary is
-# stashed out of the package (the dev marker points at this copy) and put
-# back afterwards.
+# Packages and installs the host-platform extension. The VSIX bundles the
+# server binary so the install is self-contained (dev iteration can still
+# point at a source binary via .construct-lsp-dev or CONSTRUCT_LSP_DEV).
 build-ext in editor/vscode < build-lsp, install {
     var vsix_version = $ cd editor/vscode && node -p "require('./package.json').version"
-    onfail {
-        ! $ mv server/construct-lsp.exe.stash server/construct-lsp.exe
-        ! $ mv server/construct-lsp.stash server/construct-lsp
-    }
-    ! $ mv server/construct-lsp.exe server/construct-lsp.exe.stash
-    ! $ mv server/construct-lsp server/construct-lsp.stash
     timeout<10m> $ npx @vscode/vsce@latest package --no-yarn
-    ! $ mv server/construct-lsp.exe.stash server/construct-lsp.exe
-    ! $ mv server/construct-lsp.stash server/construct-lsp
     $ code --install-extension constfile-&vsix_version.vsix --force as final_out
 }
 

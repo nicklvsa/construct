@@ -16,7 +16,7 @@ func notifyResult(success bool, summary string) {
 	var cmd *exec.Cmd
 	switch runtime.GOOS {
 	case "darwin":
-		script := fmt.Sprintf(`display notification %q with title %q`, summary, title)
+		script := fmt.Sprintf(`display notification %s with title %s`, appleScriptString(summary), appleScriptString(title))
 		cmd = exec.Command("osascript", "-e", script)
 	case "windows":
 		script := fmt.Sprintf(`[void][System.Reflection.Assembly]::LoadWithPartialName('System.Windows.Forms');`+
@@ -37,4 +37,14 @@ func notifyResult(success bool, summary string) {
 func escapePowerShell(s string) string {
 	s = strings.ReplaceAll(s, "'", "''")
 	return strings.ReplaceAll(s, "\n", " ")
+}
+
+// appleScriptString quotes s for an AppleScript string literal. AppleScript
+// has no escape sequences like \n (Go's %q would print them literally), so
+// newlines are collapsed to spaces.
+func appleScriptString(s string) string {
+	s = strings.ReplaceAll(s, "\\", "\\\\")
+	s = strings.ReplaceAll(s, "\"", "\\\"")
+	s = strings.ReplaceAll(s, "\n", " ")
+	return `"` + s + `"`
 }

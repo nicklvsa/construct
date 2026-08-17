@@ -76,12 +76,14 @@ func isIntStr(s string) bool {
 	if s[0] == '-' {
 		i = 1
 	}
+	digits := 0
 	for ; i < len(s); i++ {
 		if s[i] < '0' || s[i] > '9' {
 			return false
 		}
+		digits++
 	}
-	return i > 0
+	return digits > 0
 }
 
 type EvalContext interface {

@@ -13,7 +13,7 @@ import (
 	"github.com/nicklvsa/construct/pkg"
 )
 
-var doctorRequireRe = regexp.MustCompile(`require\(\s*"([^"]+)"`)
+var doctorRequireRe = regexp.MustCompile(`require\(\s*("([^"]+)"|'([^']+)')`)
 var errDoctorFailed = errors.New("doctor found problems (see [FAIL] entries above)")
 
 func runDoctor(o *options, inputs *ConstructInput) error {
@@ -37,12 +37,7 @@ func runDoctor(o *options, inputs *ConstructInput) error {
 
 	cloudPath := os.Getenv("CONSTRUCT_CLOUD_FILE")
 	if cloudPath == "" {
-		candidate := filepath.Join(filepath.Dir(inputs.FileName), "construct-cloud.json")
-		if fileExists(candidate) {
-			cloudPath = candidate
-		} else {
-			cloudPath = "construct-cloud.json"
-		}
+		cloudPath = filepath.Join(filepath.Dir(inputs.FileName), "construct-cloud.json")
 	}
 	if _, err := pkg.LoadCloudDefsFile(cloudPath); err != nil {
 		fail("cloud file %s: %v", cloudPath, err)
@@ -81,7 +76,7 @@ func runDoctor(o *options, inputs *ConstructInput) error {
 	for _, cmd := range data.Commands {
 		for _, stmt := range collectAllStatements(cmd.Body) {
 			for _, m := range doctorRequireRe.FindAllStringSubmatch(stmt.Cond, -1) {
-				tool := m[1]
+				tool := strings.Trim(m[1], `"'`) // group 1 is the quoted name (double or single)
 				if _, err := exec.LookPath(tool); err != nil {
 					fail("command %q requires tool %q, which is not on PATH", cmd.Name, tool)
 				} else {

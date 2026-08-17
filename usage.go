@@ -105,8 +105,14 @@ Options:
   --tui             Live dashboard for the run (q detaches, Ctrl-C cancels)
   --container IMG   shell: run in this container image instead of the command's
   --force, -f       Overwrite existing files (init, import)
+  --doctor          Diagnose the environment, Constfile, tools, and cloud file
+  --template NAME   init: template to scaffold (minimal, go, python, node, rust, monorepo)
+  --file PATH       Target file (init, cloud push)
+  --output PATH     Output file (cloud pull)
   --repo OWNER/REPO GitHub repository for cloud jobs (default: git remote)
   --ref BRANCH      Git ref to dispatch cloud jobs on (default: current branch)
+  --workflow NAME   Workflow file name (cloud submit, default: construct.yml)
+  --no-init         cloud submit: don't create the workflow file
   --wait            Follow a cloud job and stream its logs
   --notify          Desktop notification when the run finishes
   --port N          ui: serve on this port (default: random free port)

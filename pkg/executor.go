@@ -1,6 +1,7 @@
 package pkg
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -59,6 +60,8 @@ type Executor struct {
 	stdoutSink      io.Writer
 	stderrSink      io.Writer
 	silentStatus    bool
+	stdinMu         sync.Mutex    // guards stdinReader for confirm/prompt/input
+	stdinReader     *bufio.Reader // shared: buffered reads must not swallow the next prompt's input
 }
 
 type RunObserver interface {
@@ -206,7 +209,9 @@ func (e *Executor) SetTiming(t bool) {
 }
 
 func (e *Executor) SetObserver(o RunObserver) {
+	e.mu.Lock()
 	e.observer = o
+	e.mu.Unlock()
 }
 
 func (e *Executor) SetStdoutSink(w io.Writer) {
@@ -232,7 +237,10 @@ func (e *Executor) errSink() io.Writer {
 }
 
 func (e *Executor) errSinkFor(ctx *execContext) io.Writer {
-	if oc, ok := e.observer.(OutputCollector); ok && !e.quiet {
+	e.mu.Lock()
+	observer := e.observer
+	e.mu.Unlock()
+	if oc, ok := observer.(OutputCollector); ok && !e.quiet {
 		return oc.OutputWriter(ctx.target.Name)
 	}
 	return e.errSink()
@@ -243,14 +251,20 @@ func (e *Executor) SetSilentStatus(v bool) {
 }
 
 func (e *Executor) notifyStart(name string) {
-	if e.observer != nil {
-		e.observer.CommandStarted(name)
+	e.mu.Lock()
+	o := e.observer
+	e.mu.Unlock()
+	if o != nil {
+		o.CommandStarted(name)
 	}
 }
 
 func (e *Executor) notifyFinish(name string, rec RunRecord) {
-	if e.observer != nil {
-		e.observer.CommandFinished(name, rec)
+	e.mu.Lock()
+	o := e.observer
+	e.mu.Unlock()
+	if o != nil {
+		o.CommandFinished(name, rec)
 	}
 }
 
@@ -492,7 +506,7 @@ func (e *Executor) executeCommand(command *Command, prereqDir string, isPrereq b
 		if e.ghActions && !isPrereq {
 			ghErrorAnnotation(bodyErr)
 		}
-		rec := RunRecord{Status: "failed", Exit: exitCodeOfErr(bodyErr), DurationMs: time.Since(start).Milliseconds(), End: time.Now(), Error: bodyErr.Error()}
+		rec := RunRecord{Status: "failed", Exit: exitCodeOf(bodyErr), DurationMs: time.Since(start).Milliseconds(), End: time.Now(), Error: bodyErr.Error()}
 		e.recordRun(command.Name, rec)
 		e.notifyFinish(command.Name, rec)
 		return bodyErr

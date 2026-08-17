@@ -210,14 +210,14 @@ func renderChooser(s *chooseState, width, height int) string {
 			line += " (default)"
 		}
 		if it.desc != "" {
-			if avail := width - len(line) - 5; avail > 4 {
+			if avail := width - utf8.RuneCountInString(line) - 5; avail > 4 {
 				line += " — " + truncate(it.desc, avail)
 			}
 		}
 		b.WriteString(line)
 		b.WriteString("\r\n")
 	}
-	fmt.Fprintf(&b, "filter: %s\r\n[%d/%d selected]", string(s.filter), len(s.selected), len(s.all))
+	b.WriteString(fmt.Sprintf("filter: %s\r\n[%d/%d selected]", string(s.filter), len(s.selected), len(s.all)))
 	return b.String()
 }
 

@@ -12,15 +12,8 @@ func ParseCommandName(line string) string {
 
 	// Cloud command markers: |commandname|
 	if len(line) >= 2 && line[0] == '|' {
-		endIdx := strings.Index(line[1:], "|")
-		if endIdx > 0 {
-			name := line[1 : endIdx+1]
-			remainder := strings.TrimSpace(line[endIdx+2:])
-			for _, cont := range []string{"(", "<", "{", "in ", "produces ", "onchange ", "timeout<", ""} {
-				if strings.HasPrefix(remainder, cont) {
-					return strings.TrimSpace(name)
-				}
-			}
+		if endIdx := strings.Index(line[1:], "|"); endIdx > 0 {
+			return strings.TrimSpace(line[1 : endIdx+1])
 		}
 	}
 

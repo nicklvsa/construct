@@ -77,6 +77,14 @@ func (p *Parser) processImport(line string) error {
 		renameImportNamespace(imported.Data, ns)
 	}
 
+	// Validate before merging anything so a conflicting import doesn't leave
+	// the parser half-mutated with the import's variables and sources.
+	for _, cmd := range imported.Data.Commands {
+		if existing, err := p.Data.GetCommand(cmd.Name); err == nil && existing != nil {
+			return fmt.Errorf("duplicate command %q from import %q", cmd.Name, spec)
+		}
+	}
+
 	if !slices.Contains(p.Data.SourceFiles, cleanPath) {
 		p.Data.SourceFiles = append(p.Data.SourceFiles, cleanPath)
 	}
@@ -90,9 +98,6 @@ func (p *Parser) processImport(line string) error {
 		p.Data.addVariable(v)
 	}
 	for _, cmd := range imported.Data.Commands {
-		if existing, err := p.Data.GetCommand(cmd.Name); err == nil && existing != nil {
-			return fmt.Errorf("duplicate command %q from import %q", cmd.Name, spec)
-		}
 		p.Data.addCommand(cmd)
 	}
 	return nil

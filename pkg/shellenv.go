@@ -106,6 +106,8 @@ func containerForwardedEnv(env []string) []string {
 }
 
 func (e *Executor) containerRuntime() string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
 	if e.containerRT == "" {
 		e.containerRT = "docker"
 		if _, err := exec.LookPath("docker"); err != nil {

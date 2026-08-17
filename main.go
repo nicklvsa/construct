@@ -182,7 +182,7 @@ func main() {
 		case "doctor":
 			err = runDoctor(&o, inputs)
 		case "stats":
-			err = runStats(&o, inputs)
+			err = runStats(inputs)
 		case "cloud":
 			err = runCloud(positionals[1:], &o, inputs)
 		case "clean":

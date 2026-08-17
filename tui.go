@@ -83,6 +83,7 @@ type dashboard struct {
 	executor    *pkg.Executor
 	cancel      context.CancelFunc
 	done        chan struct{}
+	exited      chan struct{} // closed when the render loop returns
 	stopOnce    sync.Once
 	restoreTerm func()
 }
@@ -96,6 +97,7 @@ func newDashboard(executor *pkg.Executor, cancel context.CancelFunc) *dashboard 
 		executor: executor,
 		cancel:   cancel,
 		done:     make(chan struct{}),
+		exited:   make(chan struct{}),
 	}
 }
 
@@ -224,10 +226,7 @@ func (d *dashboard) render(w, h int) string {
 		if offset+i == d.sel {
 			marker = ">"
 		}
-		name := r.name
-		if len(name) > 24 {
-			name = name[:21] + "..."
-		}
+		name := truncate(r.name, 24)
 		line := fmt.Sprintf("%s %s %-24s", marker, d.glyph(r), name)
 		if st := d.statusText(r); st != "" {
 			line += st
@@ -253,8 +252,8 @@ func (d *dashboard) render(w, h int) string {
 	}
 	for _, l := range lines {
 		l = strings.ReplaceAll(l, "\r", "")
-		if w > 2 && len(l) > w-2 {
-			l = l[:w-2]
+		if w > 2 {
+			l = truncate(l, w-2) // rune-safe: byte slicing would split multi-byte chars
 		}
 		b.WriteString(l)
 		b.WriteString("\r\n")
@@ -267,6 +266,7 @@ func (d *dashboard) render(w, h int) string {
 }
 
 func (d *dashboard) start() {
+	defer close(d.exited)
 	old, err := term.MakeRaw(int(os.Stdin.Fd()))
 	if err != nil {
 		d.mu.Lock()
@@ -283,13 +283,18 @@ func (d *dashboard) start() {
 	}
 	d.mu.Unlock()
 
-	keys := make(chan byte, 32)
+	keys := make(chan byte, 64)
 	go func() {
 		buf := make([]byte, 8)
 		for {
 			n, err := os.Stdin.Read(buf)
-			if n > 0 {
-				keys <- buf[0]
+			// Forward every byte so multi-byte escape sequences survive.
+			for i := 0; i < n; i++ {
+				select {
+				case keys <- buf[i]:
+				case <-d.done:
+					return
+				}
 			}
 			if err != nil {
 				close(keys)
@@ -360,9 +365,15 @@ func (d *dashboard) detachLocked() {
 
 func (d *dashboard) stop() {
 	d.mu.Lock()
-	defer d.mu.Unlock()
 	d.detachLocked()
+	d.mu.Unlock()
 
+	// Wait for the render loop to notice d.done before printing summaries —
+	// a late frame would clear the screen right after them.
+	<-d.exited
+
+	d.mu.Lock()
+	defer d.mu.Unlock()
 	for _, r := range d.rows {
 		if r.status != dashFailed {
 			continue

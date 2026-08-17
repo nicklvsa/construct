@@ -40,10 +40,37 @@ func evaluateCondition(cond string) bool {
 	return evaluateConditionWithBase(cond, "")
 }
 
+// matchingOuterParens reports whether the "(" opening s is closed by the final
+// ")" — i.e. the whole condition is wrapped in one balanced pair.
+func matchingOuterParens(s string) bool {
+	depth, inQuote := 0, false
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case '"':
+			inQuote = !inQuote
+		case '(':
+			if !inQuote {
+				depth++
+			}
+		case ')':
+			if !inQuote {
+				depth--
+				if depth == 0 {
+					return i == len(s)-1
+				}
+				if depth < 0 {
+					return false
+				}
+			}
+		}
+	}
+	return false
+}
+
 func evaluateConditionWithBase(cond, base string) bool {
 	cond = strings.TrimSpace(cond)
 
-	if strings.HasPrefix(cond, "(") && strings.HasSuffix(cond, ")") {
+	if strings.HasPrefix(cond, "(") && matchingOuterParens(cond) {
 		return evaluateConditionWithBase(strings.TrimSpace(cond[1:len(cond)-1]), base)
 	}
 
