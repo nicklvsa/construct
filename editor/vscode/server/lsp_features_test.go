@@ -635,3 +635,44 @@ func TestLSPEnvCommandDiagnostic(t *testing.T) {
 		t.Errorf("expected phantom-env diagnostic, got: %s", out)
 	}
 }
+
+func TestModifierBracketNotADependency(t *testing.T) {
+	lines := []string{
+		"    timeout<10m> $ npx @vscode/vsce@latest package --no-yarn",
+		"    retry<2, 1s> $ npm install --silent",
+		"    rm<kill> construct-lsp construct-lsp.exe",
+		"    lock<5s> releases { }",
+		"    parallel<4> for x in a, b { }",
+	}
+	for _, line := range lines {
+		for col := 0; col <= len(line); col++ {
+			if _, _, _, ok := fileDepAtPosition(line, col); ok {
+				t.Errorf("fileDepAtPosition matched on modifier line %q at col %d", line, col)
+			}
+			if _, ok := prereqNameAtPosition(line, col); ok {
+				t.Errorf("prereqNameAtPosition matched on modifier line %q at col %d", line, col)
+			}
+		}
+	}
+}
+
+func TestDependencyMarkerStillFound(t *testing.T) {
+	line := "build < src/*.go, README.md {"
+	fd, start, end, ok := fileDepAtPosition(line, strings.Index(line, "README.md"))
+	if !ok || fd != "README.md" {
+		t.Errorf("fileDepAtPosition = %q, %v; want README.md", fd, ok)
+	}
+	if want := strings.Index(line, "README.md"); start != want || end != want+len("README.md") {
+		t.Errorf("span = %d..%d, want %d..%d", start, end, want, want+len("README.md"))
+	}
+
+	line = "build timeout<30s> < src/*.go {"
+	if _, _, _, ok := fileDepAtPosition(line, strings.Index(line, "src")); !ok {
+		t.Errorf("fileDepAtPosition should find deps after a timeout modifier: %q", line)
+	}
+
+	// Prereq names still resolve on headers with modifiers.
+	if name, ok := prereqNameAtPosition(line, strings.Index(line, "src")); !ok || name != "src" {
+		t.Errorf("prereqNameAtPosition = %q, %v; want src", name, ok)
+	}
+}

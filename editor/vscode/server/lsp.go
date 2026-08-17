@@ -1375,8 +1375,25 @@ func extractVarDeclName(line string) string {
 	return s
 }
 
+func depMarkerIndex(line string) int {
+	regionEnd := len(line)
+	if b := strings.IndexByte(line, '{'); b >= 0 {
+		regionEnd = b
+	}
+	for i := 0; i < regionEnd; i++ {
+		if line[i] != '<' {
+			continue
+		}
+		if strings.IndexByte(line[i+1:regionEnd], '>') >= 0 {
+			continue
+		}
+		return i
+	}
+	return -1
+}
+
 func prereqNameAtPosition(line string, char int) (string, bool) {
-	lt := strings.IndexByte(line, '<')
+	lt := depMarkerIndex(line)
 	if lt < 0 {
 		return "", false
 	}
@@ -1421,7 +1438,7 @@ func isPrereqIdentRune(r rune) bool {
 }
 
 func fileDepAtPosition(line string, char int) (token string, startCol, endCol int, ok bool) {
-	lt := strings.IndexByte(line, '<')
+	lt := depMarkerIndex(line)
 	if lt < 0 {
 		return "", 0, 0, false
 	}
@@ -1479,7 +1496,6 @@ func workDirAtPosition(line string, char int) (dir string, startCol, endCol int,
 		return "", 0, 0, false
 	}
 
-	// Recompute the trimmed column span for the actual directory text.
 	trimStart := dirStart + strings.Index(header[dirStart:dirEnd], dir)
 	trimEnd := trimStart + len(dir)
 
