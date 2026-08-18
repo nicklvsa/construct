@@ -676,3 +676,80 @@ func TestDependencyMarkerStillFound(t *testing.T) {
 		t.Errorf("prereqNameAtPosition = %q, %v; want src", name, ok)
 	}
 }
+
+func TestLSPServiceSyntax(t *testing.T) {
+	text := `service api < assets {
+    port 8080
+    $ run-api
+}
+
+assets {
+    mkdir dist
+}
+
+dev < api {
+    $ echo setup
+}
+`
+	// Hovering the `service` keyword documents supervision.
+	if got, ok := hoverAt(t, text, 0, 3); !ok || !strings.Contains(got, "long-running") {
+		t.Errorf("service keyword hover = %q, ok=%v", got, ok)
+	}
+	// Hovering the service name shows its command hover with the port.
+	if got, ok := hoverAt(t, text, 0, 11); !ok || !strings.Contains(got, "port 8080") {
+		t.Errorf("service command hover = %q, ok=%v", got, ok)
+	}
+	// `port` statement hover.
+	if got, ok := hoverAt(t, text, 1, 6); !ok || !strings.Contains(got, "readiness") {
+		t.Errorf("port hover = %q, ok=%v", got, ok)
+	}
+
+	uri := "file:///test.constfile"
+	s := newServer()
+	s.updateDoc(uri, text)
+	params, _ := json.Marshal(map[string]interface{}{
+		"textDocument": map[string]string{"uri": uri},
+	})
+	res, err := s.handleDocumentSymbol(params)
+	if err != nil {
+		t.Fatalf("documentSymbol: %v", err)
+	}
+	foundService := false
+	for _, sym := range res.([]documentSymbol) {
+		if sym.Name == "api" && strings.HasPrefix(sym.Detail, "service 8080") {
+			foundService = true
+		}
+	}
+	if !foundService {
+		t.Errorf("service symbol detail missing: %v", res)
+	}
+}
+
+func TestLSPCommandNameAtLineService(t *testing.T) {
+	if name, ok := commandNameAtLine("service api < assets {"); !ok || name != "api" {
+		t.Errorf("commandNameAtLine(service header) = %q, ok=%v", name, ok)
+	}
+	if name, ok := commandNameAtLine("manual service web {"); !ok || name != "web" {
+		t.Errorf("commandNameAtLine(manual service) = %q, ok=%v", name, ok)
+	}
+	if name, ok := commandNameAtLine("manual build {"); !ok || name != "build" {
+		t.Errorf("commandNameAtLine(manual) = %q, ok=%v", name, ok)
+	}
+}
+
+func TestLSPOSArchHovers(t *testing.T) {
+	text := `var p = os()
+var a = arch()
+`
+	for _, c := range []struct {
+		line, char int
+		want       string
+	}{
+		{0, 8, "platform"},
+		{1, 8, "architecture"},
+	} {
+		if got, ok := hoverAt(t, text, c.line, c.char); !ok || !strings.Contains(got, c.want) {
+			t.Errorf("line %d: hover = %q, ok=%v, want %q", c.line, got, ok, c.want)
+		}
+	}
+}

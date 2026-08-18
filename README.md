@@ -1286,7 +1286,9 @@ The VSCode extension (`editor/vscode`) ships a language server with hover
 `&fail.*`/`&last.*` context refs), go-to-definition (variables, commands,
 prereqs, file deps, workdirs, and `state("...")` refs), completions
 (variables, command names, statement keywords, builtins, and functions),
-document symbols (commands and state declarations), and diagnostics
-(parse errors, duplicate prereqs, out-of-range output indexes, named-output
-hints). The TextMate grammar highlights all statements, blocks, list
-literals, and expressions.
+document symbols (commands — services marked with their port — and state
+declarations), and diagnostics (parse errors, duplicate prereqs,
+out-of-range output indexes, named-output hints). The TextMate grammar
+highlights all statements, blocks, list literals, and expressions,
+including `service`/`port` declarations and `import git` / conditional
+import lines.

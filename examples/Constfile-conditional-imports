@@ -1,0 +1,31 @@
+# Conditional imports: load platform (or environment) specific Constfiles
+# only where they apply. On any single machine, only the matching branch
+# loads; the others are skipped entirely.
+#
+#   construct Constfile-conditional-imports --list
+#   construct Constfile-conditional-imports platform-info
+#   construct Constfile-conditional-imports optional-greet
+#
+# Two syntaxes:
+#   on <platforms>  sugar for os() checks (darwin, linux, windows; macos is
+#                   an alias for darwin; comma-separate several)
+#   if <condition>  the full condition language: exists(), require(),
+#                   glob(), @ENV refs, and vars declared above the import
+
+import "cond-darwin.constfile" on macos
+import "cond-linux.constfile" on linux, freebsd
+import "cond-optional.constfile" if exists("cond-optional.constfile")
+import "cond-ci.constfile" if "@CI" == "true"
+
+# os() and arch() also work as value builtins in variables.
+var platform = os()
+var architecture = arch()
+var arm_native = &platform/&architecture
+
+platform-info {
+    $ echo "running on &arm_native"
+}
+
+optional-greet {
+    invoke optional-hello
+}

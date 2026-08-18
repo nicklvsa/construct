@@ -1,0 +1,44 @@
+# Remote recipe imports: share build logic as git repositories.
+#
+# The git imports below are commented out because the first run fetches the
+# repository (and records the pinned commit in .construct.lock). Uncomment a
+# line, run `construct Constfile-remote-imports --list`, and inspect:
+#
+#   .construct-lock               # the pin: URL, ref, resolved commit
+#   .construct-cache/imports/     # the fetched, offline copy
+#
+# Spec forms (all support `as ns` and conditional suffixes like any import):
+#
+#   import git "acme/recipes"                     GitHub owner/repo shorthand
+#   import git "github.com/acme/recipes"          explicit host
+#   import git "gitlab.com/acme/recipes"          other hosts via URL or host path
+#   import git "acme/recipes/tools"               a subdirectory of the repo
+#   import git "acme/recipes@v2.1.0"              pin a tag or branch
+#   import git "acme/recipes@<full-commit-sha>"   pin an exact commit (never moves)
+#   import git "git@github.com:acme/private-recipes" as private   ssh, your credentials
+#
+# Without `as`, the import is namespaced by the repository name — commands
+# arrive as `recipes.build` and variables as `&recipes.version`.
+#
+# Updating:
+#   construct import update                # move all pins to their ref's latest
+#   construct import update acme/recipes   # just one
+#
+# The lock file is the reviewable unit: commit it, and recipe changes only
+# arrive when someone runs `import update` and reviews the diff.
+
+var note = remote-recipes-demo
+
+# import git "acme/recipes" as recipes
+# import git "acme/recipes/tools@v2.1.0" if require("git")
+
+# With the first import uncommented, remote commands compose with local ones:
+#
+# build < recipes.build {
+#     $ echo "built with recipes v&recipes.version"
+# }
+
+# Prints a reminder; swap in a real import git line to fetch recipes.
+local-demo {
+    $ echo "uncomment an import git line above to pull in remote recipes"
+}

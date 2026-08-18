@@ -1,0 +1,5 @@
+# Loaded on linux and freebsd.
+
+linux-greet {
+    $ echo "hello from the linux side"
+}

@@ -135,3 +135,14 @@ func TestWatchOnchangeSignalsRestart(t *testing.T) {
 		t.Fatal("no restart signal after a change")
 	}
 }
+
+func TestDevSupervisionApplies(t *testing.T) {
+	dir := devDir(t, "service a {\n  $ s\n}\n\nplain {\n  $ p\n}\n")
+	if !devSupervisionApplies(filepath.Join(dir, "Constfile")) {
+		t.Error("file with a service should trigger supervision dispatch")
+	}
+	dir2 := devDir(t, "dev {\n  $ echo plain-dev-command\n}\n")
+	if devSupervisionApplies(filepath.Join(dir2, "Constfile")) {
+		t.Error("no services: construct dev must fall through to the plain command")
+	}
+}

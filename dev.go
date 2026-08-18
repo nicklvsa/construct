@@ -16,16 +16,25 @@ import (
 	"github.com/nicklvsa/construct/pkg"
 )
 
+func devSupervisionApplies(fileName string) bool {
+	data, err := parseConstfileOptional(fileName)
+	if err != nil || data == nil {
+		return false
+	}
+	for _, c := range data.Commands {
+		if c.IsService {
+			return true
+		}
+	}
+	return false
+}
+
 type devPlan struct {
 	services   []string
 	regulars   []string
 	aggregator *pkg.Command
 }
 
-// planDev resolves which services to supervise and which regular commands to
-// run first. The aggregator (a command named dev, or a non-service target
-// passed to `construct dev X`) contributes its prerequisites as the service
-// set and runs its body as setup.
 func planDev(data *pkg.ParsedData, rest []string) (*devPlan, error) {
 	isService := map[string]bool{}
 	for _, c := range data.Commands {
@@ -90,8 +99,7 @@ func planDev(data *pkg.ParsedData, rest []string) (*devPlan, error) {
 			return nil, err
 		}
 	}
-	// The aggregator joins the closure so its own prereqs resolve, but it is
-	// excluded from the regular run list — it runs as setup instead.
+
 	if aggregator != nil {
 		if err := visit(aggregator.Name); err != nil {
 			return nil, err
@@ -115,11 +123,10 @@ func planDev(data *pkg.ParsedData, rest []string) (*devPlan, error) {
 	if len(plan.services) == 0 {
 		return nil, exitAt(2, "dev: no service commands to run (declare one with `service name { ... }`)")
 	}
+
 	slices.Sort(plan.services)
 	slices.Sort(plan.regulars)
 
-	// A regular command that depends on a service would block on the
-	// never-ending service; the aggregator is exempt by design.
 	for _, name := range plan.regulars {
 		cmd, _ := data.GetCommand(name)
 		for _, pre := range cmd.Prereqs {
@@ -150,6 +157,7 @@ func runDev(args []string, o *options) error {
 	if err != nil {
 		return err
 	}
+
 	regulars, aggregator := plan.regulars, plan.aggregator
 
 	if len(regulars) > 0 {

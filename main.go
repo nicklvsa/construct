@@ -158,13 +158,26 @@ func main() {
 		return
 	}
 
-	// `construct dev` always means service supervision, even when a command
-	// named dev exists (run that one via `construct Constfile dev`).
-	if len(positionals) > 0 && positionals[0] == "dev" {
-		if err := runDev(positionals[1:], &o); err != nil {
-			exitError(err)
+	// `construct [Constfile] dev [...]` means service supervision whenever the
+	// file declares services; without services it falls through to normal
+	// execution so a plain command named dev keeps working.
+	{
+		rest := positionals
+		devFile := defaultConstfileName()
+		if len(rest) > 0 && fileExists(rest[0]) {
+			devFile = rest[0]
+			rest = rest[1:]
 		}
-		return
+		if len(rest) > 0 && rest[0] == "dev" && devSupervisionApplies(devFile) {
+			args := rest[1:]
+			if devFile != defaultConstfileName() {
+				args = append([]string{devFile}, args...)
+			}
+			if err := runDev(args, &o); err != nil {
+				exitError(err)
+			}
+			return
+		}
 	}
 
 	// --doctor is the doctor subcommand with an optional Constfile path.

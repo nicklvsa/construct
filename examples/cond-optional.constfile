@@ -1,0 +1,6 @@
+# Loaded only when this file exists — project-local overrides without
+# editing the main Constfile.
+
+optional-hello {
+    $ echo "hello from the optional override"
+}

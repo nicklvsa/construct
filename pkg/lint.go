@@ -217,6 +217,7 @@ var statementKeywordNames = map[string]bool{
 	"global": true, "var": true, "state": true, "lock": true,
 	"continue": true, "break": true, "manual": true, "produces": true,
 	"container": true, "onchange": true, "import": true,
+	"service": true, "port": true,
 }
 
 func lintStatementKeywordCommands(data *ParsedData) []LintIssue {

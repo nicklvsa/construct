@@ -1,0 +1,53 @@
+# Long-running services: construct as your dev-environment supervisor.
+#
+#   construct Constfile-services --list       # services are marked with ports
+#   construct Constfile-services dev          # start everything (Ctrl-C stops all)
+#   construct Constfile-services dev api      # start a subset
+#   construct Constfile-services logs-demo    # a plain command still runs once
+#
+# What `dev` does:
+#   1. runs non-service prerequisites to completion (see `assets` below)
+#   2. runs the aggregator body once as setup (the `dev` command)
+#   3. starts services in dependency order — `web` waits for api's port
+#   4. restarts crashed services (backoff 1s..10s) and restarts a service
+#      the moment its `onchange` globs change (edit VERSION.txt in src/)
+#   5. Ctrl-C stops everything; press it twice to force
+#
+# `flaky` demonstrates crash-restart: it exits after two seconds and dev
+# brings it back with growing backoff. `logs-demo` also shows run-history
+# capture — after running it, try:
+#   construct runs Constfile-services show logs-demo
+
+var app = demo
+
+# A dependency that must finish before any service starts.
+assets {
+    mkdir dist
+    $ echo "assets for &app" > dist/assets.txt
+}
+
+service api < assets {
+    port 8171
+    $ python3 -c "import socket,time; s=socket.socket(); s.bind(('127.0.0.1', 8171)); s.listen(1); print('api listening'); time.sleep(3600)"
+}
+
+service web < api onchange src/*.txt {
+    port 8172
+    $ python3 -c "import socket,time; s=socket.socket(); s.bind(('127.0.0.1', 8172)); s.listen(1); print('web listening'); time.sleep(3600)"
+}
+
+service flaky {
+    $ sh -c "echo flaky-up; sleep 2; exit 1"
+}
+
+# The aggregator: its body runs once as setup, its service prereqs are
+# supervised. `construct dev` picks this up automatically when no services
+# are named on the command line.
+dev < api, web, flaky {
+    $ echo "starting &app dev environment"
+}
+
+logs-demo {
+    $ echo "one"
+    $ echo "two"
+}

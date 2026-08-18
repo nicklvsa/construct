@@ -1,0 +1,5 @@
+# Loaded only under CI (@CI=true), e.g. stricter checks.
+
+ci-greet {
+    $ echo "hello from CI-only configuration"
+}

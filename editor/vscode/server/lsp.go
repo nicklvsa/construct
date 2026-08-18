@@ -586,6 +586,13 @@ func commandHover(c *pkg.Command) string {
 	if c.IsDefault {
 		b.WriteString("- default command\n")
 	}
+	if c.IsService {
+		if c.Port != "" {
+			fmt.Fprintf(&b, "- service (port %s)\n", c.Port)
+		} else {
+			b.WriteString("- service\n")
+		}
+	}
 	if len(c.Arguments) > 0 {
 		b.WriteString("- arguments:")
 		for _, a := range c.Arguments {
@@ -896,7 +903,7 @@ func (s *server) handleCompletion(params json.RawMessage) (any, error) {
 
 var statementKeywords = []string{
 	"var", "import", "switch", "case", "default", "in", "lock", "state",
-	"confirm", "prompt", "input", "timeout<30s>",
+	"confirm", "prompt", "input", "timeout<30s>", "service", "port",
 	"cp", "rm", "mkdir", "touch", "download", "extract",
 	"for", "if", "matrix", "env", "invoke", "fail", "global", "parallel",
 	"require_env", "retry", "onfail", "continue", "break",
@@ -906,7 +913,7 @@ var builtinFunctions = []string{
 	"exists", "missing", "glob", "require", "file", "lines", "sha256",
 	"basename", "dirname", "ext", "stem", "upper", "lower", "trim",
 	"replace", "sprintf", "length", "abs", "min", "max", "date", "uuid",
-	"len", "sort", "uniq", "join", "split", "env", "state",
+	"len", "sort", "uniq", "join", "split", "env", "state", "os", "arch",
 }
 
 // lineStartWord returns the word at the start of a line (only whitespace before).
@@ -1042,6 +1049,9 @@ func (s *server) handleDocumentSymbol(params json.RawMessage) (interface{}, erro
 			detail = "default command"
 		} else if len(cmd.Prereqs) > 0 {
 			detail = "depends on " + strings.Join(cmd.Prereqs, ", ")
+		}
+		if cmd.IsService {
+			detail = strings.TrimSpace("service " + cmd.Port + " " + detail)
 		}
 		symbols = append(symbols, documentSymbol{
 			Name:           cmd.Name,
@@ -1359,6 +1369,7 @@ func isIdentRune(r rune) bool {
 
 func commandNameAtLine(line string) (string, bool) {
 	line, _ = pkg.StripManual(line)
+	line, _ = pkg.StripService(line)
 	name := pkg.ParseCommandName(line)
 	if name == "" {
 		return "", false
@@ -1787,7 +1798,7 @@ func keywordHover(word string) (string, bool) {
 	case "var":
 		return "`var name = value`\n\nDeclares a variable; reference it as `&name`. Values support expressions (`[a, b]`, `1 + 2`), `@ENV` refs, and `state(\"name\")`.", true
 	case "import":
-		return "`import \"lib.constfile\" as lib`\n\nMerges another file's commands and variables, optionally under a namespace (`lib.cmd`, `&lib.var`).", true
+		return "`import \"lib.constfile\" as lib`\n\nMerges another file's commands and variables, optionally under a namespace (`lib.cmd`, `&lib.var`). `import git \"repo\"` fetches remote recipes (pinned in `.construct.lock`), and a trailing `if <cond>` or `on darwin, linux` loads the import conditionally.", true
 	case "produces":
 		return "`produces <files>`\n\nDeclares the command's outputs. While the artifacts exist and are newer than the command's file dependencies, the command is skipped as up to date.", true
 	case "manual":
@@ -1795,7 +1806,11 @@ func keywordHover(word string) (string, bool) {
 	case "container":
 		return "`container \"image\"`\n\nRuns the command's shell statements inside the image via docker/podman, with the workspace mounted at `/work`. Builtins (`cp`, `rm`, …) still run on the host.", true
 	case "onchange":
-		return "`onchange <globs>`\n\nExtra file patterns that rerun this command in `--watch` mode.", true
+		return "`onchange <globs>`\n\nExtra file patterns that rerun this command in `--watch` mode (and restart a `service` under `construct dev`).", true
+	case "service":
+		return "`service name { ... }`\n\nDeclares a long-running process. `construct dev` runs non-service prerequisites first, then supervises services in dependency order — restarting on crash and on `onchange` edits. Ctrl-C stops all.", true
+	case "port":
+		return "`port 8080`\n\nA service's readiness port: `construct dev` starts dependents once the port accepts connections (90s timeout).", true
 	}
 	return "", false
 }
@@ -1855,6 +1870,10 @@ func functionHover(word string) (string, bool) {
 		return "`env(name)` — the environment variable's value", true
 	case "state":
 		return "`state(\"name\")` or `@state(\"name\")` — a value persisted by a `state` declaration", true
+	case "os":
+		return "`os()` — this platform (`darwin`, `linux`, `windows`); in conditions use `os(\"darwin\")`", true
+	case "arch":
+		return "`arch()` — this architecture (`amd64`, `arm64`); in conditions use `arch(\"arm64\")`", true
 	}
 	return "", false
 }

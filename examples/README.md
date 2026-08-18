@@ -37,6 +37,9 @@ construct Constfile-<name> <command>    # run a command
 | `Makefile` | Any | Import demo: run `construct import examples/Makefile` to convert it (vars, `.PHONY`, automatic vars, file targets; ifeq/`$(shell)`/pattern rule show up as flagged comments) |
 | `Constfile-shell` | Any | `construct shell`: interactive shells with a command's env block, workdir, or container; ad-hoc `--container` |
 | `Constfile-dashboard` | Any | `--tui` live dashboard over a multi-command DAG: statuses, durations, output tails, detach, cached skips, failure tails |
+| `Constfile-services` | Any | `service` commands, `port` readiness, `construct dev` supervision (restarts, `onchange` restarts, setup bodies, Ctrl-C stops all), run-history logs via `runs show` |
+| `Constfile-conditional-imports` (+ `cond-*.constfile`) | Multi-file | Conditional imports (`on` platform sugar, `if` with `exists()`/`@ENV`), `os()`/`arch()` value builtins |
+| `Constfile-remote-imports` | Multi-file | `import git` recipe sharing: shorthand/host/subdir specs, `@ref` pinning, `.construct.lock`, `construct import update`, auto-namespacing |
 
 ## Feature Coverage
 
@@ -87,4 +90,11 @@ construct Constfile-<name> <command>    # run a command
 - **Makefile import (`construct import`)** — `Makefile`
 - **Interactive shells (`construct shell`, `--container`)** — `Constfile-shell`
 - **Live dashboard (`--tui`)** — `Constfile-dashboard`
+- **Services (`service`, `port`, `construct dev`)** — `Constfile-services`
+- **Conditional imports (`on`, `if`)** — `Constfile-conditional-imports`
+- **Remote recipe imports (`import git`, `.construct.lock`, `import update`)** — `Constfile-remote-imports`
+- **`os()`/`arch()` builtins** — `Constfile-conditional-imports`
+- **Affected runs (`--since`)** — any example inside a git repo, e.g. `construct Constfile-services --since origin/main logs-demo`
+- **Run history (`construct runs`, `runs show`, `runs diff`)** — `Constfile-services`
+- **Dep discovery (`construct learn`)** — any example with file deps, e.g. `construct learn Constfile-go-webapp build`
 - **`init`/`doctor`/`stats`/`cloud` subcommands** — any example

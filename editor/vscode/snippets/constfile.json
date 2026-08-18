@@ -98,5 +98,45 @@
       "}"
     ],
     "description": "Loop whose iterations run concurrently"
+  },
+  "Service": {
+    "prefix": "service",
+    "body": [
+      "service ${1:name}${2: < ${3:prereq}}${4: onchange ${5:src/**}} {",
+      "\t${6:port ${7:8080}}",
+      "\t$0",
+      "}"
+    ],
+    "description": "Long-running service supervised by `construct dev`"
+  },
+  "Dev aggregator": {
+    "prefix": "dev",
+    "body": [
+      "dev < ${1:services} {",
+      "\t$0",
+      "}"
+    ],
+    "description": "Aggregator command for construct dev: setup body + service prereqs"
+  },
+  "Port": {
+    "prefix": "port",
+    "body": [
+      "port ${1:8080}"
+    ],
+    "description": "Service readiness port (construct dev waits for it)"
+  },
+  "Remote import": {
+    "prefix": "import-git",
+    "body": [
+      "import git \"${1:owner/repo}\" as ${2:ns}"
+    ],
+    "description": "Import remote recipes from a git repository"
+  },
+  "Conditional import": {
+    "prefix": "import-on",
+    "body": [
+      "import \"${1:file.constfile}\" on ${2|darwin,linux,windows,macos|}"
+    ],
+    "description": "Platform-conditional import"
   }
 }

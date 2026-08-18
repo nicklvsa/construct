@@ -147,14 +147,20 @@ func evalBuiltinCondition(cond, base string) (bool, bool) {
 	if open <= 0 || !strings.HasSuffix(cond, ")") {
 		return false, false
 	}
+
 	name := strings.TrimSpace(cond[:open])
 	arg := strings.Trim(strings.TrimSpace(cond[open+1:len(cond)-1]), `"`)
 	if arg == "" {
 		return false, false
 	}
-	if base != "" && !filepath.IsAbs(arg) {
-		arg = filepath.Join(base, arg)
+
+	switch name {
+	case "exists", "missing", "glob":
+		if base != "" && !filepath.IsAbs(arg) {
+			arg = filepath.Join(base, arg)
+		}
 	}
+
 	switch name {
 	case "exists":
 		_, err := os.Stat(arg)
