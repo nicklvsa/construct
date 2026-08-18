@@ -158,13 +158,13 @@ func (d *UIDoc) scanImports(path string) {
 		if !strings.HasPrefix(t, "import ") {
 			continue
 		}
-		spec, _, err := parseImportSpec(t)
-		if err != nil {
+		spec, err := parseImportSpec(t)
+		if err != nil || spec.isGit {
 			continue
 		}
-		p := spec
+		p := spec.path
 		if !filepath.IsAbs(p) {
-			p = filepath.Join(base, spec)
+			p = filepath.Join(base, spec.path)
 		}
 		p = filepath.Clean(p)
 		if _, ok := d.Files[p]; ok {

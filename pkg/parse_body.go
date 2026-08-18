@@ -179,6 +179,15 @@ func (p *Parser) parseBodyStatements(raw []rawLine, scope string) ([]BodyStateme
 			continue
 		}
 
+		if strings.HasPrefix(line, "port ") {
+			rest := strings.Trim(strings.TrimSpace(strings.TrimPrefix(line, "port")), `"`)
+			if n, err := strconv.Atoi(rest); err == nil && n >= 1 && n <= 65535 {
+				stmts = append(stmts, BodyStatement{Type: StmtPort, Shell: rest, SourceLine: lineNum})
+				i++
+				continue
+			}
+		}
+
 		// `retry<N> $ cmd` / `retry<N, 2s> $ cmd` rerun a statement up to N extra times.
 		if strings.HasPrefix(line, "retry ") || strings.HasPrefix(line, "retry\t") {
 			return nil, NewParseError(p.InputFile, lineNum, 1, "the positional retry form was removed — use retry<3> $ cmd, or retry<3, 2s> to back off between attempts (prefix with $ to run a shell command)", line)

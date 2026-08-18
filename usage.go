@@ -70,6 +70,8 @@ Commands:
   list              List all available commands
   init [template]   Scaffold a Constfile (minimal, go, python, node, rust, monorepo)
   import [FILE] [OUT]  Convert a Makefile to a Constfile (best-effort, --force)
+  import update     Refresh remote recipe imports to their ref's latest commit
+  dev [services...] Supervise long-running service commands (ports, restarts)
   shell [FILE] [cmd]  Start a shell with a command's env, workdir, or container
   doctor            Diagnose the environment, Constfile, tools, and cloud file
   stats             Show per-command timing history
@@ -142,6 +144,7 @@ Examples:
   construct import Makefile  Convert a Makefile to ./Constfile
   construct shell dev        Drop into the 'dev' command's environment
   construct --since origin/main build  Run 'build' only if affected since origin/main
+  construct dev              Supervise service commands (Ctrl-C stops all)
   construct install          Install shell completions
   construct install --hook pre-push -- build test  Install a git hook
 `)

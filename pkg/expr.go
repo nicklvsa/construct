@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"sort"
 	"strconv"
@@ -743,6 +744,8 @@ var builtins = map[string]builtinDef{
 	"abs":    unaryInt(absInt),
 	"length": lengthDef,
 	"len":    lengthDef,
+	"os":     {arity: arity(0, 0), fn: func(_ []Value, _ EvalContext) (Value, error) { return StringValue(runtime.GOOS), nil }},
+	"arch":   {arity: arity(0, 0), fn: func(_ []Value, _ EvalContext) (Value, error) { return StringValue(runtime.GOARCH), nil }},
 	"exists": {arity: arity(1, 1), fn: func(args []Value, ctx EvalContext) (Value, error) {
 		_, err := os.Stat(resolveBase(args[0], ctx))
 		return boolValue(err == nil), nil

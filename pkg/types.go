@@ -303,6 +303,19 @@ func StripManual(line string) (string, bool) {
 	return rest, true
 }
 
+func StripService(line string) (string, bool) {
+	trimmed := strings.TrimSpace(line)
+	rest, ok := strings.CutPrefix(trimmed, "service ")
+	if !ok {
+		return line, false
+	}
+	rest = strings.TrimLeft(rest, " 	")
+	if rest == "" || !isCommandNameStart(rest[0]) {
+		return line, false
+	}
+	return rest, true
+}
+
 func isCommandNameStart(c byte) bool {
 	return c == '_' || c == '|' ||
 		(c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
@@ -337,6 +350,7 @@ const (
 	StmtConfirm    = "confirm"
 	StmtPrompt     = "prompt"
 	StmtInput      = "input"
+	StmtPort       = "port"
 )
 
 type SwitchCase struct {
@@ -379,6 +393,8 @@ type Command struct {
 	SourceFile      string      `json:"source_file,omitempty"`
 	CloudAccessible bool        `json:"cloud_accessible"`
 	IsDefault       bool        `json:"is_default"`
+	IsService       bool        `json:"is_service,omitempty"`
+	Port            string      `json:"port,omitempty"`
 	LazyEval        *LazyOutput `json:"lazy_output"`
 	IsPrereq        bool        `json:"is_prereq"`
 

@@ -513,7 +513,7 @@ func TestParseCommand(t *testing.T) {
 				Lines: lines,
 			}
 
-			_, err := parser.parseCommand(0, tt.input, tt.isDefault, false, 1, "")
+			_, err := parser.parseCommand(0, tt.input, tt.isDefault, false, false, 1, "")
 			if err != nil {
 				t.Errorf("unexpected error: %v", err)
 			}
@@ -557,7 +557,7 @@ func TestParseUnclosedBrace(t *testing.T) {
 		Lines: lines,
 	}
 
-	_, err := parser.parseCommand(0, input, false, false, 1, "")
+	_, err := parser.parseCommand(0, input, false, false, false, 1, "")
 	if err == nil {
 		t.Errorf("expected error for unclosed brace, got nil")
 	}
@@ -766,7 +766,7 @@ func TestPrereqWhitespace(t *testing.T) {
 		Lines: lines,
 	}
 
-	_, err := parser.parseCommand(0, input, false, false, 1, "")
+	_, err := parser.parseCommand(0, input, false, false, false, 1, "")
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}
@@ -830,7 +830,7 @@ func TestArgumentParsing(t *testing.T) {
 		Lines: lines,
 	}
 
-	_, err := parser.parseCommand(0, input, false, false, 1, "")
+	_, err := parser.parseCommand(0, input, false, false, false, 1, "")
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}
@@ -872,7 +872,7 @@ func TestScopedVariableParsing(t *testing.T) {
 		Lines: lines,
 	}
 
-	_, err := parser.parseCommand(0, input, false, false, 1, "")
+	_, err := parser.parseCommand(0, input, false, false, false, 1, "")
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}
@@ -1061,7 +1061,7 @@ func TestParseCommandWorkDir(t *testing.T) {
 	lines := strings.Split(input, "\n")
 	parser := &Parser{Data: &ParsedData{}, Lines: lines}
 
-	if _, err := parser.parseCommand(0, input, false, false, 1, ""); err != nil {
+	if _, err := parser.parseCommand(0, input, false, false, false, 1, ""); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if len(parser.Data.Commands) != 1 {
@@ -1086,7 +1086,7 @@ func TestParseIfBlock(t *testing.T) {
 	lines := strings.Split(input, "\n")
 	parser := &Parser{Data: &ParsedData{}, Lines: lines}
 
-	if _, err := parser.parseCommand(0, "build {", false, false, 1, ""); err != nil {
+	if _, err := parser.parseCommand(0, "build {", false, false, false, 1, ""); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if len(parser.Data.Commands) != 1 {
@@ -1127,7 +1127,7 @@ func TestParseIfBlockNoElse(t *testing.T) {
 	lines := strings.Split(input, "\n")
 	parser := &Parser{Data: &ParsedData{}, Lines: lines}
 
-	if _, err := parser.parseCommand(0, "build {", false, false, 1, ""); err != nil {
+	if _, err := parser.parseCommand(0, "build {", false, false, false, 1, ""); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	cmd := parser.Data.Commands[0]
@@ -1151,7 +1151,7 @@ func TestParseForBlock(t *testing.T) {
 	lines := strings.Split(input, "\n")
 	parser := &Parser{Data: &ParsedData{}, Lines: lines}
 
-	if _, err := parser.parseCommand(0, "build {", false, false, 1, ""); err != nil {
+	if _, err := parser.parseCommand(0, "build {", false, false, false, 1, ""); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if len(parser.Data.Commands) != 1 {
@@ -1197,7 +1197,7 @@ func TestParseForBlockWithIf(t *testing.T) {
 	lines := strings.Split(input, "\n")
 	parser := &Parser{Data: &ParsedData{}, Lines: lines}
 
-	if _, err := parser.parseCommand(0, "build {", false, false, 1, ""); err != nil {
+	if _, err := parser.parseCommand(0, "build {", false, false, false, 1, ""); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	cmd := parser.Data.Commands[0]
@@ -1244,7 +1244,7 @@ func TestParseForBlockNestedFor(t *testing.T) {
 	lines := strings.Split(input, "\n")
 	parser := &Parser{Data: &ParsedData{}, Lines: lines}
 
-	if _, err := parser.parseCommand(0, "build {", false, false, 1, ""); err != nil {
+	if _, err := parser.parseCommand(0, "build {", false, false, false, 1, ""); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	cmd := parser.Data.Commands[0]

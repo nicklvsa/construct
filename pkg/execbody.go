@@ -367,6 +367,7 @@ func (e *Executor) execBody(ctx *execContext, body []BodyStatement) (err error) 
 				return &FailError{Message: msg, File: ctx.srcFile, Line: stmt.SourceLine}
 			}
 
+		case StmtPort:
 		case StmtOnFail:
 			ctx.onFails = append(ctx.onFails, stmt.OnFailBody...)
 

@@ -127,6 +127,20 @@ func runImport(args []string, o *options) error {
 	if err := rejectSubcommandFlags(args, "import"); err != nil {
 		return err
 	}
+
+	// `construct import update [specs...]` refreshes remote (git) imports;
+	// a Makefile literally named "update" still converts via an explicit path.
+	if len(args) > 0 && args[0] == "update" && !fileExists("update") {
+		baseDir := "."
+		if fileName := defaultConstfileName(); fileExists(fileName) {
+			baseDir = filepath.Dir(fileName)
+		}
+		if _, err := pkg.UpdateGitImports(baseDir, args[1:]); err != nil {
+			return exitAt(1, "%v", err)
+		}
+		return nil
+	}
+
 	if len(args) > 0 {
 		input = args[0]
 	}
@@ -134,7 +148,7 @@ func runImport(args []string, o *options) error {
 		output = args[1]
 	}
 	if len(args) > 2 {
-		return exitAt(2, "usage: construct import [Makefile] [output]")
+		return exitAt(2, "usage: construct import [Makefile] [output] | construct import update [specs...]")
 	}
 
 	content, err := os.ReadFile(input)

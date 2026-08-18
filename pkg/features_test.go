@@ -47,7 +47,7 @@ func TestElseIfParsing(t *testing.T) {
 }`
 	lines := strings.Split(in, "\n")
 	p := &Parser{Data: &ParsedData{}, Lines: lines}
-	if _, err := p.parseCommand(0, "build {", false, false, 1, ""); err != nil {
+	if _, err := p.parseCommand(0, "build {", false, false, false, 1, ""); err != nil {
 		t.Fatalf("parse: %v", err)
 	}
 	cmd := p.Data.Commands[0]
@@ -2188,7 +2188,7 @@ func TestOnChangeHeaderGrammar(t *testing.T) {
 	}
 	for _, tc := range cases {
 		p := &Parser{Data: &ParsedData{}, Lines: []string{tc.header, "    $ echo x", "}"}}
-		if _, err := p.parseCommand(0, tc.header, false, false, 1, ""); err != nil {
+		if _, err := p.parseCommand(0, tc.header, false, false, false, 1, ""); err != nil {
 			t.Fatalf("%q: %v", tc.header, err)
 		}
 		cmd := p.Data.Commands[0]

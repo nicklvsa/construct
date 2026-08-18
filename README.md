@@ -23,6 +23,8 @@ construct [options] [Constfile] [commands...]
 | `list` | List all available commands |
 | `init [template]` | Scaffold a Constfile (`minimal`, `go`, `python`, `node`, `rust`, `monorepo`; `--force` to overwrite) |
 | `import [Makefile] [out]` | Convert a Makefile to a Constfile (best-effort; `--force` to overwrite) |
+| `import update [specs...]` | Refresh remote recipe imports to their ref's latest commit |
+| `dev [services...]` | Supervise long-running `service` commands (restart, ports, Ctrl-C stops all) |
 | `shell [command]` | Start a shell with a command's env block, workdir, or container (`--container IMG` for ad-hoc) |
 | `doctor` | Diagnose the environment, Constfile, tools, and cloud file |
 | `stats` | Show per-command timing history from `.construct-cache/run-state.json` |
@@ -155,6 +157,7 @@ Available in variable values, `env` blocks, `switch` expressions, and
 | `glob(pattern)` | matching files as a list |
 | `sort(list)`, `uniq(list)`, `join(list, sep)`, `split(s, sep)` | list helpers |
 | `env("NAME")` | an environment variable's value |
+| `os()` / `arch()` | the platform (`darwin`, `linux`, `windows`) and architecture (`amd64`, `arm64`) |
 | `state("name")` / `@state("name")` | a value persisted by a `state` declaration |
 | `exists(path)`, `missing(path)`, `require(tool)` | "true"/"false" checks |
 
@@ -266,6 +269,81 @@ deploy < lib.build {
   alone, so shadowing keeps working.
 - The same file may be imported twice under different namespaces.
 - Nested namespaces compose: `lib` importing `sub` as `sub` yields `lib.sub.*`.
+
+#### Conditional imports
+
+An import can carry a condition; when it evaluates false, the import is
+skipped entirely. `on` matches platforms (`darwin`, `linux`, `windows`,
+`macos` as an alias for darwin, comma-separated for several); `if` accepts the
+full condition language (`exists`, `glob`, `require`, `os("...")`,
+`arch("...")`, `@ENV` refs, and variables defined above the import):
+
+```
+import "mac.constfile" on macos
+import "linux.constfile" on linux, windows
+import "local.constfile" if exists("local.constfile")
+import "ci.constfile" if "@CI" == "true" && require("docker")
+```
+
+#### Remote recipe imports
+
+`import git` fetches a Constfile from a git repository — shared build recipes
+without a package manager:
+
+```
+import git "acme/const-recipes"                 # GitHub shorthand
+import git "github.com/acme/recipes/tools@v2"   # subdir + tag/branch/SHA pin
+import git "gitlab.com/acme/recipes" as recipes
+```
+
+- The repo's `Constfile` (at the root or the given subpath) is imported like a
+  local file, with all namespacing rules. Without `as`, the import is
+  namespaced by the repository name.
+- The first fetch records the commit in `.construct.lock` next to your
+  Constfile; after that, builds use the pinned copy from
+  `.construct-cache/imports/` and work offline. Commit the lock file.
+- `construct import update [specs...]` re-fetches at the pinned ref's latest
+  commit (or the default branch for unpinned imports) and rewrites the lock;
+  imports pinned to a commit SHA never move.
+- Private repos use your local git credentials (ssh remotes like
+  `git@github.com:acme/recipes.git` work as-is).
+
+### Services (construct dev)
+
+Commands declared with `service` are long-running processes that
+`construct dev` supervises — a Procfile runner built into the build tool:
+
+```
+service api {
+    port 8080
+    $ go run ./api
+}
+
+service web < api {
+    port 5173
+    onchange src/**.tsx
+    $ npm run dev
+}
+
+dev < api, web {
+    $ docker compose up -d      # runs once as setup
+}
+```
+
+- `construct dev` runs the aggregator's (or services') non-service
+  prerequisites to completion first, runs the aggregator body once as setup,
+  then starts the services in dependency order.
+- `port N` marks readiness: dependents start only once the port accepts
+  connections (90s timeout, then a warning).
+- Crashed services restart with backoff (1s doubling to 10s, reset after a
+  30s run); `onchange` globs restart a service the moment its inputs change.
+- Output is interleaved with `[service]` prefixes. Ctrl-C stops everything
+  (twice to force).
+- `construct dev api` starts a subset; `construct dev <cmd>` treats any
+  non-service command as the aggregator (its service prereqs are supervised,
+  its body is the setup). A regular command that depends on a service is an
+  error — invert the dependency. Running a service directly
+  (`construct api`) still just runs it once.
 
 ### Doc Comments
 

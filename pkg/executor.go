@@ -330,6 +330,43 @@ func (e *Executor) EvaluateCommand(command *Command) error {
 	return e.evaluate(command, "", false)
 }
 
+func (e *Executor) RunServiceBody(command *Command) error {
+	resolveValue := func(s, scope string) string {
+		s = resolveVarRefs(s, func(name string) (string, bool) {
+			return e.StructuredParse.LookupVariable(name, scope)
+		})
+		return ResolveEnvRefs(s)
+	}
+	ctx := &execContext{
+		target:      command,
+		srcFile:     command.SourceFile,
+		forcePrefix: true,
+		container:   e.resolveContainer(resolveValue(command.Container, command.Name)),
+	}
+	var ctxCancel context.CancelFunc
+	if command.Timeout != "" {
+		if d, err := time.ParseDuration(command.Timeout); err == nil {
+			ctx.runCtx, ctxCancel = context.WithTimeout(e.effectiveRunCtx(ctx), d)
+		}
+	}
+	if ctxCancel != nil {
+		defer ctxCancel()
+	}
+	cmdEnv := slices.Clone(e.env)
+	ctx.env = &cmdEnv
+	if ctx.container != "" {
+		if f, err := os.CreateTemp("", "construct-env-"); err == nil {
+			for _, kv := range containerForwardedEnv(cmdEnv) {
+				fmt.Fprintln(f, kv)
+			}
+			f.Close()
+			ctx.envFile = f.Name()
+			defer os.Remove(ctx.envFile)
+		}
+	}
+	return e.execBody(ctx, e.bodyFor(command))
+}
+
 func (e *Executor) evaluate(command *Command, prereqDir string, isPrereq bool) error {
 	if e.runs == nil {
 		return e.executeCommand(command, prereqDir, isPrereq)

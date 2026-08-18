@@ -9,38 +9,125 @@ import (
 	"strings"
 )
 
-func parseImportSpec(line string) (path, ns string, err error) {
+type importSpec struct {
+	path  string
+	ns    string
+	cond  string
+	isGit bool
+}
+
+func lastIndexOutsideQuotes(s, marker string) int {
+	inQuote := false
+	for i := len(s) - 1; i >= 0; i-- {
+		if s[i] == '"' {
+			inQuote = !inQuote
+			continue
+		}
+		if inQuote {
+			continue
+		}
+		if strings.HasPrefix(s[i:], marker) {
+			return i
+		}
+	}
+	return -1
+}
+
+func parseImportSpec(line string) (importSpec, error) {
 	spec := strings.TrimSpace(strings.TrimPrefix(line, "import"))
+	out := importSpec{}
+
+	if rest, ok := strings.CutPrefix(spec, "git "); ok {
+		out.isGit = true
+		spec = strings.TrimSpace(rest)
+	}
+
+	var condRaw, condKind string
+	ifIdx := lastIndexOutsideQuotes(spec, " if ")
+	onIdx := lastIndexOutsideQuotes(spec, " on ")
+	idx, kind := ifIdx, "if"
+	if onIdx > ifIdx {
+		idx, kind = onIdx, "on"
+	}
+	if idx >= 0 {
+		condRaw = strings.TrimSpace(spec[idx+4:])
+		spec = strings.TrimSpace(spec[:idx])
+		condKind = kind
+	}
 
 	if asIdx := strings.LastIndex(spec, " as "); asIdx >= 0 {
-		ns = strings.TrimSpace(spec[asIdx+len(" as "):])
+		out.ns = strings.TrimSpace(spec[asIdx+len(" as "):])
 		spec = strings.TrimSpace(spec[:asIdx])
-		if !isValidIdent(ns) {
-			return "", "", fmt.Errorf("invalid import namespace %q (expected an identifier)", ns)
+		if !isValidIdent(out.ns) {
+			return importSpec{}, fmt.Errorf("invalid import namespace %q (expected an identifier)", out.ns)
 		}
 	}
 
-	spec = strings.Trim(spec, `"`)
-	if spec == "" {
-		return "", "", fmt.Errorf("import requires a file path")
+	out.path = strings.Trim(spec, `"`)
+	if out.path == "" {
+		return importSpec{}, fmt.Errorf("import requires a file path")
 	}
-	return spec, ns, nil
+	if strings.ContainsAny(out.path, `"`) {
+		return importSpec{}, fmt.Errorf("malformed import path %q", out.path)
+	}
+
+	switch condKind {
+	case "if":
+		if condRaw == "" {
+			return importSpec{}, fmt.Errorf("import condition is empty (import %q if ...)", out.path)
+		}
+		out.cond = condRaw
+	case "on":
+		var checks []string
+		for item := range strings.SplitSeq(condRaw, ",") {
+			item = strings.TrimSpace(strings.Trim(strings.TrimSpace(item), `"`))
+			switch item {
+			case "":
+			case "macos":
+				checks = append(checks, `os("darwin")`)
+			default:
+				checks = append(checks, fmt.Sprintf("os(%q)", item))
+			}
+		}
+		if len(checks) == 0 {
+			return importSpec{}, fmt.Errorf("import %q: 'on' needs at least one platform (darwin, linux, windows)", out.path)
+		}
+		out.cond = strings.Join(checks, " || ")
+	}
+	return out, nil
 }
 
 func (p *Parser) processImport(line string) error {
-	spec, ns, err := parseImportSpec(line)
+	spec, err := parseImportSpec(line)
 	if err != nil {
 		return err
 	}
 
-	path := spec
-	if !filepath.IsAbs(path) {
-		path = filepath.Join(importBaseDir(p.InputFile), spec)
+	if spec.cond != "" {
+		resolved := p.tryEvalExpression(spec.cond, nil, nil, 0)
+		if !evaluateConditionWithBase(resolved, importBaseDir(p.InputFile)) {
+			return nil
+		}
 	}
+
+	path := spec.path
+	if spec.isGit {
+		resolved, defaultNS, err := ensureGitImport(spec.path, importBaseDir(p.InputFile))
+		if err != nil {
+			return err
+		}
+		path = resolved
+		if spec.ns == "" {
+			spec.ns = defaultNS
+		}
+	} else if !filepath.IsAbs(path) {
+		path = filepath.Join(importBaseDir(p.InputFile), spec.path)
+	}
+	ns := spec.ns
 
 	cleanPath := filepath.Clean(path)
 	if p.importStack[cleanPath] {
-		return fmt.Errorf("circular import of %q", spec)
+		return fmt.Errorf("circular import of %q", spec.path)
 	}
 
 	dedupKey := cleanPath
@@ -62,7 +149,7 @@ func (p *Parser) processImport(line string) error {
 	}
 	content, err := readImport(cleanPath)
 	if err != nil {
-		return fmt.Errorf("failed to read import %q: %w", spec, err)
+		return fmt.Errorf("failed to read import %q: %w", spec.path, err)
 	}
 
 	imported := NewParserFromContent(cleanPath, string(content))
@@ -77,11 +164,9 @@ func (p *Parser) processImport(line string) error {
 		renameImportNamespace(imported.Data, ns)
 	}
 
-	// Validate before merging anything so a conflicting import doesn't leave
-	// the parser half-mutated with the import's variables and sources.
 	for _, cmd := range imported.Data.Commands {
 		if existing, err := p.Data.GetCommand(cmd.Name); err == nil && existing != nil {
-			return fmt.Errorf("duplicate command %q from import %q", cmd.Name, spec)
+			return fmt.Errorf("duplicate command %q from import %q", cmd.Name, spec.path)
 		}
 	}
 
@@ -108,7 +193,7 @@ func importBaseDir(inputFile string) string {
 	if err == nil && u.Scheme == "file" {
 		p := u.Path
 		if len(p) > 2 && p[0] == '/' && p[2] == ':' {
-			p = p[1:] // strip the leading slash before the drive letter: /c:/ -> c:/
+			p = p[1:]
 		}
 		return filepath.Dir(filepath.FromSlash(p))
 	}

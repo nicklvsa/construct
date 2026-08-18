@@ -5,6 +5,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 )
@@ -167,6 +168,13 @@ func evalBuiltinCondition(cond, base string) (bool, bool) {
 	case "require":
 		_, err := exec.LookPath(arg)
 		return err == nil, true
+	case "os":
+		if arg == "macos" {
+			arg = "darwin"
+		}
+		return arg == runtime.GOOS, true
+	case "arch":
+		return arg == runtime.GOARCH, true
 	}
 	return false, false
 }

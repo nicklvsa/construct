@@ -158,6 +158,15 @@ func main() {
 		return
 	}
 
+	// `construct dev` always means service supervision, even when a command
+	// named dev exists (run that one via `construct Constfile dev`).
+	if len(positionals) > 0 && positionals[0] == "dev" {
+		if err := runDev(positionals[1:], &o); err != nil {
+			exitError(err)
+		}
+		return
+	}
+
 	// --doctor is the doctor subcommand with an optional Constfile path.
 	if o.doctor {
 		if err := runDoctor(&o, determineInputs(positionals)); err != nil {

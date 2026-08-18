@@ -34,6 +34,13 @@ func listCommands(data *pkg.ParsedData) {
 		} else {
 			fmt.Printf("  %s\n", cmd.Name)
 		}
+		if cmd.IsService {
+			port := ""
+			if cmd.Port != "" {
+				port = fmt.Sprintf(", port %s", cmd.Port)
+			}
+			fmt.Printf("    (service%s)\n", port)
+		}
 		if cmd.Description != "" {
 			for _, l := range strings.Split(cmd.Description, "\n") {
 				fmt.Printf("    %s\n", l)
@@ -78,6 +85,8 @@ func listCommandsJSON(data *pkg.ParsedData) {
 		Timeout     string          `json:"timeout,omitempty"`
 		Produces    []string        `json:"produces,omitempty"`
 		IsDefault   bool            `json:"is_default"`
+		IsService   bool            `json:"is_service,omitempty"`
+		Port        string          `json:"port,omitempty"`
 	}
 	var out []cmdInfo
 	for _, cmd := range data.Commands {
@@ -93,6 +102,8 @@ func listCommandsJSON(data *pkg.ParsedData) {
 			Timeout:     cmd.Timeout,
 			Produces:    cmd.Produces,
 			IsDefault:   cmd.IsDefault,
+			IsService:   cmd.IsService,
+			Port:        cmd.Port,
 		})
 	}
 	b, _ := json.MarshalIndent(out, "", "  ")
@@ -184,6 +195,8 @@ func printDryRunBody(body []pkg.BodyStatement, indent int) {
 			fmt.Printf("%sinput %s %q\n", prefix, stmt.Shell, stmt.Message)
 		case pkg.StmtContinue, pkg.StmtBreak:
 			fmt.Printf("%s%s\n", prefix, stmt.Type)
+		case pkg.StmtPort:
+			fmt.Printf("%sport %s\n", prefix, stmt.Shell)
 		case pkg.StmtInvoke:
 			fmt.Printf("%sinvoke %s\n", prefix, stmt.Shell)
 		case pkg.StmtEnv:
