@@ -60,6 +60,8 @@ type Executor struct {
 	stdoutSink      io.Writer
 	stderrSink      io.Writer
 	silentStatus    bool
+	recordLogs      bool
+	logBufs         map[string]*runLogBuffer
 	stdinMu         sync.Mutex    // guards stdinReader for confirm/prompt/input
 	stdinReader     *bufio.Reader // shared: buffered reads must not swallow the next prompt's input
 }
@@ -87,6 +89,7 @@ type RunRecord struct {
 	DurationMs int64     `json:"duration_ms,omitempty"`
 	End        time.Time `json:"end"`
 	Error      string    `json:"error,omitempty"`
+	Log        string    `json:"log,omitempty"` // bounded capture of the command's streamed output
 }
 
 type commandRun struct {
@@ -304,6 +307,7 @@ func (e *Executor) SetRecordRuns(v bool) {
 	e.recordRuns = v
 	if v {
 		e.runRecords = make(map[string]RunRecord)
+		e.recordLogs = true
 	}
 }
 

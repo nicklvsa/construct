@@ -290,8 +290,10 @@ func (e *Executor) runShellGroup(ctx *execContext, lines []string, strict bool, 
 
 	var buf bytes.Buffer
 	sink := e.streamSink(ctx, true)
-	cmd.Stdout = io.MultiWriter(sink, &buf)
-	cmd.Stderr = e.errSinkFor(ctx)
+	rec := e.logRecorder(ctx.target.Name)
+	e.appendRunLog(ctx.target.Name, "$ "+strings.Join(lines, "\n$ ")+"\n")
+	cmd.Stdout = io.MultiWriter(sink, &buf, rec)
+	cmd.Stderr = io.MultiWriter(e.errSinkFor(ctx), rec)
 
 	e.debugf("Running command %s (batched): %s\n", ctx.target.Name, fullCommand)
 
@@ -300,6 +302,9 @@ func (e *Executor) runShellGroup(ctx *execContext, lines []string, strict bool, 
 	err = cmd.Run()
 	if pw, ok := sink.(*linePrefixWriter); ok {
 		pw.flush()
+	}
+	if err != nil {
+		e.appendRunLog(ctx.target.Name, fmt.Sprintf("(exit %d)\n", exitCodeOf(err)))
 	}
 	e.setLastResult(ctx, exitCodeOf(err), buf.String())
 	if ctx.isPrereq {
@@ -388,6 +393,7 @@ func (e *Executor) runShellOnce(ctx *execContext, stmt BodyStatement) error {
 	if cmdLine == "" {
 		return nil
 	}
+	display := cmdLine
 	if supportsPipefail(e.shellName) {
 		cmdLine = "set -o pipefail\n" + cmdLine
 	}
@@ -417,11 +423,16 @@ func (e *Executor) runShellOnce(ctx *execContext, stmt BodyStatement) error {
 	if stream {
 		var buf bytes.Buffer
 		sink := e.streamSink(ctx, false)
-		cmd.Stdout = io.MultiWriter(sink, &buf)
-		cmd.Stderr = e.errSinkFor(ctx)
+		rec := e.logRecorder(ctx.target.Name)
+		e.appendRunLog(ctx.target.Name, "$ "+display+"\n")
+		cmd.Stdout = io.MultiWriter(sink, &buf, rec)
+		cmd.Stderr = io.MultiWriter(e.errSinkFor(ctx), rec)
 		err := cmd.Run()
 		if pw, ok := sink.(*linePrefixWriter); ok {
 			pw.flush()
+		}
+		if err != nil {
+			e.appendRunLog(ctx.target.Name, fmt.Sprintf("(exit %d)\n", exitCodeOf(err)))
 		}
 		e.setLastResult(ctx, exitCodeOf(err), buf.String())
 		if err != nil && !ignoreErr {
@@ -448,6 +459,8 @@ func (e *Executor) runShellOnce(ctx *execContext, stmt BodyStatement) error {
 		}
 		output = append(output, stderr...)
 	}
+
+	e.appendRunLog(ctx.target.Name, "$ "+display+"\n"+string(output)+"\n")
 
 	e.setLastResult(ctx, exitCodeOf(err), string(output))
 

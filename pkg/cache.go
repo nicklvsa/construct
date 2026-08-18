@@ -68,6 +68,9 @@ func (e *Executor) recordRun(name string, rec RunRecord) {
 	if !e.recordRuns {
 		return
 	}
+	if e.recordLogs {
+		rec.Log = e.takeRunLog(name)
+	}
 	e.mu.Lock()
 	if e.runRecords == nil {
 		e.runRecords = make(map[string]RunRecord)

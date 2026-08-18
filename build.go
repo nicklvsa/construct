@@ -318,6 +318,16 @@ func executeBuild(inputs *ConstructInput, o *options, runCtx context.Context) ([
 		inputs.Commands = chosen
 	}
 
+	if o.since != "" {
+		proceed, err := applySince(inputs, o, data)
+		if err != nil {
+			return nil, err
+		}
+		if !proceed {
+			return collectWatchFiles(inputs.FileName, data), nil
+		}
+	}
+
 	if o.dryRun {
 		fmt.Println("Dry run mode - commands that would be executed:")
 		for _, cmd := range data.Commands {

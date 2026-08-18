@@ -472,30 +472,28 @@ func runTargets() error {
 	return nil
 }
 
-func runCompletion(args []string, o *options) error {
+func runCompletion(args []string) error {
 	if len(args) == 0 {
 		return exitAt(2, "usage: construct completion <bash|zsh|fish>")
 	}
-	var err error
+	var script string
 	switch args[0] {
 	case "bash":
-		err = completionBash()
+		script = completionBash()
 	case "zsh":
-		err = completionZsh()
+		script = completionZsh()
 	case "fish":
-		err = completionFish()
+		script = completionFish()
 	default:
 		return exitAt(2, "unknown shell %q (bash, zsh, fish)", args[0])
 	}
-	if err != nil {
-		return err
-	}
+	fmt.Print(script)
 	fmt.Fprintf(os.Stderr, "# install: source the script from your shell profile\n")
 	return nil
 }
 
-func completionBash() error {
-	fmt.Printf(`_construct() {
+func completionBash() string {
+	return fmt.Sprintf(`_construct() {
     local cur commands flags
     COMPREPLY=()
     cur="${COMP_WORDS[COMP_CWORD]}"
@@ -509,11 +507,10 @@ func completionBash() error {
 }
 complete -F _construct construct
 `, flagWords())
-	return nil
 }
 
-func completionZsh() error {
-	fmt.Printf(`#compdef construct
+func completionZsh() string {
+	return fmt.Sprintf(`#compdef construct
 _construct() {
     local -a commands flags
     commands=(${(f)"$(construct __targets 2>/dev/null)"})
@@ -525,23 +522,23 @@ _construct() {
 }
 _construct "$@"
 `, zshFlagArgs())
-	return nil
 }
 
-func completionFish() error {
-	fmt.Println("complete -c construct -f")
-	fmt.Println(`complete -c construct -a '(construct __targets 2>/dev/null)' -d command`)
+func completionFish() string {
+	var b strings.Builder
+	b.WriteString("complete -c construct -f\n")
+	b.WriteString("complete -c construct -a '(construct __targets 2>/dev/null)' -d command\n")
 	for _, f := range flagList() {
 		name, _, _ := strings.Cut(f[0], "/")
-		fmt.Printf("complete -c construct -l %s -d %q\n", strings.TrimPrefix(name, "--"), f[1])
+		fmt.Fprintf(&b, "complete -c construct -l %s -d %q\n", strings.TrimPrefix(name, "--"), f[1])
 	}
-	return nil
+	return b.String()
 }
 
 func flagWords() string {
 	var words []string
 	for _, f := range flagList() {
-		for _, w := range strings.Split(f[0], "/") {
+		for w := range strings.SplitSeq(f[0], "/") {
 			words = append(words, w)
 		}
 	}
@@ -551,7 +548,7 @@ func flagWords() string {
 func zshFlagArgs() string {
 	var parts []string
 	for _, f := range flagList() {
-		long := strings.SplitN(f[0], "/", 2)[0]
+		long, _, _ := strings.Cut(f[0], "/")
 		parts = append(parts, fmt.Sprintf("%q[%q]", long, f[1]))
 	}
 	return strings.Join(parts, " ")

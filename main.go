@@ -87,7 +87,7 @@ func exitError(err error) {
 	os.Exit(1)
 }
 
-var subcommandNames = []string{"init", "import", "shell", "doctor", "stats", "cloud", "clean", "lint", "graph", "completion", "fmt", "ui"}
+var subcommandNames = []string{"init", "import", "shell", "doctor", "stats", "cloud", "clean", "lint", "graph", "completion", "fmt", "ui", "runs", "mcp", "learn", "install"}
 
 func isSubcommandName(s string) bool {
 	return slices.Contains(subcommandNames, s)
@@ -192,11 +192,19 @@ func main() {
 		case "graph":
 			err = runGraph(positionals[1:], &o)
 		case "completion":
-			err = runCompletion(positionals[1:], &o)
+			err = runCompletion(positionals[1:])
 		case "fmt":
 			err = runFmt(positionals[1:], &o)
 		case "ui":
 			err = runUI(positionals[1:], &o)
+		case "runs":
+			err = runRuns(positionals[1:], &o)
+		case "mcp":
+			err = runMCP(positionals[1:])
+		case "learn":
+			err = runLearn(positionals[1:], &o)
+		case "install":
+			err = runInstall(positionals[1:], &o)
 		}
 		if err != nil {
 			exitError(err)
@@ -221,6 +229,11 @@ func runBuildMain(o *options, inputs *ConstructInput) {
 
 	if o.watch && o.repeat > 0 {
 		fmt.Fprintln(os.Stderr, "--repeat cannot be combined with --watch")
+		os.Exit(2)
+	}
+
+	if o.since != "" && o.showList {
+		fmt.Fprintln(os.Stderr, "--since cannot be combined with --list")
 		os.Exit(2)
 	}
 
