@@ -366,7 +366,6 @@ func executeBuild(inputs *ConstructInput, o *options, runCtx context.Context) ([
 
 	execErr := executor.Execute(inputs.Commands)
 	if o.flame {
-		// Render even on failure — the flame graph is most useful then.
 		renderFlame(executor.FlameRows())
 	}
 	if execErr != nil {

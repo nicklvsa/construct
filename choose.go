@@ -217,7 +217,7 @@ func renderChooser(s *chooseState, width, height int) string {
 		b.WriteString(line)
 		b.WriteString("\r\n")
 	}
-	b.WriteString(fmt.Sprintf("filter: %s\r\n[%d/%d selected]", string(s.filter), len(s.selected), len(s.all)))
+	fmt.Fprintf(&b, "filter: %s\r\n[%d/%d selected]", string(s.filter), len(s.selected), len(s.all))
 	return b.String()
 }
 
@@ -335,7 +335,7 @@ func chooseTargetsLine(items []chooseItem, data *pkg.ParsedData) ([]string, erro
 		fmt.Print("> ")
 		line, err := reader.ReadString('\n')
 		if err != nil {
-			return nil, err // EOF / Ctrl-D aborts
+			return nil, err
 		}
 
 		var selected []string
