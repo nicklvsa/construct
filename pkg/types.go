@@ -379,7 +379,6 @@ type BodyStatement struct {
 	Timeout      string          `json:"timeout,omitempty"`
 	SwitchExpr   string          `json:"switch_expr,omitempty"`
 	Cases        []SwitchCase    `json:"cases,omitempty"`
-	Dir          string          `json:"dir,omitempty"`
 	BuiltinArgs  string          `json:"builtin_args,omitempty"`
 	Tolerant     bool            `json:"tolerant,omitempty"`
 	Parallel     bool            `json:"parallel,omitempty"`
@@ -396,7 +395,6 @@ type Command struct {
 	IsService       bool        `json:"is_service,omitempty"`
 	Port            string      `json:"port,omitempty"`
 	LazyEval        *LazyOutput `json:"lazy_output"`
-	IsPrereq        bool        `json:"is_prereq"`
 
 	cacheGlobals      []string          // globals the command's refs reach, for cache keys
 	cacheGlobalsExact bool              // false (hand-built data) keys on every global

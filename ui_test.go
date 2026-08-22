@@ -88,9 +88,10 @@ func TestUIServerTokenEnforced(t *testing.T) {
 	if resp.StatusCode != http.StatusForbidden {
 		t.Errorf("no token = %d, want 403", resp.StatusCode)
 	}
+	// Tokens are header-only: query strings leak into history and logs.
 	resp, _ = uiDo(t, ts, "GET", "/api/state?t=testtoken", "", nil)
-	if resp.StatusCode != http.StatusOK {
-		t.Errorf("query token = %d, want 200", resp.StatusCode)
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("query token = %d, want 403", resp.StatusCode)
 	}
 }
 

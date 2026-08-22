@@ -169,7 +169,7 @@ func collectStmtWildcardRefs(stmts []BodyStatement, out map[string]bool) {
 func collectStmtRefsWith(stmts []BodyStatement, out map[string]bool, names func(string) []string) {
 	for i := range stmts {
 		stmt := &stmts[i]
-		for _, str := range []string{stmt.Shell, stmt.Cond, stmt.LoopItems, stmt.SwitchExpr, stmt.Message, stmt.BuiltinArgs, stmt.Dir} {
+		for _, str := range []string{stmt.Shell, stmt.Cond, stmt.LoopItems, stmt.SwitchExpr, stmt.Message, stmt.BuiltinArgs} {
 			for _, n := range names(str) {
 				out[n] = true
 			}

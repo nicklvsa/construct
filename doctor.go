@@ -95,7 +95,6 @@ func runDoctor(o *options, inputs *ConstructInput) error {
 			markRefs(used, stmt.SwitchExpr)
 			markRefs(used, stmt.Message)
 			markRefs(used, stmt.BuiltinArgs)
-			markRefs(used, stmt.Dir)
 			for _, c := range stmt.Cases {
 				for _, v := range c.Values {
 					markRefs(used, v)

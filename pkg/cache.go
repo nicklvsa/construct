@@ -159,18 +159,22 @@ func (e *Executor) flushState() {
 	state := e.state
 	e.stateDirty = false
 	e.mu.Unlock()
+
 	if !dirty || state == nil {
 		return
 	}
-	if err := saveJSONFile(e.statePath(), state); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: could not save state to %s: %v\n", e.statePath(), err)
-		e.mu.Lock()
-		e.stateDirty = true // retry on the next flush
-		e.mu.Unlock()
+
+	var err error
+	for range 3 {
+		if err = saveJSONFile(e.statePath(), state); err == nil {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
+
+	fmt.Fprintf(os.Stderr, "warning: could not save state to %s: %v\n", e.statePath(), err)
 }
 
-// saveJSONFile writes v as indented JSON, creating the parent directory.
 func saveJSONFile(path string, v any) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		return err
@@ -189,10 +193,12 @@ func loadFileCache(dir string) fileCache {
 	if err != nil {
 		return fileCache{}
 	}
+
 	var fc fileCache
 	if err := json.Unmarshal(data, &fc); err != nil || fc == nil {
 		return fileCache{}
 	}
+
 	return fc
 }
 
@@ -224,15 +230,16 @@ func (e *Executor) hashFiles(files []string) []string {
 		hashes := parallelHash(paths)
 		e.mu.Lock()
 		for k, i := range missing {
-			// Don't memoize failed hashes (""): a transiently unreadable file
-			// should be retried on the next check, not cached as empty forever.
 			if hashes[k] != "" {
 				e.hashMemo[paths[k]] = hashes[k]
 			}
+
 			out[i] = hashes[k]
 		}
+
 		e.mu.Unlock()
 	}
+
 	return out
 }
 
@@ -240,10 +247,13 @@ func (e *Executor) invalidateHashes(paths []string) {
 	if len(paths) == 0 {
 		return
 	}
+
 	e.mu.Lock()
+
 	for _, p := range paths {
 		delete(e.hashMemo, p)
 	}
+
 	e.mu.Unlock()
 }
 
@@ -252,12 +262,14 @@ func hashFile(path string) string {
 	if err != nil {
 		return ""
 	}
+
 	defer f.Close()
 
 	h := sha256.New()
 	if _, err := io.Copy(h, f); err != nil {
 		return ""
 	}
+
 	return hex.EncodeToString(h.Sum(nil))
 }
 
@@ -266,16 +278,20 @@ func expandFileDeps(patterns []string, workDir string) []string {
 	if wd == "" {
 		wd = "."
 	}
+
 	var files []string
 	for _, pattern := range patterns {
 		full := filepath.Join(wd, pattern)
 		matches, err := filepath.Glob(full)
+
 		if err != nil || len(matches) == 0 {
 			files = append(files, full)
 			continue
 		}
+
 		files = append(files, matches...)
 	}
+
 	return files
 }
 
@@ -435,12 +451,16 @@ func (e *Executor) flushCache() {
 	fc := e.cache
 	e.cacheDirty = false
 	e.mu.Unlock()
-	if dirty && fc != nil {
-		if err := fc.save(e.cacheDirFor()); err != nil {
-			fmt.Fprintf(os.Stderr, "warning: could not save the cache manifest: %v\n", err)
-			e.mu.Lock()
-			e.cacheDirty = true // retry on the next flush
-			e.mu.Unlock()
-		}
+	if !dirty || fc == nil {
+		return
 	}
+	// Final flush: retry inline instead of marking for a next flush.
+	var err error
+	for range 3 {
+		if err = fc.save(e.cacheDirFor()); err == nil {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	fmt.Fprintf(os.Stderr, "warning: could not save the cache manifest: %v\n", err)
 }

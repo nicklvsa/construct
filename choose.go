@@ -231,6 +231,14 @@ func truncate(s string, n int) string {
 	return string([]rune(s)[:n-1]) + "..."
 }
 
+func truncateRunes(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:max(n-1, 0)]) + "..."
+}
+
 func termSize(lastW, lastH int) (int, int) {
 	w, h, err := term.GetSize(int(os.Stdout.Fd()))
 	if err != nil || w <= 0 || h <= 0 {

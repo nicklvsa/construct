@@ -4,9 +4,38 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
+
+func TestInstallHookRefusesForeignScript(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	dir := t.TempDir()
+	old, _ := os.Getwd()
+	os.Chdir(dir)
+	t.Cleanup(func() { os.Chdir(old) })
+	run := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	run("init", "-q")
+	hooksDir := filepath.Join(dir, ".construct-hooks")
+	if err := os.MkdirAll(hooksDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(hooksDir, "pre-commit"), []byte("#!/bin/sh\nrm -rf /\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := installHooks([]string{"pre-commit"}, nil, false); err == nil {
+		t.Error("expected refusal to overwrite a foreign hook script")
+	}
+}
 
 func TestInstallShellCompletionZsh(t *testing.T) {
 	home := t.TempDir()
@@ -88,12 +117,14 @@ func TestInstallHooks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("hook missing: %v", err)
 	}
-	if !strings.Contains(string(script), "exec construct build test") {
-		t.Errorf("hook runs wrong command: %s", script)
+	if !strings.Contains(string(script), "'build' 'test'") {
+		t.Errorf("hook does not run the requested targets safely: %s", script)
 	}
-	info, _ := os.Stat(filepath.Join(dir, ".construct-hooks", "pre-push"))
-	if info.Mode()&0111 == 0 {
-		t.Error("hook is not executable")
+	if runtime.GOOS != "windows" {
+		info, _ := os.Stat(filepath.Join(dir, ".construct-hooks", "pre-push"))
+		if info.Mode()&0111 == 0 {
+			t.Error("hook is not executable")
+		}
 	}
 	if out, err := exec.Command("git", "config", "--get", "core.hooksPath").Output(); err != nil || strings.TrimSpace(string(out)) != ".construct-hooks" {
 		t.Errorf("core.hooksPath not set: %s %v", out, err)

@@ -1,14 +1,17 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/nicklvsa/construct/pkg"
@@ -81,16 +84,15 @@ func runCloud(args []string, o *options, inputs *ConstructInput) error {
 	rest := args[1:]
 
 	baseDir := filepath.Dir(inputs.FileName)
-	executor := pkg.NewExecutor(&pkg.ParsedData{}, o.debug, false)
-	executor.SetBaseDir(baseDir)
-	if data, err := parseConstfileOptional(inputs.FileName); err != nil {
-		return err
-	} else if data != nil {
-		executor.SetParsedData(data)
-	}
-
 	switch sub {
 	case "list":
+		executor := pkg.NewExecutor(&pkg.ParsedData{}, o.debug, false)
+		executor.SetBaseDir(baseDir)
+		if data, err := parseConstfileOptional(inputs.FileName); err != nil {
+			return err
+		} else if data != nil {
+			executor.SetParsedData(data)
+		}
 		entries, err := executor.CloudList()
 		if err != nil {
 			return err
@@ -104,6 +106,13 @@ func runCloud(args []string, o *options, inputs *ConstructInput) error {
 			fmt.Printf("%-20s %d\n", en.Name, en.BodyStmts)
 		}
 	case "pull":
+		executor := pkg.NewExecutor(&pkg.ParsedData{}, o.debug, false)
+		executor.SetBaseDir(baseDir)
+		if data, err := parseConstfileOptional(inputs.FileName); err != nil {
+			return err
+		} else if data != nil {
+			executor.SetParsedData(data)
+		}
 		n, err := executor.CloudPull(rest, o.output)
 		if err != nil {
 			return err
@@ -114,6 +123,13 @@ func runCloud(args []string, o *options, inputs *ConstructInput) error {
 		}
 		fmt.Printf("pulled %d cloud command(s) into %s\n", n, target)
 	case "push":
+		executor := pkg.NewExecutor(&pkg.ParsedData{}, o.debug, false)
+		executor.SetBaseDir(baseDir)
+		if data, err := parseConstfileOptional(inputs.FileName); err != nil {
+			return err
+		} else if data != nil {
+			executor.SetParsedData(data)
+		}
 		n, err := executor.CloudPush(rest, o.fileName)
 		if err != nil {
 			return err
@@ -143,13 +159,15 @@ func gitRemoteRepo() (string, error) {
 	return repo, nil
 }
 
-func currentGitBranch() string {
-	if out, err := exec.Command("git", "branch", "--show-current").Output(); err == nil {
-		if b := strings.TrimSpace(string(out)); b != "" {
-			return b
-		}
+func currentGitBranch() (string, error) {
+	out, err := exec.Command("git", "branch", "--show-current").Output()
+	if err != nil {
+		return "", fmt.Errorf("could not detect the current git branch (git branch --show-current): %w; pass --ref to override", err)
 	}
-	return "main"
+	if b := strings.TrimSpace(string(out)); b != "" {
+		return b, nil
+	}
+	return "", errors.New("no current git branch (detached HEAD?); pass --ref to override")
 }
 
 func actionsClient(o *options) (*pkg.GHClient, error) {
@@ -168,12 +186,19 @@ func actionsClient(o *options) (*pkg.GHClient, error) {
 	return pkg.NewGHClient(repo, token, os.Getenv("CONSTRUCT_GITHUB_API")), nil
 }
 
-func actionsWorkflowPath(workflow string) string {
-	return filepath.Join(".github", "workflows", workflow)
+func actionsWorkflowPath(workflow string) (string, error) {
+	if workflow == "" || workflow == "." || workflow == ".." ||
+		strings.ContainsAny(workflow, `/\`) {
+		return "", fmt.Errorf("invalid workflow name %q (must be a plain filename inside .github/workflows)", workflow)
+	}
+	return filepath.Join(".github", "workflows", filepath.Base(filepath.FromSlash(workflow))), nil
 }
 
 func ensureActionsWorkflow(workflow string) (bool, error) {
-	path := actionsWorkflowPath(workflow)
+	path, err := actionsWorkflowPath(workflow)
+	if err != nil {
+		return false, err
+	}
 	if _, err := os.Stat(path); err == nil {
 		return false, nil
 	}
@@ -247,7 +272,11 @@ func runCloudSubmit(args []string, o *options) error {
 		}
 	}
 	if ref == "" {
-		ref = currentGitBranch()
+		var err error
+		ref, err = currentGitBranch()
+		if err != nil {
+			return err
+		}
 	}
 
 	// Route -e overrides into workflow inputs, warning on secret-looking keys.
@@ -262,33 +291,42 @@ func runCloudSubmit(args []string, o *options) error {
 	}
 	argsLine := strings.Join(append(extra, envArgs...), " ")
 
-	if _, err := os.Stat(actionsWorkflowPath(workflow)); err != nil {
+	wfPath, err := actionsWorkflowPath(workflow)
+	if err != nil {
+		return err
+	}
+	if _, err := os.Stat(wfPath); err != nil {
 		if noInit {
-			return fmt.Errorf("%s not found (create it with `construct cloud init-actions`)", actionsWorkflowPath(workflow))
+			return fmt.Errorf("%s not found (create it with `construct cloud init-actions`)", wfPath)
 		}
 		created, err := ensureActionsWorkflow(workflow)
 		if err != nil {
 			return err
 		}
 		if created && !force {
-			fmt.Printf("created %s\n", actionsWorkflowPath(workflow))
+			fmt.Printf("created %s\n", wfPath)
 			return exitAt(1, "commit and push the workflow, then re-run `construct cloud submit` (or pass --force to dispatch now)")
 		}
 	}
 
-	o.repo = repo // already resolved; keeps actionsClient from re-querying the remote
+	o.repo = repo
 	client, err := actionsClient(o)
 	if err != nil {
 		return err
 	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 	inputs := map[string]string{
 		"targets": strings.Join(targets, " "),
 		"args":    argsLine,
 	}
-	t0 := time.Now()
-	if err := client.Dispatch(workflow, ref, inputs); err != nil {
+
+	t0 := time.Now().Add(-2 * time.Minute)
+	if err := client.Dispatch(ctx, workflow, ref, inputs); err != nil {
 		return err
 	}
+
 	if jsonOut {
 		out, err := json.Marshal(map[string]any{
 			"submitted": true,
@@ -303,33 +341,42 @@ func runCloudSubmit(args []string, o *options) error {
 	} else {
 		fmt.Printf("dispatched %s on %s (%s @ %s)\n", workflow, repo, ref, strings.Join(targets, " "))
 	}
+
 	if !wait {
 		return nil
 	}
 
 	var runID int64
 	for range 12 {
-		r, err := client.LatestDispatchRun(workflow, t0)
+		r, err := client.LatestDispatchRun(ctx, workflow, t0)
 		if err == nil {
 			runID = r.ID
 			break
 		}
+		if ctx.Err() != nil {
+			return fmt.Errorf("interrupted while waiting for the run to appear")
+		}
 		time.Sleep(5 * time.Second)
 	}
+
 	if runID == 0 {
 		return fmt.Errorf("the run did not appear within 60s; check Actions at https://github.com/%s/actions", repo)
 	}
+
 	fmt.Printf("run #%d: https://github.com/%s/actions/runs/%d\n", runID, repo, runID)
-	return waitActionsRun(client, runID, redact, jsonOut)
+	return waitActionsRun(ctx, client, runID, redact, jsonOut)
 }
 
-func waitActionsRun(client *pkg.GHClient, runID int64, redact []string, jsonOut bool) error {
+func waitActionsRun(ctx context.Context, client *pkg.GHClient, runID int64, redact []string, jsonOut bool) error {
 	seen := make(map[int64]int64)
 	errStreak := 0
 	for {
-		run, err := client.Run(runID)
+		run, err := client.Run(ctx, runID)
 		if err != nil {
-			// Tolerate a few transient API failures before giving up.
+			if ctx.Err() != nil {
+				return fmt.Errorf("interrupted")
+			}
+
 			errStreak++
 			if errStreak >= 3 {
 				return err
@@ -337,43 +384,58 @@ func waitActionsRun(client *pkg.GHClient, runID int64, redact []string, jsonOut 
 		} else {
 			errStreak = 0
 		}
-		jobs, err := client.Jobs(runID)
+
+		jobs, err := client.Jobs(ctx, runID)
 		if err == nil {
 			for _, j := range jobs {
 				if j.Status == "queued" || j.Status == "in_progress" || (j.Conclusion == "" && j.Status == "completed") {
 					continue
 				}
-				logs, lerr := client.JobLogs(j.ID)
+				logs, lerr := client.JobLogs(ctx, j.ID)
 				if lerr != nil {
 					continue
 				}
+
 				text := string(logs)
 				if len(redact) > 0 {
 					text = pkg.RedactValues(text, redact)
 				}
+
+				if int64(len(text)) < seen[j.ID] {
+					seen[j.ID] = 0
+				}
+
 				if int64(len(text)) > seen[j.ID] {
 					fmt.Print(text[seen[j.ID]:])
 					seen[j.ID] = int64(len(text))
 				}
 			}
 		}
+
 		if run.Status == "completed" {
 			if jsonOut {
 				out, err := json.Marshal(map[string]any{
 					"run_id":     runID,
 					"conclusion": run.Conclusion,
 				})
+
 				if err != nil {
 					return err
 				}
+
 				fmt.Println(string(out))
 			}
+
 			if code := pkg.RunConclusionToExit(run.Conclusion); code != 0 {
 				return exitAt(code, "run #%d concluded: %s", runID, run.Conclusion)
 			}
 			return nil
 		}
-		time.Sleep(10 * time.Second)
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("interrupted")
+		case <-time.After(10 * time.Second):
+		}
 	}
 }
 
@@ -381,27 +443,33 @@ func runCloudStatus(args []string, o *options) error {
 	if len(args) < 1 {
 		return cloudUsage()
 	}
+
 	id, err := strconv.ParseInt(args[0], 10, 64)
 	if err != nil {
 		return exitAt(2, "invalid run id %q", args[0])
 	}
+
 	client, err := actionsClient(o)
 	if err != nil {
 		return err
 	}
-	run, err := client.Run(id)
+
+	run, err := client.Run(context.Background(), id)
 	if err != nil {
 		return err
 	}
+
 	if o.json {
 		b, _ := json.MarshalIndent(run, "", "  ")
 		fmt.Println(string(b))
 		return nil
 	}
+
 	fmt.Printf("run #%d: %s", id, run.Status)
 	if run.Conclusion != "" {
 		fmt.Printf(" (%s)", run.Conclusion)
 	}
+
 	fmt.Printf(" — %s\n", run.HTMLURL)
 	return nil
 }
@@ -410,6 +478,7 @@ func runCloudLogs(args []string, o *options) error {
 	if len(args) < 1 {
 		return cloudUsage()
 	}
+
 	id, err := strconv.ParseInt(args[0], 10, 64)
 	if err != nil {
 		return exitAt(2, "invalid run id %q", args[0])
@@ -418,18 +487,29 @@ func runCloudLogs(args []string, o *options) error {
 	if err != nil {
 		return err
 	}
-	jobs, err := client.Jobs(id)
+	jobs, err := client.Jobs(context.Background(), id)
 	if err != nil {
 		return err
 	}
+	// Redact values passed via -e overrides; CI logs may echo them.
+	var secrets []string
+	for _, ov := range o.overrides {
+		if _, val, ok := strings.Cut(ov, "="); ok && val != "" {
+			secrets = append(secrets, val)
+		}
+	}
 	printed := 0
 	for _, j := range jobs {
-		logs, err := client.JobLogs(j.ID)
+		logs, err := client.JobLogs(context.Background(), j.ID)
 		if err != nil {
 			continue
 		}
+		text := string(logs)
+		if len(secrets) > 0 {
+			text = pkg.RedactValues(text, secrets)
+		}
 		printed++
-		fmt.Printf("## %s\n%s", j.Name, logs)
+		fmt.Printf("## %s\n%s", j.Name, text)
 	}
 	if printed == 0 {
 		fmt.Println("no job logs available yet")
@@ -449,7 +529,7 @@ func runCloudCancel(args []string, o *options) error {
 	if err != nil {
 		return err
 	}
-	if err := client.Cancel(id); err != nil {
+	if err := client.Cancel(context.Background(), id); err != nil {
 		return err
 	}
 	fmt.Printf("cancelled run #%d\n", id)
@@ -466,9 +546,13 @@ func runCloudInitActions(args []string) error {
 			return exitAt(2, "unknown init-actions option %q", a)
 		}
 	}
+	path, err := actionsWorkflowPath(workflow)
+	if err != nil {
+		return err
+	}
 	if _, err := ensureActionsWorkflow(workflow); err != nil {
 		return err
 	}
-	fmt.Printf("%s is ready — commit and push it\n", actionsWorkflowPath(workflow))
+	fmt.Printf("%s is ready — commit and push it\n", path)
 	return nil
 }

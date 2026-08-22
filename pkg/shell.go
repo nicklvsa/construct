@@ -76,10 +76,12 @@ func (e *Executor) InteractiveShell(name, containerOverride string) (int, error)
 			if err != nil {
 				return 1, err
 			}
-			argv = append(argv, "-v", abs+":/work", "-w", "/work")
+			argv = append(argv, "-v", filepath.ToSlash(abs)+":/work", "-w", "/work")
 		}
-		if cmd.WorkDir != "" && !filepath.IsAbs(cmd.WorkDir) {
-			argv = append(argv, "-w", "/work/"+filepath.ToSlash(e.resolveWorkDir(cmd.WorkDir)))
+		if cmd.WorkDir != "" {
+			if wd, ok := containerWorkDir(cmd.WorkDir); ok {
+				argv = append(argv, "-w", wd)
+			}
 		}
 		argv = append(argv, image, "/bin/sh", "-c", "command -v bash >/dev/null 2>&1 && exec bash || exec sh")
 		proc = exec.Command(argv[0], argv[1:]...)
@@ -107,4 +109,16 @@ func (e *Executor) InteractiveShell(name, containerOverride string) (int, error)
 		return 1, err
 	}
 	return 0, nil
+}
+
+func containerWorkDir(workDir string) (string, bool) {
+	wd := filepath.ToSlash(workDir)
+	switch {
+	case strings.HasPrefix(wd, "/"):
+		return wd, true
+	case len(wd) >= 2 && wd[1] == ':':
+		return "", false
+	default:
+		return "/work/" + wd, true
+	}
 }

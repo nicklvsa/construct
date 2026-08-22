@@ -19,7 +19,7 @@ const straceSample = `1234  openat(AT_FDCWD, "/repo/src/main.go", O_RDONLY|O_CLO
 `
 
 func TestParseStraceReads(t *testing.T) {
-	reads := parseStraceReads([]byte(straceSample))
+	reads := parseStraceReads([]byte(straceSample), "/repo")
 	want := map[string]bool{
 		"/repo/src/main.go":        true,
 		"/repo/src/extra.go":       true, // O_RDWR counts as an input
@@ -35,6 +35,19 @@ func TestParseStraceReads(t *testing.T) {
 		if !want[p] {
 			t.Errorf("unexpected read %s", p)
 		}
+	}
+}
+
+func TestParseStraceReadsResolvesRelativePaths(t *testing.T) {
+	sample := `1234  openat(AT_FDCWD, "src/main.go", O_RDONLY|O_CLOEXEC) = 4
+1234  openat(AT_FDCWD, "/abs/other.go", O_RDONLY) = 5
+`
+	reads := parseStraceReads([]byte(sample), "/repo")
+	if !reads[filepath.Join("/repo", "src", "main.go")] {
+		t.Errorf("relative read not resolved against base dir: %v", reads)
+	}
+	if !reads["/abs/other.go"] {
+		t.Errorf("absolute read dropped: %v", reads)
 	}
 }
 

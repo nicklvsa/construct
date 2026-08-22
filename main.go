@@ -152,15 +152,10 @@ func main() {
 	}
 
 	if len(positionals) > 0 && positionals[0] == "__targets" {
-		if err := runTargets(); err != nil {
-			exitError(err)
-		}
+		runTargets()
 		return
 	}
 
-	// `construct [Constfile] dev [...]` means service supervision whenever the
-	// file declares services; without services it falls through to normal
-	// execution so a plain command named dev keeps working.
 	{
 		rest := positionals
 		devFile := defaultConstfileName()
@@ -180,7 +175,6 @@ func main() {
 		}
 	}
 
-	// --doctor is the doctor subcommand with an optional Constfile path.
 	if o.doctor {
 		if err := runDoctor(&o, determineInputs(positionals)); err != nil {
 			exitError(err)
@@ -254,6 +248,11 @@ func runBuildMain(o *options, inputs *ConstructInput) {
 		os.Exit(2)
 	}
 
+	if o.tui && (o.watch || o.repeat > 0) {
+		fmt.Fprintln(os.Stderr, "(--tui disabled: incompatible with --watch/--repeat)")
+		o.tui = false
+	}
+
 	if o.since != "" && o.showList {
 		fmt.Fprintln(os.Stderr, "--since cannot be combined with --list")
 		os.Exit(2)
@@ -315,7 +314,8 @@ func runBuildMain(o *options, inputs *ConstructInput) {
 		for {
 			runStart := time.Now()
 			files, err := executeBuild(inputs, o, runCtx)
-			if files != nil && o.notify {
+			// Notify on failure too: executeBuild returns nil files on error.
+			if o.notify {
 				notifySummary(inputs, err, time.Since(runStart))
 			}
 			if err != nil {
@@ -340,7 +340,11 @@ func runBuildMain(o *options, inputs *ConstructInput) {
 			}
 		}
 		if o.notify {
-			notifySummary(inputs, fmt.Errorf("%d of %d run(s) failed", failures, o.repeat), time.Since(runStart))
+			var runErr error
+			if failures > 0 {
+				runErr = fmt.Errorf("%d of %d run(s) failed", failures, o.repeat)
+			}
+			notifySummary(inputs, runErr, time.Since(runStart))
 		}
 		if failures > 0 {
 			exitError(fmt.Errorf("%d of %d run(s) failed", failures, o.repeat))
@@ -361,9 +365,11 @@ func runBuildMain(o *options, inputs *ConstructInput) {
 	if o.dash != nil {
 		o.dash.stop()
 	}
-	if files != nil && o.notify {
+
+	if (files != nil || err != nil) && o.notify {
 		notifySummary(inputs, err, time.Since(runStart))
 	}
+
 	if err != nil {
 		if interrupted.Load() {
 			fmt.Fprintln(os.Stderr, "interrupted")
@@ -371,6 +377,7 @@ func runBuildMain(o *options, inputs *ConstructInput) {
 		}
 		exitError(err)
 	}
+
 	if interrupted.Load() {
 		fmt.Fprintln(os.Stderr, "interrupted")
 		os.Exit(130)

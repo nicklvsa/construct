@@ -37,12 +37,6 @@ func findTopLevelOp(s, op string) int {
 
 var conditionOps = []string{"==", "!=", ">=", "<=", ">", "<"}
 
-func evaluateCondition(cond string) bool {
-	return evaluateConditionWithBase(cond, "")
-}
-
-// matchingOuterParens reports whether the "(" opening s is closed by the final
-// ")" — i.e. the whole condition is wrapped in one balanced pair.
 func matchingOuterParens(s string) bool {
 	depth, inQuote := 0, false
 	for i := 0; i < len(s); i++ {

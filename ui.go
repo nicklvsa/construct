@@ -2,13 +2,13 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/subtle"
 	"embed"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
-	"math/rand"
 	"net"
 	"net/http"
 	"os"
@@ -50,8 +50,15 @@ func runUI(args []string, o *options) error {
 		return err
 	}
 
-	bin, _ := os.Executable()
-	srv := &uiServer{doc: doc, token: uiNewToken(), bin: bin}
+	bin, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("could not resolve construct executable: %w", err)
+	}
+	token, err := uiNewToken()
+	if err != nil {
+		return fmt.Errorf("could not generate UI auth token: %w", err)
+	}
+	srv := &uiServer{doc: doc, token: token, bin: bin}
 
 	addr := "127.0.0.1:0"
 	if o.uiPort > 0 {
@@ -82,12 +89,12 @@ func runUI(args []string, o *options) error {
 	return nil
 }
 
-func uiNewToken() string {
+func uiNewToken() (string, error) {
 	b := make([]byte, 24)
 	if _, err := rand.Read(b); err != nil {
-		return fmt.Sprintf("%x", time.Now().UnixNano())
+		return "", fmt.Errorf("could not read random bytes: %w", err)
 	}
-	return hex.EncodeToString(b)
+	return hex.EncodeToString(b), nil
 }
 
 func (s *uiServer) routes() http.Handler {
@@ -105,11 +112,8 @@ func (s *uiServer) routes() http.Handler {
 
 func (s *uiServer) auth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		tok := r.Header.Get("X-Construct-Token")
-		if tok == "" {
-			tok = r.URL.Query().Get("t")
-		}
-		if subtle.ConstantTimeCompare([]byte(tok), []byte(s.token)) != 1 {
+		// Header-only: tokens in query strings leak into history and logs.
+		if subtle.ConstantTimeCompare([]byte(r.Header.Get("X-Construct-Token")), []byte(s.token)) != 1 {
 			http.Error(w, "forbidden", http.StatusForbidden)
 			return
 		}
@@ -118,7 +122,7 @@ func (s *uiServer) auth(next http.HandlerFunc) http.HandlerFunc {
 }
 
 func (s *uiServer) serveAsset(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path != "/" && r.Method != http.MethodGet {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		http.NotFound(w, r)
 		return
 	}

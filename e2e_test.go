@@ -121,7 +121,7 @@ cond {
     if missing("nope.txt") {
         $ echo missing-ok
     }
-    if require("sh") {
+    if require("go") {
         $ echo shell-ok
     }
 }
@@ -422,7 +422,7 @@ func TestE2ECloudSubmit(t *testing.T) {
 	}
 
 	// Submit with --wait and a secret-looking env: the log value is redacted.
-	out, code := e2eRun(t, dir, env, "cloud", "submit", "--wait", "--repo", "o/r", "-e", "API_TOKEN=hunter2", "build")
+	out, code := e2eRun(t, dir, env, "cloud", "submit", "--wait", "--repo", "o/r", "--ref", "main", "-e", "API_TOKEN=hunter2", "build")
 	if code != 0 {
 		t.Fatalf("submit exit %d: %s", code, out)
 	}
@@ -466,7 +466,7 @@ func TestE2ECloudSubmitInitsWorkflow(t *testing.T) {
 	dir := e2eConstfile(t, "build {\n    $ echo hi\n}\n")
 	env := []string{"GITHUB_TOKEN=test-token", "CONSTRUCT_GITHUB_API=https://127.0.0.1:1"}
 	// No workflow file: submit creates it and asks for a commit+push.
-	out, code := e2eRun(t, dir, env, "cloud", "submit", "--repo", "o/r", "build")
+	out, code := e2eRun(t, dir, env, "cloud", "submit", "--repo", "o/r", "--ref", "main", "build")
 	if code == 0 {
 		t.Fatalf("expected exit 1 after creating the workflow, got %d: %s", code, out)
 	}

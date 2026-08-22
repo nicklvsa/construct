@@ -67,7 +67,6 @@ Usage:
   construct <init|import|shell|doctor|stats|cloud|clean|lint|graph|fmt|completion|ui|runs|mcp|learn|install> [args...]
 
 Commands:
-  list              List all available commands
   init [template]   Scaffold a Constfile (minimal, go, python, node, rust, monorepo)
   import [FILE] [OUT]  Convert a Makefile to a Constfile (best-effort, --force)
   import update     Refresh remote recipe imports to their ref's latest commit
@@ -97,7 +96,7 @@ Options:
   --no-cache        Ignore the file-dep cache and run everything
   --quiet, -q       Suppress command output, keep errors
   --explain         Print why commands run or are skipped
-  --json            Machine-readable output (with --list, --status)
+  --json            Machine-readable output (with --list)
   --shell PATH      Shell to run statements with
   --watch           Rerun when the Constfile or dependencies change
   --choose          Interactively select targets to run

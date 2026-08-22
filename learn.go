@@ -96,7 +96,11 @@ func learnTraced(stracePath, exe, fileName, absBase string, targets []string, da
 	fmt.Println()
 
 	hist := pkg.LoadRunHistory(filepath.Join(absBase, pkg.CacheDirName()))
-	reads := parseStraceReads(mustRead(traceFile))
+	traceData, err := os.ReadFile(traceFile)
+	if err != nil {
+		return fmt.Errorf("could not read strace output %s: %w", traceFile, err)
+	}
+	reads := parseStraceReads(traceData, absBase)
 	repoReads := filterRepoReads(reads, absBase, data)
 
 	report := learnReport{Mode: "traced", ReadsTotal: len(reads), ReadsRepo: len(repoReads)}
@@ -120,8 +124,13 @@ func learnTraced(stracePath, exe, fileName, absBase string, targets []string, da
 	}
 
 	if o.json {
-		return printJSON(report)
+		if err := printJSON(report); err != nil {
+			return err
+		}
+
+		return runErr
 	}
+
 	printTraced(report)
 	return runErr
 }
@@ -133,14 +142,17 @@ func printTraced(report learnReport) {
 			fmt.Printf("%s: all reads covered by its file deps\n", c.Name)
 			continue
 		}
+
 		deps := strings.Join(c.FileDeps, ", ")
 		if deps == "" {
 			deps = "(none declared)"
 		}
+
 		fmt.Printf("%s: reads not covered by its file deps (%s):\n", c.Name, deps)
 		for _, f := range c.Uncovered {
 			fmt.Printf("  %s\n", f)
 		}
+
 		fmt.Printf("  -> changing these will NOT rerun %s; add them to its deps\n\n", c.Name)
 	}
 }
@@ -150,11 +162,13 @@ func learnStatic(absBase string, data *pkg.ParsedData, o *options) error {
 	if err != nil {
 		return err
 	}
+
 	for i, f := range unwatched {
 		if rel, err := filepath.Rel(absBase, f); err == nil {
 			unwatched[i] = rel
 		}
 	}
+
 	sort.Strings(unwatched)
 
 	report := learnReport{
@@ -162,6 +176,7 @@ func learnStatic(absBase string, data *pkg.ParsedData, o *options) error {
 		Note:      "no tracer available; showing files no command watches (on Linux with strace, learn traces actual reads)",
 		Unwatched: unwatched,
 	}
+
 	if o.json {
 		return printJSON(report)
 	}
@@ -171,8 +186,10 @@ func learnStatic(absBase string, data *pkg.ParsedData, o *options) error {
 		fmt.Println("every file in the repo is watched by some command's deps")
 		return nil
 	}
+
 	fmt.Printf("%d file(s) no command watches (editing them triggers nothing):\n", len(unwatched))
 	limit := 50
+
 	for _, f := range unwatched {
 		if limit == 0 {
 			fmt.Printf("  ... and %d more\n", len(unwatched)-50)
@@ -181,6 +198,7 @@ func learnStatic(absBase string, data *pkg.ParsedData, o *options) error {
 		limit--
 		fmt.Printf("  %s\n", f)
 	}
+
 	return nil
 }
 
@@ -191,11 +209,6 @@ func printJSON(v any) error {
 	}
 	fmt.Println(string(b))
 	return nil
-}
-
-func mustRead(path string) []byte {
-	b, _ := os.ReadFile(path)
-	return b
 }
 
 func uncoveredFor(cmd *pkg.Command, repoReads []string, absBase string) []string {
@@ -252,7 +265,7 @@ func filterRepoReads(reads map[string]bool, absBase string, data *pkg.ParsedData
 	return out
 }
 
-func parseStraceReads(data []byte) map[string]bool {
+func parseStraceReads(data []byte, absBase string) map[string]bool {
 	reads := map[string]bool{}
 	for line := range strings.SplitSeq(string(data), "\n") {
 		rest := strings.TrimSpace(line)
@@ -274,15 +287,23 @@ func parseStraceReads(data []byte) map[string]bool {
 		default:
 			continue
 		}
-		if path == "" || !strings.HasPrefix(path, "/") {
+
+		if path == "" {
 			continue
 		}
+
+		if !strings.HasPrefix(path, "/") && filepath.VolumeName(path) == "" {
+			path = filepath.Join(absBase, path)
+		}
+
 		eq := strings.LastIndex(rest, ") = ")
 		if eq < 0 || strings.HasPrefix(rest[eq+4:], "-1") {
 			continue
 		}
+
 		reads[path] = true
 	}
+
 	return reads
 }
 

@@ -12,7 +12,6 @@ import (
 type CloudEntry struct {
 	Name      string
 	BodyStmts int
-	Local     bool
 }
 
 func (e *Executor) resolveCloudFile() string {
@@ -59,7 +58,7 @@ func (e *Executor) CloudList() ([]CloudEntry, error) {
 	}
 	var out []CloudEntry
 	for name, c := range defs {
-		out = append(out, CloudEntry{Name: name, BodyStmts: cloudStmtCount(c), Local: false})
+		out = append(out, CloudEntry{Name: name, BodyStmts: cloudStmtCount(c)})
 	}
 	slices.SortFunc(out, func(a, b CloudEntry) int { return strings.Compare(a.Name, b.Name) })
 	return out, nil

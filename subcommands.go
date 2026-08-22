@@ -48,8 +48,12 @@ func runInit(args []string, o *options) error {
 	if err := rejectSubcommandFlags(args, "init"); err != nil {
 		return err
 	}
-	for _, a := range args {
-		template = a
+	switch len(args) {
+	case 0:
+	case 1:
+		template = args[0]
+	default:
+		return exitAt(2, "usage: construct init [template]")
 	}
 	if _, err := os.Stat(fileName); err == nil && !force {
 		return fmt.Errorf("%s already exists (use --force to overwrite)", fileName)
@@ -80,7 +84,11 @@ func runLint(args []string, o *options) error {
 	if err != nil {
 		return err
 	}
-	issues := pkg.Lint(strings.Split(readFileOr(fileName), "\n"), data, filepath.Dir(fileName))
+	content, err := os.ReadFile(fileName)
+	if err != nil {
+		return fmt.Errorf("cannot read %s: %w", fileName, err)
+	}
+	issues := pkg.Lint(strings.Split(string(content), "\n"), data, filepath.Dir(fileName))
 
 	if o.json {
 		out, err := json.MarshalIndent(issues, "", "  ")
@@ -106,19 +114,11 @@ func runLint(args []string, o *options) error {
 		fmt.Println("no issues found")
 		return nil
 	}
-	fmt.Println(summary)
 	if errs > 0 || (o.strict && warns > 0) {
-		return exitAt(1, "")
+		return exitAt(1, "%s", summary)
 	}
+	fmt.Println(summary)
 	return nil
-}
-
-func readFileOr(path string) string {
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return ""
-	}
-	return string(b)
 }
 
 func runImport(args []string, o *options) error {
@@ -215,6 +215,9 @@ func runShellCmd(args []string, o *options) error {
 }
 
 func runClean(args []string, o *options) error {
+	if err := rejectSubcommandFlags(args, "clean"); err != nil {
+		return err
+	}
 	fileName, targets := splitConstfileArgs(args)
 	p, err := pkg.NewParser(fileName)
 	if err != nil {
@@ -306,6 +309,9 @@ func withinDir(path, dir string) bool {
 }
 
 func runGraph(args []string, o *options) error {
+	if err := rejectSubcommandFlags(args, "graph"); err != nil {
+		return err
+	}
 	fileName, targets := splitConstfileArgs(args)
 	p, err := pkg.NewParser(fileName)
 	if err != nil {
@@ -376,7 +382,7 @@ func printGraphChildren(data *pkg.ParsedData, name, prefix string, path map[stri
 		if !kid.isFile && !path[kid.name] {
 			printGraphChildren(data, kid.name, prefix+cont, union(path, kid.name))
 		} else if !kid.isFile && path[kid.name] {
-			fmt.Printf("%s%s   └── …\n", prefix, cont)
+			fmt.Printf("%s└── …\n", prefix+cont)
 		}
 	}
 }
@@ -409,6 +415,16 @@ func graphDot(data *pkg.ParsedData, targets []string) error {
 	fmt.Println("digraph construct {")
 	fmt.Println("  rankdir=LR;")
 	fmt.Println("  node [fontname=\"Helvetica\"];")
+
+	nodes := map[string]bool{}
+	edges := map[string]bool{}
+	fileNode := func(label string) {
+		if !nodes[label] {
+			nodes[label] = true
+			fmt.Printf("  \"%s\" [shape=ellipse, style=filled, fillcolor=lightgrey];\n", label)
+		}
+	}
+
 	var walk func(name string, path map[string]bool)
 	walk = func(name string, path map[string]bool) {
 		cmd, err := data.GetCommand(name)
@@ -416,18 +432,26 @@ func graphDot(data *pkg.ParsedData, targets []string) error {
 			return
 		}
 		for _, kid := range graphChildren(cmd) {
-			if kid.isFile {
-				fmt.Printf("  \"%s\" [shape=ellipse, style=filled, fillcolor=lightgrey];\n", kid.label)
-				fmt.Printf("  \"%s\" -> \"%s\";\n", name, kid.label)
-				continue
+			to := kid.label
+			if !kid.isFile {
+				to = kid.name
+			} else {
+				fileNode(kid.label)
 			}
-			fmt.Printf("  \"%s\" -> \"%s\";\n", name, kid.name)
-			walk(kid.name, union(path, name))
+			if !edges[name+"->"+to] {
+				edges[name+"->"+to] = true
+				fmt.Printf("  \"%s\" -> \"%s\";\n", name, to)
+			}
+			if !kid.isFile {
+				walk(kid.name, union(path, name))
+			}
 		}
 	}
+
 	for _, t := range targets {
 		walk(t, map[string]bool{})
 	}
+
 	fmt.Println("}")
 	return nil
 }
@@ -438,58 +462,69 @@ func graphJSON(data *pkg.ParsedData, targets []string) error {
 		Prereqs  []string `json:"prereqs,omitempty"`
 		FileDeps []string `json:"file_deps,omitempty"`
 	}
+
 	seen := map[string]bool{}
 	var out []node
 	var walk func(name string, path map[string]bool)
+
 	walk = func(name string, path map[string]bool) {
 		if seen[name] || path[name] {
 			return
 		}
+
 		seen[name] = true
 		cmd, err := data.GetCommand(name)
 		if err != nil || cmd == nil {
 			return
 		}
+
 		out = append(out, node{Name: name, Prereqs: cmd.Prereqs, FileDeps: cmd.FileDeps})
 		path = union(path, name)
+
 		for _, pre := range cmd.Prereqs {
 			walk(pre, path)
 		}
 	}
+
 	for _, t := range targets {
 		walk(t, map[string]bool{})
 	}
+
 	b, err := json.MarshalIndent(out, "", "  ")
 	if err != nil {
 		return err
 	}
+
 	fmt.Println(string(b))
 	return nil
 }
 
-func runTargets() error {
+func runTargets() {
 	fileName := defaultConstfileName()
 	p, err := pkg.NewParser(fileName)
 	if err != nil {
-		return nil // no Constfile: complete flags only
+		return
 	}
+
 	data, err := p.Parse()
 	if err != nil {
-		return nil
+		return
 	}
+
 	for _, cmd := range data.Commands {
 		if cmd.Name == "_" || pkg.IsLazyName(cmd.Name) {
 			continue
 		}
+
 		fmt.Println(cmd.Name)
 	}
-	return nil
 }
 
 func runCompletion(args []string) error {
 	if len(args) == 0 {
 		return exitAt(2, "usage: construct completion <bash|zsh|fish>")
 	}
+
 	var script string
 	switch args[0] {
 	case "bash":
@@ -501,6 +536,7 @@ func runCompletion(args []string) error {
 	default:
 		return exitAt(2, "unknown shell %q (bash, zsh, fish)", args[0])
 	}
+
 	fmt.Print(script)
 	fmt.Fprintf(os.Stderr, "# install: source the script from your shell profile\n")
 	return nil
@@ -569,6 +605,9 @@ func zshFlagArgs() string {
 }
 
 func runFmt(args []string, o *options) error {
+	if err := rejectSubcommandFlags(args, "fmt"); err != nil {
+		return err
+	}
 	files := args
 	if len(files) == 0 {
 		files = []string{defaultConstfileName()}
@@ -594,7 +633,7 @@ func runFmt(args []string, o *options) error {
 		fmt.Printf("formatted %s\n", file)
 	}
 	if o.checkFormat && unformatted > 0 {
-		return exitAt(1, "")
+		return exitAt(1, "%d file(s) not formatted", unformatted)
 	}
 	return nil
 }

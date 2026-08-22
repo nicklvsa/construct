@@ -249,16 +249,23 @@ func executeBuild(inputs *ConstructInput, o *options, runCtx context.Context) ([
 	if err != nil {
 		return nil, err
 	}
+
 	data, err := p.Parse()
 	if err != nil {
 		return nil, err
 	}
 
-	// Strict second parse so per-command argument flags (--cmd:arg) are recognized.
 	flagSet := flag.NewFlagSet("construct", flag.ContinueOnError)
 	flagSet.SetOutput(io.Discard)
 	defineFlags(flagSet, &options{})
 	executor := pkg.NewExecutor(data, o.concurrent, o.debug)
+	executor.RegisterArgumentFlags(flagSet)
+
+	flagSet.ParseErrorsWhitelist.UnknownFlags = false
+	if err := flagSet.Parse(os.Args[1:]); err != nil {
+		return nil, err
+	}
+
 	if o.tui {
 		dashCtx, dashCancel := context.WithCancel(runCtx)
 		defer dashCancel()
@@ -282,21 +289,17 @@ func executeBuild(inputs *ConstructInput, o *options, runCtx context.Context) ([
 	executor.SetFlame(o.flame)
 	executor.SetGithubActions(o.ghActions)
 	executor.SetRecordRuns(true)
-	executor.RegisterArgumentFlags(flagSet)
-
-	flagSet.ParseErrorsWhitelist.UnknownFlags = false
-	if err := flagSet.Parse(os.Args[1:]); err != nil {
-		return nil, err
-	}
 
 	for _, ov := range o.overrides {
 		before, after, ok := strings.Cut(ov, "=")
 		if !ok {
 			return nil, fmt.Errorf("invalid override %q (expected key=value)", ov)
 		}
+
 		key := strings.TrimSpace(before)
 		val := after
 		overridden := false
+
 		for _, v := range data.Variables {
 			if v.Name == key {
 				overridden = true
@@ -442,10 +445,7 @@ func notifySummary(inputs *ConstructInput, err error, d time.Duration) {
 	summary := fmt.Sprintf("%s in %s", targetLabelFor(inputs), trimDuration(d))
 	if err != nil {
 		first := strings.SplitN(err.Error(), "\n", 2)[0]
-		if len(first) > 120 {
-			first = first[:120] + "…"
-		}
-		summary = fmt.Sprintf("%s failed in %s: %s", targetLabelFor(inputs), trimDuration(d), first)
+		summary = fmt.Sprintf("%s failed in %s: %s", targetLabelFor(inputs), trimDuration(d), truncateRunes(first, 120))
 	}
 	notifyResult(err == nil, summary)
 }

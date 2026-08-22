@@ -127,7 +127,7 @@ func TestEvaluateConditionLogical(t *testing.T) {
 		{`"a contains b" == "a contains b"`, true},
 	}
 	for _, tt := range tests {
-		if got := evaluateCondition(tt.cond); got != tt.want {
+		if got := evaluateConditionWithBase(tt.cond, ""); got != tt.want {
 			t.Errorf("evaluateCondition(%q) = %v, want %v", tt.cond, got, tt.want)
 		}
 	}
@@ -1107,17 +1107,17 @@ func TestEnvRefsInShellLines(t *testing.T) {
 }
 
 func TestEnvRefsInShellLinesUnsetLiteral(t *testing.T) {
-	if got := resolveEnvRefsKeepUnset(`npx @vscode/vsce@latest`); got != `npx @vscode/vsce@latest` {
+	if got := resolveEnvRefsKeepUnsetWith(`npx @vscode/vsce@latest`, os.LookupEnv); got != `npx @vscode/vsce@latest` {
 		t.Errorf("npm scoped package mangled: %q", got)
 	}
-	if got := resolveEnvRefsKeepUnset(`echo @CONSTRUCT_DEFINITELY_UNSET`); got != `echo @CONSTRUCT_DEFINITELY_UNSET` {
+	if got := resolveEnvRefsKeepUnsetWith(`echo @CONSTRUCT_DEFINITELY_UNSET`, os.LookupEnv); got != `echo @CONSTRUCT_DEFINITELY_UNSET` {
 		t.Errorf("unset ref should stay literal, got %q", got)
 	}
 	t.Setenv("CONSTRUCT_TEST_SHELL_ENV2", "v")
-	if got := resolveEnvRefsKeepUnset(`echo @CONSTRUCT_TEST_SHELL_ENV2 and @NOPE`); got != `echo v and @NOPE` {
+	if got := resolveEnvRefsKeepUnsetWith(`echo @CONSTRUCT_TEST_SHELL_ENV2 and @NOPE`, os.LookupEnv); got != `echo v and @NOPE` {
 		t.Errorf("set/unset mix = %q", got)
 	}
-	if got := resolveEnvRefsKeepUnset(`echo \@CONSTRUCT_TEST_SHELL_ENV2`); got != `echo @CONSTRUCT_TEST_SHELL_ENV2` {
+	if got := resolveEnvRefsKeepUnsetWith(`echo \@CONSTRUCT_TEST_SHELL_ENV2`, os.LookupEnv); got != `echo @CONSTRUCT_TEST_SHELL_ENV2` {
 		t.Errorf("escaped ref should stay literal, got %q", got)
 	}
 }
@@ -1149,7 +1149,7 @@ func TestBuiltinConditionFunctions(t *testing.T) {
 		{`missing("` + missingPath + `") && exists("` + existsPath + `")`, true},
 	}
 	for _, tt := range tests {
-		if got := evaluateCondition(tt.cond); got != tt.want {
+		if got := evaluateConditionWithBase(tt.cond, ""); got != tt.want {
 			t.Errorf("evaluateCondition(%q) = %v, want %v", tt.cond, got, tt.want)
 		}
 	}
@@ -1312,7 +1312,7 @@ func TestConditionInOperator(t *testing.T) {
 		{`!"windows" in "linux"`, true},
 	}
 	for _, tt := range tests {
-		if got := evaluateCondition(tt.cond); got != tt.want {
+		if got := evaluateConditionWithBase(tt.cond, ""); got != tt.want {
 			t.Errorf("evaluateCondition(%q) = %v, want %v", tt.cond, got, tt.want)
 		}
 	}
@@ -1506,13 +1506,13 @@ func TestLoadEnvFile(t *testing.T) {
 }
 
 func TestRequireBuiltin(t *testing.T) {
-	if got := evaluateCondition(`require("sh")`); !got {
-		t.Error("require(sh) should be true on POSIX shells")
+	if got := evaluateConditionWithBase(`require("go")`, ""); !got {
+		t.Error("require(go) should be true wherever the tests run")
 	}
-	if got := evaluateCondition(`require("definitely-not-a-real-tool-xyz")`); got {
+	if got := evaluateConditionWithBase(`require("definitely-not-a-real-tool-xyz")`, ""); got {
 		t.Error("require of a nonexistent tool should be false")
 	}
-	if got := evaluateCondition(`require("sh") && "1" == "1"`); !got {
+	if got := evaluateConditionWithBase(`require("go") && "1" == "1"`, ""); !got {
 		t.Error("require composes with &&")
 	}
 }
@@ -1970,7 +1970,7 @@ func TestEnvRefDefault(t *testing.T) {
 	if got := ResolveEnvRefs("echo @CONSTRUCT_TEST_DEF_X:-hello"); got != "echo hello" {
 		t.Errorf("unset with default = %q", got)
 	}
-	if got := resolveEnvRefsKeepUnset("echo @CONSTRUCT_TEST_DEF_X:-hello"); got != "echo hello" {
+	if got := resolveEnvRefsKeepUnsetWith("echo @CONSTRUCT_TEST_DEF_X:-hello", os.LookupEnv); got != "echo hello" {
 		t.Errorf("keep-unset with default = %q", got)
 	}
 	os.Setenv(name, "real")
@@ -1980,7 +1980,7 @@ func TestEnvRefDefault(t *testing.T) {
 	}
 	// No default: unset stays literal for keep-unset, empty otherwise.
 	os.Unsetenv(name)
-	if got := resolveEnvRefsKeepUnset("echo @CONSTRUCT_TEST_DEF_X"); got != "echo @CONSTRUCT_TEST_DEF_X" {
+	if got := resolveEnvRefsKeepUnsetWith("echo @CONSTRUCT_TEST_DEF_X", os.LookupEnv); got != "echo @CONSTRUCT_TEST_DEF_X" {
 		t.Errorf("unset without default should stay literal: %q", got)
 	}
 }

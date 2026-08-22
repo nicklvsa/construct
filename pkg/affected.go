@@ -151,32 +151,38 @@ func absPath(baseDir, p string) string {
 	if p == "" || filepath.IsAbs(p) {
 		return p
 	}
+
 	return filepath.Join(baseDir, p)
 }
 
-// globMatches matches a dep pattern against a slash-separated relative path;
-// "**" gets filepath.Glob's single-segment semantics.
 func globMatches(pattern, rel string) bool {
 	pattern = strings.ReplaceAll(pattern, "\\", "/")
 	pattern = strings.ReplaceAll(pattern, "**", "*")
 	ok, err := filepath.Match(pattern, rel)
+
 	return err == nil && ok
 }
 
-// matchesChangedPath also walks parents: git lists added files under a new
-// directory, and a dep on the directory should still count.
 func matchesChangedPath(path string, changed map[string]bool) bool {
-	if changed[path] {
-		return true
+	for {
+		if changed[path] {
+			return true
+		}
+
+		switch path {
+		case "", ".", "..", string(filepath.Separator):
+			return false
+		}
+
+		parent := filepath.Dir(path)
+		if parent == path {
+			return false
+		}
+
+		path = parent
 	}
-	if path == string(filepath.Separator) || path == "" {
-		return false
-	}
-	return matchesChangedPath(filepath.Dir(path), changed)
 }
 
-// FilesNotWatched returns repo files matched by no command's file deps,
-// onchange globs, or produces — files whose edits trigger nothing.
 func FilesNotWatched(data *ParsedData, baseDir string) ([]string, error) {
 	watched := map[string]bool{}
 	for _, cmd := range data.Commands {
@@ -185,6 +191,7 @@ func FilesNotWatched(data *ParsedData, baseDir string) ([]string, error) {
 			watched[absPath(baseDir, f)] = true
 		}
 	}
+
 	for _, cmd := range data.Commands {
 		for _, f := range expandFileDeps(cmd.Produces, baseDir) {
 			watched[absPath(baseDir, f)] = true
@@ -197,20 +204,25 @@ func FilesNotWatched(data *ParsedData, baseDir string) ([]string, error) {
 		if err != nil {
 			return nil
 		}
+
 		if d.IsDir() {
 			if path != baseDir && skip[d.Name()] {
 				return filepath.SkipDir
 			}
 			return nil
 		}
+
 		if watched[path] {
 			return nil
 		}
+
 		unwatched = append(unwatched, path)
 		return nil
 	})
+
 	if err != nil {
 		return nil, err
 	}
+
 	return unwatched, nil
 }

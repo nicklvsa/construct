@@ -153,13 +153,18 @@ func (s *mcpServer) callTool(req rpcRequest) *rpcResponse {
 				})
 			}
 		}
-		text, err := t.Call(s, args)
-		if err != nil && text == "" {
-			text = err.Error()
+		text, callErr := t.Call(s, args)
+		if callErr != nil {
+			// Keep the tool's partial output but don't lose the error itself.
+			if strings.TrimSpace(text) == "" {
+				text = callErr.Error()
+			} else if !strings.Contains(text, callErr.Error()) {
+				text += "\n(error: " + callErr.Error() + ")"
+			}
 		}
 		return s.ok(req, map[string]any{
 			"content": []map[string]string{{"type": "text", "text": text}},
-			"isError": err != nil,
+			"isError": callErr != nil,
 		})
 	}
 	return &rpcResponse{JSONRPC: "2.0", ID: req.ID, Error: &rpcError{Code: -32602, Message: "unknown tool: " + params.Name}}
@@ -352,14 +357,20 @@ func mcpExec(ctx context.Context, exe, dir string, argv []string, timeout time.D
 	cmd.Stderr = &buf
 	err := cmd.Run()
 	code := 0
-	if err != nil {
-		code = 1
-		if ee, ok := errors.AsType[*exec.ExitError](err); ok {
-			code = ee.ExitCode()
-		}
-		if cctx.Err() == context.DeadlineExceeded {
-			return mcpTruncate(buf.String()), code, fmt.Errorf("timed out after %s", timeout)
-		}
+	if err == nil {
+		return mcpTruncate(buf.String()), 0, nil
+	}
+	code = 1
+	if ee, ok := errors.AsType[*exec.ExitError](err); ok {
+		code = ee.ExitCode()
+	}
+	if cctx.Err() == context.DeadlineExceeded {
+		return mcpTruncate(buf.String()), code, fmt.Errorf("timed out after %s", timeout)
+	}
+	if _, isExit := errors.AsType[*exec.ExitError](err); !isExit {
+		// Spawn-level failure (binary missing, permission denied, ...):
+		// surface the real error rather than a bare exit code.
+		return mcpTruncate(buf.String()), code, fmt.Errorf("%w", err)
 	}
 	return mcpTruncate(buf.String()), code, nil
 }

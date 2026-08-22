@@ -1,6 +1,7 @@
 package pkg
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -87,7 +88,7 @@ func mockGithub(t *testing.T) (*GHClient, *httptest.Server) {
 		json.NewEncoder(w).Encode(completedRun())
 	})
 	mux.HandleFunc("GET /repos/o/r/actions/runs/{id}/jobs", func(w http.ResponseWriter, r *http.Request) {
-		jobs := map[string]any{"jobs": []GHJob{{ID: 7, Name: "construct", Status: "completed", Conclusion: "success", HTMLURL: "https://github.com/o/r/actions/runs/42/job/7"}}}
+		jobs := map[string]any{"jobs": []GHJob{{ID: 7, Name: "construct", Status: "completed", Conclusion: "success"}}}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(jobs)
 	})
@@ -105,7 +106,7 @@ func mockGithub(t *testing.T) (*GHClient, *httptest.Server) {
 func TestGHClientDispatch(t *testing.T) {
 	client, srv := mockGithub(t)
 	defer srv.Close()
-	if err := client.Dispatch("construct.yml", "main", map[string]string{"targets": "build"}); err != nil {
+	if err := client.Dispatch(context.Background(), "construct.yml", "main", map[string]string{"targets": "build"}); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -113,14 +114,14 @@ func TestGHClientDispatch(t *testing.T) {
 func TestGHClientRunAndJobs(t *testing.T) {
 	client, srv := mockGithub(t)
 	defer srv.Close()
-	run, err := client.Run(42)
+	run, err := client.Run(context.Background(), 42)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if run.Status != "completed" || run.Conclusion != "success" {
 		t.Fatalf("run = %+v", run)
 	}
-	jobs, err := client.Jobs(42)
+	jobs, err := client.Jobs(context.Background(), 42)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -132,14 +133,14 @@ func TestGHClientRunAndJobs(t *testing.T) {
 func TestGHClientLatestDispatchRun(t *testing.T) {
 	client, srv := mockGithub(t)
 	defer srv.Close()
-	run, err := client.LatestDispatchRun("construct.yml", time.Now().Add(-time.Minute))
+	run, err := client.LatestDispatchRun(context.Background(), "construct.yml", time.Now().Add(-time.Minute))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if run.ID != 42 {
 		t.Fatalf("run id = %d", run.ID)
 	}
-	if _, err := client.LatestDispatchRun("construct.yml", time.Now().Add(time.Minute)); err == nil {
+	if _, err := client.LatestDispatchRun(context.Background(), "construct.yml", time.Now().Add(time.Minute)); err == nil {
 		t.Fatal("expected no-run error for a future since")
 	}
 }
@@ -147,14 +148,14 @@ func TestGHClientLatestDispatchRun(t *testing.T) {
 func TestGHClientJobLogsAndCancel(t *testing.T) {
 	client, srv := mockGithub(t)
 	defer srv.Close()
-	logs, err := client.JobLogs(7)
+	logs, err := client.JobLogs(context.Background(), 7)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(string(logs), "line two") {
 		t.Fatalf("logs = %q", logs)
 	}
-	if err := client.Cancel(42); err != nil {
+	if err := client.Cancel(context.Background(), 42); err != nil {
 		t.Fatal(err)
 	}
 }

@@ -685,33 +685,45 @@ func (e *Executor) Execute(commands []string) error {
 }
 
 func (e *Executor) execConcurrent(targets []string) error {
+	type result struct {
+		idx int
+		err error
+	}
 	var waiter sync.WaitGroup
-	errCh := make(chan error, len(targets))
+	results := make(chan result, len(targets))
 
-	for _, cmdName := range targets {
+	for i, cmdName := range targets {
 		waiter.Add(1)
-		go func(name string) {
+		go func(idx int, name string) {
 			defer waiter.Done()
-			errCh <- e.processCommand(name)
-		}(cmdName)
+			results <- result{idx: idx, err: e.processCommand(name)}
+		}(i, cmdName)
 	}
 
 	go func() {
 		waiter.Wait()
-		close(errCh)
+		close(results)
 	}()
 
+	// Drain everything so failures never mask sibling results, then report
+	// deterministically: the earliest target's error wins.
+	var first *result
 	var errs []error
-	for err := range errCh {
-		if err != nil {
-			errs = append(errs, err)
+	for res := range results {
+		if res.err == nil {
+			continue
 		}
+		resCopy := res
+		if first == nil || resCopy.idx < first.idx {
+			first = &resCopy
+		}
+		errs = append(errs, resCopy.err)
 	}
-	if len(errs) > 0 {
+	if first != nil {
 		if e.keepGoing {
 			return &KeepGoingError{Errs: errs}
 		}
-		return errs[0]
+		return first.err
 	}
 	return nil
 }

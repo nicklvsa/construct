@@ -96,11 +96,13 @@ func (e *Executor) shellArgsFor(ctx *execContext, script string) (argv []string,
 	}
 	if e.baseDir != "" {
 		if abs, err := filepath.Abs(e.baseDir); err == nil {
-			argv = append(argv, "-v", abs+":/work", "-w", "/work")
+			argv = append(argv, "-v", filepath.ToSlash(abs)+":/work", "-w", "/work")
 		}
 	}
-	if ctx.workDir != "" && !filepath.IsAbs(ctx.workDir) {
-		argv = append(argv, "-w", "/work/"+filepath.ToSlash(ctx.workDir))
+	if ctx.workDir != "" {
+		if wd, ok := containerWorkDir(ctx.workDir); ok {
+			argv = append(argv, "-w", wd)
+		}
 	}
 	argv = append(argv, image, "/bin/sh", "-c", script)
 	return argv, rt + " run " + image + " /bin/sh -c " + script, noop, nil
@@ -149,7 +151,7 @@ func (e *Executor) resolveShellLine(ctx *execContext, line string) string {
 	})
 
 	for _, arg := range cmd.Arguments {
-		if !strings.Contains(line, "&"+arg.Name) {
+		if findArgRef(line, arg.Name) < 0 {
 			continue
 		}
 		e.debugf("Handling argument --%s for command %s\n", arg.Name, cmd.Name)
@@ -158,11 +160,41 @@ func (e *Executor) resolveShellLine(ctx *execContext, line string) string {
 			fs = pflag.CommandLine
 		}
 		v, _ := fs.GetString(cmd.flagScope() + ":" + arg.Name)
-		line = strings.ReplaceAll(line, "&"+arg.Name, escapeShellValue(v))
+		line = replaceArgRef(line, arg.Name, escapeShellValue(v))
 	}
 
 	line = e.resolveLastRefs(line, cmd.Name)
 	return e.resolveBodyEnvRef(ctx, line)
+}
+
+func findArgRef(line, name string) int {
+	pattern := "&" + name
+	for start := 0; ; {
+		idx := strings.Index(line[start:], pattern)
+		if idx < 0 {
+			return -1
+		}
+		i := start + idx
+		end := i + len(pattern)
+		if end == len(line) || !isWordByte(line[end]) {
+			return i
+		}
+		start = end
+	}
+}
+
+func replaceArgRef(line, name, val string) string {
+	for {
+		i := findArgRef(line, name)
+		if i < 0 {
+			return line
+		}
+		line = line[:i] + val + line[i+1+len(name):]
+	}
+}
+
+func isWordByte(c byte) bool {
+	return c == '_' || (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
 }
 
 var isolationRe = regexp.MustCompile(`\b(cd|pushd|popd|export|declare|typeset|readonly|local|set|unset|setopt|unsetopt|shopt|trap|umask|ulimit|alias|unalias|eval|exec|source|exit|return|break|continue|shift|read|readarray|mapfile|let|suspend|hash|caller)\b`)

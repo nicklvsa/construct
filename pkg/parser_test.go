@@ -1290,7 +1290,7 @@ func TestEvaluateCondition(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := evaluateCondition(tt.cond); got != tt.want {
+			if got := evaluateConditionWithBase(tt.cond, ""); got != tt.want {
 				t.Errorf("evaluateCondition(%q) = %v, want %v", tt.cond, got, tt.want)
 			}
 		})

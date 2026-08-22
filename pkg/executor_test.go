@@ -671,8 +671,8 @@ func TestResolveRefsBehavior(t *testing.T) {
 		}
 	}
 
-	if got := resolveEnvRefsKeepUnset("echo @NOPE and @CONSTRUCT_TEST_ENV"); got != "echo @NOPE and envval" {
-		t.Errorf("resolveEnvRefsKeepUnset = %q", got)
+	if got := resolveEnvRefsKeepUnsetWith("echo @NOPE and @CONSTRUCT_TEST_ENV", os.LookupEnv); got != "echo @NOPE and envval" {
+		t.Errorf("resolveEnvRefsKeepUnsetWith = %q", got)
 	}
 }
 
@@ -1122,7 +1122,7 @@ func TestNamedOutput(t *testing.T) {
 
 func TestConcurrentSharedPrereq(t *testing.T) {
 	// Two parents sharing one prereq exercise the concurrent paths around
-	// IsPrereq/WorkDir mutation and prereq output collection; run with
+	// WorkDir mutation and prereq output collection; run with
 	// -race to catch data races.
 	data := &ParsedData{
 		Commands: []*Command{
@@ -1157,7 +1157,7 @@ func TestPrereqModeNotStickyAcrossRuns(t *testing.T) {
 	}
 
 	// Running `shared` as a top-level target in a fresh run must stream its
-	// output, not capture it again (IsPrereq used to be sticky).
+	// output, not capture it again (prereq mode used to be sticky).
 	out := captureStdout(t, func() {
 		if err := e.Execute([]string{"shared"}); err != nil {
 			t.Fatalf("second execute: %v", err)
@@ -1166,8 +1166,8 @@ func TestPrereqModeNotStickyAcrossRuns(t *testing.T) {
 	if !strings.Contains(out, "shared") {
 		t.Errorf("top-level rerun streamed %q, want the shared output", out)
 	}
-	if shared.IsPrereq {
-		t.Error("shared.IsPrereq was mutated by the executor")
+	if len(shared.PrereqOutput) != 1 {
+		t.Errorf("top-level rerun re-captured output: %v", shared.PrereqOutput)
 	}
 }
 
@@ -1354,7 +1354,7 @@ func TestContainerArgs(t *testing.T) {
 	}
 	defer cleanup()
 	joined := strings.Join(argv, " ")
-	for _, want := range []string{"docker run --rm", "--env-file", "-v " + dir + ":/work", "-w /work/sub", "alpine:latest", "/bin/sh -c", "echo hi"} {
+	for _, want := range []string{"docker run --rm", "--env-file", "-v " + filepath.ToSlash(dir) + ":/work", "-w /work/sub", "alpine:latest", "/bin/sh -c", "echo hi"} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("container argv missing %q: %s", want, joined)
 		}

@@ -2,6 +2,7 @@ package pkg
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -14,14 +15,14 @@ import (
 	"time"
 )
 
+const maxLogBytes = 8 << 20
+
 type GHRun struct {
 	ID         int64     `json:"id"`
-	Name       string    `json:"name"`
 	Status     string    `json:"status"`
 	Conclusion string    `json:"conclusion"`
 	HTMLURL    string    `json:"html_url"`
 	CreatedAt  time.Time `json:"created_at"`
-	HeadSHA    string    `json:"head_sha"`
 }
 
 type GHJob struct {
@@ -29,7 +30,6 @@ type GHJob struct {
 	Name       string `json:"name"`
 	Status     string `json:"status"`
 	Conclusion string `json:"conclusion"`
-	HTMLURL    string `json:"html_url"`
 }
 
 type GHClient struct {
@@ -103,7 +103,7 @@ func normalizeRepoPath(p string) (string, error) {
 	return parts[len(parts)-2] + "/" + parts[len(parts)-1], nil
 }
 
-func (c *GHClient) do(method, path string, body any, out any) (int, error) {
+func (c *GHClient) do(ctx context.Context, method, path string, body any, out any) (int, error) {
 	var rd io.Reader
 	if body != nil {
 		b, err := json.Marshal(body)
@@ -112,7 +112,7 @@ func (c *GHClient) do(method, path string, body any, out any) (int, error) {
 		}
 		rd = bytes.NewReader(b)
 	}
-	req, err := http.NewRequest(method, c.baseURL+path, rd)
+	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, rd)
 	if err != nil {
 		return 0, err
 	}
@@ -142,28 +142,28 @@ func (c *GHClient) do(method, path string, body any, out any) (int, error) {
 	return resp.StatusCode, nil
 }
 
-func (c *GHClient) Dispatch(workflow, ref string, inputs map[string]string) error {
+func (c *GHClient) Dispatch(ctx context.Context, workflow, ref string, inputs map[string]string) error {
 	path := "/repos/" + c.repo + "/actions/workflows/" + url.PathEscape(workflow) + "/dispatches"
-	_, err := c.do("POST", path, map[string]any{"ref": ref, "inputs": inputs}, nil)
+	_, err := c.do(ctx, "POST", path, map[string]any{"ref": ref, "inputs": inputs}, nil)
 	return err
 }
 
-func (c *GHClient) Run(runID int64) (GHRun, error) {
+func (c *GHClient) Run(ctx context.Context, runID int64) (GHRun, error) {
 	var r GHRun
-	_, err := c.do("GET", fmt.Sprintf("/repos/%s/actions/runs/%d", c.repo, runID), nil, &r)
+	_, err := c.do(ctx, "GET", fmt.Sprintf("/repos/%s/actions/runs/%d", c.repo, runID), nil, &r)
 	return r, err
 }
 
-func (c *GHClient) Jobs(runID int64) ([]GHJob, error) {
+func (c *GHClient) Jobs(ctx context.Context, runID int64) ([]GHJob, error) {
 	var res struct {
 		Jobs []GHJob `json:"jobs"`
 	}
-	_, err := c.do("GET", fmt.Sprintf("/repos/%s/actions/runs/%d/jobs", c.repo, runID), nil, &res)
+	_, err := c.do(ctx, "GET", fmt.Sprintf("/repos/%s/actions/runs/%d/jobs", c.repo, runID), nil, &res)
 	return res.Jobs, err
 }
 
-func (c *GHClient) JobLogs(jobID int64) ([]byte, error) {
-	req, err := http.NewRequest(http.MethodGet, fmt.Sprintf("%s/repos/%s/actions/jobs/%d/logs", c.baseURL, c.repo, jobID), nil)
+func (c *GHClient) JobLogs(ctx context.Context, jobID int64) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("%s/repos/%s/actions/jobs/%d/logs", c.baseURL, c.repo, jobID), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -180,15 +180,15 @@ func (c *GHClient) JobLogs(jobID int64) ([]byte, error) {
 	if resp.StatusCode >= 300 {
 		return nil, fmt.Errorf("job logs: %s", resp.Status)
 	}
-	return io.ReadAll(resp.Body)
+	return io.ReadAll(io.LimitReader(resp.Body, maxLogBytes))
 }
 
-func (c *GHClient) Cancel(runID int64) error {
-	_, err := c.do("POST", fmt.Sprintf("/repos/%s/actions/runs/%d/cancel", c.repo, runID), nil, nil)
+func (c *GHClient) Cancel(ctx context.Context, runID int64) error {
+	_, err := c.do(ctx, "POST", fmt.Sprintf("/repos/%s/actions/runs/%d/cancel", c.repo, runID), nil, nil)
 	return err
 }
 
-func (c *GHClient) LatestDispatchRun(workflow string, since time.Time) (GHRun, error) {
+func (c *GHClient) LatestDispatchRun(ctx context.Context, workflow string, since time.Time) (GHRun, error) {
 	q := url.Values{}
 	q.Set("event", "workflow_dispatch")
 	q.Set("per_page", "10")
@@ -196,7 +196,7 @@ func (c *GHClient) LatestDispatchRun(workflow string, since time.Time) (GHRun, e
 	var res struct {
 		Runs []GHRun `json:"workflow_runs"`
 	}
-	if _, err := c.do("GET", path, nil, &res); err != nil {
+	if _, err := c.do(ctx, "GET", path, nil, &res); err != nil {
 		return GHRun{}, err
 	}
 	var best GHRun

@@ -232,10 +232,6 @@ func resolveEnvRefsWith(s string, lookup func(string) string) string {
 	}, false)
 }
 
-func resolveEnvRefsKeepUnset(s string) string {
-	return resolveEnvRefsKeepUnsetWith(s, os.LookupEnv)
-}
-
 func resolveEnvRefsKeepUnsetWith(s string, lookup func(string) (string, bool)) string {
 	if strings.IndexByte(s, '@') < 0 {
 		return s
