@@ -19,17 +19,12 @@ install in editor/vscode {
     retry<2, 1s> $ npm install --silent
 }
 
-# Packages and installs the host-platform extension. The VSIX bundles the
-# server binary so the install is self-contained (dev iteration can still
-# point at a source binary via .construct-lsp-dev or CONSTRUCT_LSP_DEV).
 build-ext in editor/vscode < build-lsp, install {
     var vsix_version = $ cd editor/vscode && node -p "require('./package.json').version"
     timeout<10m> $ npx @vscode/vsce@latest package --no-yarn
     $ code --install-extension constfile-&vsix_version.vsix --force as final_out
 }
 
-# Cross-compiles construct-lsp and packages the extension for every target
-# (darwin/win32/linux x x64/arm64).
 manual build-all < install {
     matrix goos in darwin, linux, windows; arch in amd64, arm64 {
         env {
