@@ -248,7 +248,7 @@ func TestRunFmtCheck(t *testing.T) {
 func TestRunCompletion(t *testing.T) {
 	for _, shell := range []string{"bash", "zsh", "fish"} {
 		out := captureMainStdout(t, func() {
-			if err := runCompletion([]string{shell}, &options{}); err != nil {
+			if err := runCompletion([]string{shell}); err != nil {
 				t.Errorf("completion %s: %v", shell, err)
 			}
 		})
@@ -256,7 +256,7 @@ func TestRunCompletion(t *testing.T) {
 			t.Errorf("completion %s missing dynamic command hook:\n%s", shell, out)
 		}
 	}
-	if err := runCompletion([]string{"tcsh"}, &options{}); err == nil {
+	if err := runCompletion([]string{"tcsh"}); err == nil {
 		t.Error("unknown shell should fail")
 	}
 }

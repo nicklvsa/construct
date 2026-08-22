@@ -4,4 +4,4 @@ package main
 
 import "os"
 
-func enableANSI(f *os.File) bool { return true }
+func enableANSI(_ *os.File) bool { return true }

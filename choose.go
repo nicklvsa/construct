@@ -210,7 +210,7 @@ func renderChooser(s *chooseState, width, height int) string {
 			line += " (default)"
 		}
 		if it.desc != "" {
-			if avail := width - len(line) - 5; avail > 4 {
+			if avail := width - utf8.RuneCountInString(line) - 5; avail > 4 {
 				line += " — " + truncate(it.desc, avail)
 			}
 		}
@@ -335,7 +335,7 @@ func chooseTargetsLine(items []chooseItem, data *pkg.ParsedData) ([]string, erro
 		fmt.Print("> ")
 		line, err := reader.ReadString('\n')
 		if err != nil {
-			return nil, err // EOF / Ctrl-D aborts
+			return nil, err
 		}
 
 		var selected []string

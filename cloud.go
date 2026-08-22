@@ -44,7 +44,12 @@ jobs:
         run: go install github.com/nicklvsa/construct@latest
 
       - name: Run construct
-        run: construct --github-actions ${{ inputs.args }} ${{ inputs.targets }}
+        env:
+          # Inputs never interpolate into the shell script directly (injection);
+          # unquoted expansion below only word-splits, it does not re-parse.
+          CONSTRUCT_ARGS: ${{ inputs.args }}
+          CONSTRUCT_TARGETS: ${{ inputs.targets }}
+        run: construct --github-actions $CONSTRUCT_ARGS $CONSTRUCT_TARGETS
 
       - name: Upload run state
         if: always()
@@ -271,7 +276,11 @@ func runCloudSubmit(args []string, o *options) error {
 		}
 	}
 
-	client := pkg.NewGHClient(repo, pkg.GHToken(), os.Getenv("CONSTRUCT_GITHUB_API"))
+	o.repo = repo // already resolved; keeps actionsClient from re-querying the remote
+	client, err := actionsClient(o)
+	if err != nil {
+		return err
+	}
 	inputs := map[string]string{
 		"targets": strings.Join(targets, " "),
 		"args":    argsLine,
@@ -316,10 +325,17 @@ func runCloudSubmit(args []string, o *options) error {
 
 func waitActionsRun(client *pkg.GHClient, runID int64, redact []string, jsonOut bool) error {
 	seen := make(map[int64]int64)
+	errStreak := 0
 	for {
 		run, err := client.Run(runID)
 		if err != nil {
-			return err
+			// Tolerate a few transient API failures before giving up.
+			errStreak++
+			if errStreak >= 3 {
+				return err
+			}
+		} else {
+			errStreak = 0
 		}
 		jobs, err := client.Jobs(runID)
 		if err == nil {

@@ -10,22 +10,27 @@ import (
 )
 
 var (
-	ansiOnce sync.Once
-	ansiOK   bool
+	ansiMu   sync.Mutex
+	ansiSeen = map[uintptr]bool{} // per handle: stdout and stderr differ
 )
 
 func enableANSI(f *os.File) bool {
-	ansiOnce.Do(func() {
-		handle := windows.Handle(f.Fd())
-		var mode uint32
-		if err := windows.GetConsoleMode(handle, &mode); err != nil {
-			return // not a console (redirected or a mintty pipe)
-		}
-		if mode&windows.ENABLE_VIRTUAL_TERMINAL_PROCESSING != 0 {
-			ansiOK = true
-			return
-		}
-		ansiOK = windows.SetConsoleMode(handle, mode|windows.ENABLE_VIRTUAL_TERMINAL_PROCESSING) == nil
-	})
-	return ansiOK
+	ansiMu.Lock()
+	defer ansiMu.Unlock()
+	if ok, seen := ansiSeen[f.Fd()]; seen {
+		return ok
+	}
+	handle := windows.Handle(f.Fd())
+	var mode uint32
+	if err := windows.GetConsoleMode(handle, &mode); err != nil {
+		ansiSeen[f.Fd()] = false // not a console (redirected or a mintty pipe)
+		return false
+	}
+	if mode&windows.ENABLE_VIRTUAL_TERMINAL_PROCESSING != 0 {
+		ansiSeen[f.Fd()] = true
+		return true
+	}
+	ok := windows.SetConsoleMode(handle, mode|windows.ENABLE_VIRTUAL_TERMINAL_PROCESSING) == nil
+	ansiSeen[f.Fd()] = ok
+	return ok
 }

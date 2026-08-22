@@ -6,11 +6,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -65,6 +68,9 @@ func (e *Executor) recordRun(name string, rec RunRecord) {
 	if !e.recordRuns {
 		return
 	}
+	if e.recordLogs {
+		rec.Log = e.takeRunLog(name)
+	}
 	e.mu.Lock()
 	if e.runRecords == nil {
 		e.runRecords = make(map[string]RunRecord)
@@ -100,9 +106,6 @@ func (e *Executor) saveRunRecords() {
 }
 
 func (e *Executor) loadState() {
-	if e.stateLoaded {
-		return
-	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if e.stateLoaded {
@@ -114,7 +117,9 @@ func (e *Executor) loadState() {
 	if err != nil {
 		return
 	}
-	_ = json.Unmarshal(data, &e.state)
+	if err := json.Unmarshal(data, &e.state); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: ignoring corrupt state file %s: %v\n", e.statePath(), err)
+	}
 	if e.state == nil {
 		e.state = make(map[string]string)
 	}
@@ -157,11 +162,24 @@ func (e *Executor) flushState() {
 	if !dirty || state == nil {
 		return
 	}
-	if err := os.MkdirAll(e.cacheDirFor(), 0755); err != nil {
-		return
+	if err := saveJSONFile(e.statePath(), state); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: could not save state to %s: %v\n", e.statePath(), err)
+		e.mu.Lock()
+		e.stateDirty = true // retry on the next flush
+		e.mu.Unlock()
 	}
-	data, _ := json.MarshalIndent(state, "", "  ")
-	_ = os.WriteFile(e.statePath(), data, 0644)
+}
+
+// saveJSONFile writes v as indented JSON, creating the parent directory.
+func saveJSONFile(path string, v any) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(v, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0644)
 }
 
 type fileCache map[string]map[string]string
@@ -172,19 +190,14 @@ func loadFileCache(dir string) fileCache {
 		return fileCache{}
 	}
 	var fc fileCache
-	if err := json.Unmarshal(data, &fc); err != nil {
+	if err := json.Unmarshal(data, &fc); err != nil || fc == nil {
 		return fileCache{}
 	}
 	return fc
 }
 
-func (fc fileCache) save(dir string) {
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return
-	}
-
-	data, _ := json.MarshalIndent(fc, "", "  ")
-	_ = os.WriteFile(filepath.Join(dir, "manifest.json"), data, 0644)
+func (fc fileCache) save(dir string) error {
+	return saveJSONFile(filepath.Join(dir, "manifest.json"), fc)
 }
 
 func (e *Executor) hashFiles(files []string) []string {
@@ -211,7 +224,11 @@ func (e *Executor) hashFiles(files []string) []string {
 		hashes := parallelHash(paths)
 		e.mu.Lock()
 		for k, i := range missing {
-			e.hashMemo[paths[k]] = hashes[k]
+			// Don't memoize failed hashes (""): a transiently unreadable file
+			// should be retried on the next check, not cached as empty forever.
+			if hashes[k] != "" {
+				e.hashMemo[paths[k]] = hashes[k]
+			}
 			out[i] = hashes[k]
 		}
 		e.mu.Unlock()
@@ -270,12 +287,6 @@ func (e *Executor) loadedCacheLocked() fileCache {
 	return e.cache
 }
 
-func (e *Executor) cacheManifest() fileCache {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	return e.loadedCacheLocked()
-}
-
 func (e *Executor) cacheKey(cmd *Command) string {
 	name := cmd.Name
 	if cmd.SourceFile != "" {
@@ -316,16 +327,25 @@ func (e *Executor) shouldSkip(cmd *Command, files []string) (bool, string) {
 		return false, ""
 	}
 
-	fc := e.cacheManifest()
+	// Snapshot the cached hashes under the lock: updateCache may write the
+	// shared maps concurrently from parallel prereqs (hashFiles takes e.mu
+	// itself, so the lock must not be held across the call).
+	e.mu.Lock()
 	key := e.cacheKey(cmd)
-	cached, exists := fc[key]
+	cached, exists := e.loadedCacheLocked()[key]
+	var cachedHashes map[string]string
+	if exists {
+		cachedHashes = make(map[string]string, len(cached))
+		maps.Copy(cachedHashes, cached)
+	}
+	e.mu.Unlock()
 	if !exists {
 		return false, "no cached result"
 	}
 
 	hashes := e.hashFiles(files)
 	for i, f := range files {
-		if cached[f] != hashes[i] {
+		if cachedHashes[f] != hashes[i] {
 			e.debugf("%s: file changed: %s\n", cmd.Name, f)
 			return false, fmt.Sprintf("%s changed", f)
 		}
@@ -333,22 +353,31 @@ func (e *Executor) shouldSkip(cmd *Command, files []string) (bool, string) {
 	return true, fmt.Sprintf("%d dep(s) unchanged", len(files))
 }
 
+// parallelHash hashes files concurrently with a bounded worker pool so a wide
+// glob (e.g. deps *.go) can't open thousands of file descriptors at once.
 func parallelHash(files []string) []string {
-	if len(files) < 2 {
-		out := make([]string, len(files))
+	out := make([]string, len(files))
+	workers := min(len(files), runtime.NumCPU())
+	if workers < 2 {
 		for i, f := range files {
 			out[i] = hashFile(f)
 		}
 		return out
 	}
-	out := make([]string, len(files))
+	var next atomic.Int64
 	var wg sync.WaitGroup
-	for i, f := range files {
-		wg.Add(1)
-		go func(i int, f string) {
+	wg.Add(workers)
+	for range workers {
+		go func() {
 			defer wg.Done()
-			out[i] = hashFile(f)
-		}(i, f)
+			for {
+				i := int(next.Add(1) - 1)
+				if i >= len(files) {
+					return
+				}
+				out[i] = hashFile(files[i])
+			}
+		}()
 	}
 	wg.Wait()
 	return out
@@ -407,6 +436,11 @@ func (e *Executor) flushCache() {
 	e.cacheDirty = false
 	e.mu.Unlock()
 	if dirty && fc != nil {
-		fc.save(e.cacheDirFor())
+		if err := fc.save(e.cacheDirFor()); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: could not save the cache manifest: %v\n", err)
+			e.mu.Lock()
+			e.cacheDirty = true // retry on the next flush
+			e.mu.Unlock()
+		}
 	}
 }

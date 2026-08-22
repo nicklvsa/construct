@@ -87,7 +87,7 @@ func exitError(err error) {
 	os.Exit(1)
 }
 
-var subcommandNames = []string{"init", "import", "shell", "doctor", "stats", "cloud", "clean", "lint", "graph", "completion", "fmt", "ui"}
+var subcommandNames = []string{"init", "import", "shell", "doctor", "stats", "cloud", "clean", "lint", "graph", "completion", "fmt", "ui", "runs", "mcp", "learn", "install"}
 
 func isSubcommandName(s string) bool {
 	return slices.Contains(subcommandNames, s)
@@ -158,6 +158,28 @@ func main() {
 		return
 	}
 
+	// `construct [Constfile] dev [...]` means service supervision whenever the
+	// file declares services; without services it falls through to normal
+	// execution so a plain command named dev keeps working.
+	{
+		rest := positionals
+		devFile := defaultConstfileName()
+		if len(rest) > 0 && fileExists(rest[0]) {
+			devFile = rest[0]
+			rest = rest[1:]
+		}
+		if len(rest) > 0 && rest[0] == "dev" && devSupervisionApplies(devFile) {
+			args := rest[1:]
+			if devFile != defaultConstfileName() {
+				args = append([]string{devFile}, args...)
+			}
+			if err := runDev(args, &o); err != nil {
+				exitError(err)
+			}
+			return
+		}
+	}
+
 	// --doctor is the doctor subcommand with an optional Constfile path.
 	if o.doctor {
 		if err := runDoctor(&o, determineInputs(positionals)); err != nil {
@@ -182,7 +204,7 @@ func main() {
 		case "doctor":
 			err = runDoctor(&o, inputs)
 		case "stats":
-			err = runStats(&o, inputs)
+			err = runStats(inputs)
 		case "cloud":
 			err = runCloud(positionals[1:], &o, inputs)
 		case "clean":
@@ -192,11 +214,19 @@ func main() {
 		case "graph":
 			err = runGraph(positionals[1:], &o)
 		case "completion":
-			err = runCompletion(positionals[1:], &o)
+			err = runCompletion(positionals[1:])
 		case "fmt":
 			err = runFmt(positionals[1:], &o)
 		case "ui":
 			err = runUI(positionals[1:], &o)
+		case "runs":
+			err = runRuns(positionals[1:], &o)
+		case "mcp":
+			err = runMCP(positionals[1:])
+		case "learn":
+			err = runLearn(positionals[1:], &o)
+		case "install":
+			err = runInstall(positionals[1:], &o)
 		}
 		if err != nil {
 			exitError(err)
@@ -221,6 +251,11 @@ func runBuildMain(o *options, inputs *ConstructInput) {
 
 	if o.watch && o.repeat > 0 {
 		fmt.Fprintln(os.Stderr, "--repeat cannot be combined with --watch")
+		os.Exit(2)
+	}
+
+	if o.since != "" && o.showList {
+		fmt.Fprintln(os.Stderr, "--since cannot be combined with --list")
 		os.Exit(2)
 	}
 

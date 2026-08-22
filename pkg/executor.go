@@ -1,6 +1,7 @@
 package pkg
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -59,6 +60,10 @@ type Executor struct {
 	stdoutSink      io.Writer
 	stderrSink      io.Writer
 	silentStatus    bool
+	recordLogs      bool
+	logBufs         map[string]*runLogBuffer
+	stdinMu         sync.Mutex    // guards stdinReader for confirm/prompt/input
+	stdinReader     *bufio.Reader // shared: buffered reads must not swallow the next prompt's input
 }
 
 type RunObserver interface {
@@ -84,6 +89,7 @@ type RunRecord struct {
 	DurationMs int64     `json:"duration_ms,omitempty"`
 	End        time.Time `json:"end"`
 	Error      string    `json:"error,omitempty"`
+	Log        string    `json:"log,omitempty"` // bounded capture of the command's streamed output
 }
 
 type commandRun struct {
@@ -206,7 +212,9 @@ func (e *Executor) SetTiming(t bool) {
 }
 
 func (e *Executor) SetObserver(o RunObserver) {
+	e.mu.Lock()
 	e.observer = o
+	e.mu.Unlock()
 }
 
 func (e *Executor) SetStdoutSink(w io.Writer) {
@@ -232,7 +240,10 @@ func (e *Executor) errSink() io.Writer {
 }
 
 func (e *Executor) errSinkFor(ctx *execContext) io.Writer {
-	if oc, ok := e.observer.(OutputCollector); ok && !e.quiet {
+	e.mu.Lock()
+	observer := e.observer
+	e.mu.Unlock()
+	if oc, ok := observer.(OutputCollector); ok && !e.quiet {
 		return oc.OutputWriter(ctx.target.Name)
 	}
 	return e.errSink()
@@ -243,14 +254,20 @@ func (e *Executor) SetSilentStatus(v bool) {
 }
 
 func (e *Executor) notifyStart(name string) {
-	if e.observer != nil {
-		e.observer.CommandStarted(name)
+	e.mu.Lock()
+	o := e.observer
+	e.mu.Unlock()
+	if o != nil {
+		o.CommandStarted(name)
 	}
 }
 
 func (e *Executor) notifyFinish(name string, rec RunRecord) {
-	if e.observer != nil {
-		e.observer.CommandFinished(name, rec)
+	e.mu.Lock()
+	o := e.observer
+	e.mu.Unlock()
+	if o != nil {
+		o.CommandFinished(name, rec)
 	}
 }
 
@@ -290,6 +307,7 @@ func (e *Executor) SetRecordRuns(v bool) {
 	e.recordRuns = v
 	if v {
 		e.runRecords = make(map[string]RunRecord)
+		e.recordLogs = true
 	}
 }
 
@@ -310,6 +328,43 @@ func (e *Executor) resolveWorkDir(dir string) string {
 
 func (e *Executor) EvaluateCommand(command *Command) error {
 	return e.evaluate(command, "", false)
+}
+
+func (e *Executor) RunServiceBody(command *Command) error {
+	resolveValue := func(s, scope string) string {
+		s = resolveVarRefs(s, func(name string) (string, bool) {
+			return e.StructuredParse.LookupVariable(name, scope)
+		})
+		return ResolveEnvRefs(s)
+	}
+	ctx := &execContext{
+		target:      command,
+		srcFile:     command.SourceFile,
+		forcePrefix: true,
+		container:   e.resolveContainer(resolveValue(command.Container, command.Name)),
+	}
+	var ctxCancel context.CancelFunc
+	if command.Timeout != "" {
+		if d, err := time.ParseDuration(command.Timeout); err == nil {
+			ctx.runCtx, ctxCancel = context.WithTimeout(e.effectiveRunCtx(ctx), d)
+		}
+	}
+	if ctxCancel != nil {
+		defer ctxCancel()
+	}
+	cmdEnv := slices.Clone(e.env)
+	ctx.env = &cmdEnv
+	if ctx.container != "" {
+		if f, err := os.CreateTemp("", "construct-env-"); err == nil {
+			for _, kv := range containerForwardedEnv(cmdEnv) {
+				fmt.Fprintln(f, kv)
+			}
+			f.Close()
+			ctx.envFile = f.Name()
+			defer os.Remove(ctx.envFile)
+		}
+	}
+	return e.execBody(ctx, e.bodyFor(command))
 }
 
 func (e *Executor) evaluate(command *Command, prereqDir string, isPrereq bool) error {
@@ -492,7 +547,7 @@ func (e *Executor) executeCommand(command *Command, prereqDir string, isPrereq b
 		if e.ghActions && !isPrereq {
 			ghErrorAnnotation(bodyErr)
 		}
-		rec := RunRecord{Status: "failed", Exit: exitCodeOfErr(bodyErr), DurationMs: time.Since(start).Milliseconds(), End: time.Now(), Error: bodyErr.Error()}
+		rec := RunRecord{Status: "failed", Exit: exitCodeOf(bodyErr), DurationMs: time.Since(start).Milliseconds(), End: time.Now(), Error: bodyErr.Error()}
 		e.recordRun(command.Name, rec)
 		e.notifyFinish(command.Name, rec)
 		return bodyErr

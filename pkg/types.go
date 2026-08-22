@@ -3,6 +3,7 @@ package pkg
 import (
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 )
@@ -63,14 +64,19 @@ func (p *ParsedData) computeIndexedOutputRefs() map[string]bool {
 		refs[n] = true
 	}
 	for n := range all {
-		if dot := strings.LastIndexByte(n, '.'); dot > 0 && n[dot+1:] != "" && strings.Trim(n[dot+1:], "0123456789") == "" {
-			refs[n[:dot]] = true
+		// &cmd.0 / &cmd.1 … imply the parent command's outputs are indexed.
+		if dot := strings.LastIndexByte(n, '.'); dot > 0 {
+			if _, err := strconv.Atoi(n[dot+1:]); err == nil {
+				refs[n[:dot]] = true
+			}
 		}
 	}
 	return refs
 }
 
-func (p *ParsedData) buildIndexMapsLocked() {
+// ensureIndexMapsLocked lazily builds the lookup maps on first use; it is a
+// no-op once they exist. Callers must hold p.mu.
+func (p *ParsedData) ensureIndexMapsLocked() {
 	if p.variableMap == nil {
 		p.variableMap = make(map[string]*Variable, len(p.Variables))
 		for _, v := range p.Variables {
@@ -102,7 +108,7 @@ func (p *ParsedData) buildIndexMaps() {
 func (p *ParsedData) addVariable(v *Variable) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.buildIndexMapsLocked()
+	p.ensureIndexMapsLocked()
 	p.Variables = append(p.Variables, v)
 	p.variableMap[v.Scope+"."+v.Name] = v
 }
@@ -130,7 +136,7 @@ func (p *ParsedData) SeedScope(scope string, vars []*Variable) {
 func (p *ParsedData) addCommand(cmd *Command) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.buildIndexMapsLocked()
+	p.ensureIndexMapsLocked()
 	p.Commands = append(p.Commands, cmd)
 	p.commandMap[cmd.Name] = cmd
 }
@@ -139,10 +145,12 @@ func (p *ParsedData) SetVariable(name, scope, value string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	p.buildIndexMapsLocked()
+	p.ensureIndexMapsLocked()
 	key := scope + "." + name
 	if v, ok := p.variableMap[key]; ok {
 		v.Value = value
+		v.IsList = false // a scalar overwrite replaces any previous list
+		v.List = nil
 		return
 	}
 	v := &Variable{Name: name, Value: value, Scope: scope}
@@ -158,6 +166,8 @@ func (p *ParsedData) LookupVariable(name, scope string) (string, bool) {
 	return v.Value, true
 }
 
+// GetVariable returns a copy: callers must not see concurrent SetVariable
+// writes through a shared pointer.
 func (p *ParsedData) GetVariable(variableName, scope string) (*Variable, error) {
 	if strings.IndexByte(variableName, '"') >= 0 {
 		variableName = strings.ReplaceAll(variableName, `"`, "")
@@ -169,7 +179,7 @@ func (p *ParsedData) GetVariable(variableName, scope string) (*Variable, error) 
 
 	if p.variableMap == nil {
 		p.mu.Lock()
-		p.buildIndexMapsLocked()
+		p.ensureIndexMapsLocked()
 		p.mu.Unlock()
 	}
 
@@ -177,11 +187,13 @@ func (p *ParsedData) GetVariable(variableName, scope string) (*Variable, error) 
 	defer p.mu.RUnlock()
 
 	if v, ok := p.variableMap[scope+"."+variableName]; ok {
-		return v, nil
+		c := *v
+		return &c, nil
 	}
 	if scope != "global" {
 		if v, ok := p.variableMap["global."+variableName]; ok {
-			return v, nil
+			c := *v
+			return &c, nil
 		}
 	}
 	return nil, fmt.Errorf("cannot find variable with name %s", variableName)
@@ -190,10 +202,13 @@ func (p *ParsedData) GetVariable(variableName, scope string) (*Variable, error) 
 func (p *ParsedData) GetCommand(commandName string) (*Command, error) {
 	if p.commandMap == nil {
 		p.mu.Lock()
-		p.buildIndexMapsLocked()
+		p.ensureIndexMapsLocked()
 		p.mu.Unlock()
 	}
-	if cmd, ok := p.commandMap[commandName]; ok {
+	p.mu.RLock()
+	cmd, ok := p.commandMap[commandName]
+	p.mu.RUnlock()
+	if ok {
 		return cmd, nil
 	}
 	return nil, fmt.Errorf("cannot find command with name %s", commandName)
@@ -251,7 +266,7 @@ func (p *ParsedData) SetVariableList(name, scope string, items []string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	value := strings.Join(items, ", ")
-	p.buildIndexMapsLocked()
+	p.ensureIndexMapsLocked()
 	key := scope + "." + name
 	if v, ok := p.variableMap[key]; ok {
 		v.Value = value
@@ -278,6 +293,19 @@ func (p *ParsedData) LookupVariableValue(name, scope string) (Value, bool) {
 func StripManual(line string) (string, bool) {
 	trimmed := strings.TrimSpace(line)
 	rest, ok := strings.CutPrefix(trimmed, "manual ")
+	if !ok {
+		return line, false
+	}
+	rest = strings.TrimLeft(rest, " 	")
+	if rest == "" || !isCommandNameStart(rest[0]) {
+		return line, false
+	}
+	return rest, true
+}
+
+func StripService(line string) (string, bool) {
+	trimmed := strings.TrimSpace(line)
+	rest, ok := strings.CutPrefix(trimmed, "service ")
 	if !ok {
 		return line, false
 	}
@@ -322,6 +350,7 @@ const (
 	StmtConfirm    = "confirm"
 	StmtPrompt     = "prompt"
 	StmtInput      = "input"
+	StmtPort       = "port"
 )
 
 type SwitchCase struct {
@@ -364,6 +393,8 @@ type Command struct {
 	SourceFile      string      `json:"source_file,omitempty"`
 	CloudAccessible bool        `json:"cloud_accessible"`
 	IsDefault       bool        `json:"is_default"`
+	IsService       bool        `json:"is_service,omitempty"`
+	Port            string      `json:"port,omitempty"`
 	LazyEval        *LazyOutput `json:"lazy_output"`
 	IsPrereq        bool        `json:"is_prereq"`
 

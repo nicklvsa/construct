@@ -635,3 +635,121 @@ func TestLSPEnvCommandDiagnostic(t *testing.T) {
 		t.Errorf("expected phantom-env diagnostic, got: %s", out)
 	}
 }
+
+func TestModifierBracketNotADependency(t *testing.T) {
+	lines := []string{
+		"    timeout<10m> $ npx @vscode/vsce@latest package --no-yarn",
+		"    retry<2, 1s> $ npm install --silent",
+		"    rm<kill> construct-lsp construct-lsp.exe",
+		"    lock<5s> releases { }",
+		"    parallel<4> for x in a, b { }",
+	}
+	for _, line := range lines {
+		for col := 0; col <= len(line); col++ {
+			if _, _, _, ok := fileDepAtPosition(line, col); ok {
+				t.Errorf("fileDepAtPosition matched on modifier line %q at col %d", line, col)
+			}
+			if _, ok := prereqNameAtPosition(line, col); ok {
+				t.Errorf("prereqNameAtPosition matched on modifier line %q at col %d", line, col)
+			}
+		}
+	}
+}
+
+func TestDependencyMarkerStillFound(t *testing.T) {
+	line := "build < src/*.go, README.md {"
+	fd, start, end, ok := fileDepAtPosition(line, strings.Index(line, "README.md"))
+	if !ok || fd != "README.md" {
+		t.Errorf("fileDepAtPosition = %q, %v; want README.md", fd, ok)
+	}
+	if want := strings.Index(line, "README.md"); start != want || end != want+len("README.md") {
+		t.Errorf("span = %d..%d, want %d..%d", start, end, want, want+len("README.md"))
+	}
+
+	line = "build timeout<30s> < src/*.go {"
+	if _, _, _, ok := fileDepAtPosition(line, strings.Index(line, "src")); !ok {
+		t.Errorf("fileDepAtPosition should find deps after a timeout modifier: %q", line)
+	}
+
+	// Prereq names still resolve on headers with modifiers.
+	if name, ok := prereqNameAtPosition(line, strings.Index(line, "src")); !ok || name != "src" {
+		t.Errorf("prereqNameAtPosition = %q, %v; want src", name, ok)
+	}
+}
+
+func TestLSPServiceSyntax(t *testing.T) {
+	text := `service api < assets {
+    port 8080
+    $ run-api
+}
+
+assets {
+    mkdir dist
+}
+
+dev < api {
+    $ echo setup
+}
+`
+	// Hovering the `service` keyword documents supervision.
+	if got, ok := hoverAt(t, text, 0, 3); !ok || !strings.Contains(got, "long-running") {
+		t.Errorf("service keyword hover = %q, ok=%v", got, ok)
+	}
+	// Hovering the service name shows its command hover with the port.
+	if got, ok := hoverAt(t, text, 0, 11); !ok || !strings.Contains(got, "port 8080") {
+		t.Errorf("service command hover = %q, ok=%v", got, ok)
+	}
+	// `port` statement hover.
+	if got, ok := hoverAt(t, text, 1, 6); !ok || !strings.Contains(got, "readiness") {
+		t.Errorf("port hover = %q, ok=%v", got, ok)
+	}
+
+	uri := "file:///test.constfile"
+	s := newServer()
+	s.updateDoc(uri, text)
+	params, _ := json.Marshal(map[string]interface{}{
+		"textDocument": map[string]string{"uri": uri},
+	})
+	res, err := s.handleDocumentSymbol(params)
+	if err != nil {
+		t.Fatalf("documentSymbol: %v", err)
+	}
+	foundService := false
+	for _, sym := range res.([]documentSymbol) {
+		if sym.Name == "api" && strings.HasPrefix(sym.Detail, "service 8080") {
+			foundService = true
+		}
+	}
+	if !foundService {
+		t.Errorf("service symbol detail missing: %v", res)
+	}
+}
+
+func TestLSPCommandNameAtLineService(t *testing.T) {
+	if name, ok := commandNameAtLine("service api < assets {"); !ok || name != "api" {
+		t.Errorf("commandNameAtLine(service header) = %q, ok=%v", name, ok)
+	}
+	if name, ok := commandNameAtLine("manual service web {"); !ok || name != "web" {
+		t.Errorf("commandNameAtLine(manual service) = %q, ok=%v", name, ok)
+	}
+	if name, ok := commandNameAtLine("manual build {"); !ok || name != "build" {
+		t.Errorf("commandNameAtLine(manual) = %q, ok=%v", name, ok)
+	}
+}
+
+func TestLSPOSArchHovers(t *testing.T) {
+	text := `var p = os()
+var a = arch()
+`
+	for _, c := range []struct {
+		line, char int
+		want       string
+	}{
+		{0, 8, "platform"},
+		{1, 8, "architecture"},
+	} {
+		if got, ok := hoverAt(t, text, c.line, c.char); !ok || !strings.Contains(got, c.want) {
+			t.Errorf("line %d: hover = %q, ok=%v, want %q", c.line, got, ok, c.want)
+		}
+	}
+}

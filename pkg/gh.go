@@ -80,7 +80,7 @@ func ParseRepoFromRemote(remote string) (string, error) {
 	case strings.HasPrefix(r, "https://") || strings.HasPrefix(r, "http://") || strings.HasPrefix(r, "ssh://"):
 		u, err := url.Parse(r)
 		if err != nil {
-			return "", fmt.Errorf("unrecognized git remote %q", remote)
+			return "", fmt.Errorf("unrecognized git remote %q: %w", remote, err)
 		}
 		if !strings.EqualFold(u.Hostname(), "github.com") {
 			return "", fmt.Errorf("remote %q is not a github.com repository", remote)
@@ -130,7 +130,10 @@ func (c *GHClient) do(method, path string, body any, out any) (int, error) {
 	}
 	defer resp.Body.Close()
 	if out != nil && resp.StatusCode < 300 {
-		return resp.StatusCode, json.NewDecoder(resp.Body).Decode(out)
+		if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
+			return resp.StatusCode, fmt.Errorf("decode github response %s %s (status %d): %w", method, path, resp.StatusCode, err)
+		}
+		return resp.StatusCode, nil
 	}
 	if resp.StatusCode >= 300 {
 		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
@@ -164,6 +167,8 @@ func (c *GHClient) JobLogs(jobID int64) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
 	if c.token != "" {
 		req.Header.Set("Authorization", "Bearer "+c.token)
 	}

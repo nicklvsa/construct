@@ -125,6 +125,9 @@ func (imp *makeImporter) consume(line string, doc []string, tabbed bool) {
 	}
 
 	fields := strings.Fields(line)
+	if len(fields) == 0 {
+		return
+	}
 	switch fields[0] {
 	case "ifeq", "ifneq", "ifdef", "ifndef", "else", "endif":
 		imp.flag("skipped conditional directive (put conditions inside commands)", line)
@@ -374,11 +377,13 @@ func (imp *makeImporter) emit() ImportResult {
 		}
 	}
 
-	if def, ok := mapping[imp.defaultGoal]; ok && imp.defaultGoal != "" {
-		out.WriteString("\n# Default goal\n_ < ")
-		out.WriteString(def)
-		out.WriteString(" { }\n")
-		commands++
+	if imp.defaultGoal != "" {
+		if def, ok := mapping[imp.defaultGoal]; ok {
+			out.WriteString("\n# Default goal\n_ < ")
+			out.WriteString(def)
+			out.WriteString(" { }\n")
+			commands++
+		}
 	}
 	if flags.Len() > 0 {
 		out.WriteString("\n# ---- flagged during import ----\n")

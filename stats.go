@@ -9,7 +9,7 @@ import (
 	"github.com/nicklvsa/construct/pkg"
 )
 
-func runStats(o *options, inputs *ConstructInput) error {
+func runStats(inputs *ConstructInput) error {
 	dir := filepath.Join(filepath.Dir(inputs.FileName), ".construct-cache")
 	hist := pkg.LoadRunHistory(dir)
 	if len(hist) == 0 {
@@ -26,10 +26,10 @@ func runStats(o *options, inputs *ConstructInput) error {
 	fmt.Printf("%-20s %5s %10s %10s %10s %s\n", "command", "runs", "avg", "last", "total", "last status")
 	for _, n := range names {
 		recs := hist[n]
-		var total int64
-		for _, r := range recs {
-			total += r.DurationMs
+		if len(recs) == 0 {
+			continue // tolerate partially written history entries
 		}
+		total := sumMs(recs)
 		last := recs[len(recs)-1]
 		avg := total / int64(len(recs))
 		fmt.Printf("%-20s %5d %10s %10s %10s %s\n", n, len(recs), durMs(avg), durMs(last.DurationMs), durMs(total), last.Status)

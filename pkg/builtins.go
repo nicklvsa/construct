@@ -17,8 +17,12 @@ import (
 func (e *Executor) runBuiltin(ctx *execContext, stmt BodyStatement) error {
 	ignoreErr := stmt.Tolerant
 	parts := splitArgs(stmt.BuiltinArgs)
+	// timeout<30s> on a builtin is enforced via the exec context (it bounds
+	// downloads; local file operations are fast enough not to need it).
+	stmtCtx, cancel := e.statementCtx(ctx, stmt.Timeout)
+	defer cancel()
 	release := e.acquire()
-	err := e.builtinExec(ctx, stmt.Shell, parts, stmt.Modifier)
+	err := e.builtinExec(stmtCtx, stmt.Shell, parts, stmt.Modifier)
 	release()
 	code := 0
 	if err != nil {
@@ -200,11 +204,11 @@ func (e *Executor) builtinDownload(ctx *execContext, args []string) error {
 	}
 	dst := e.builtinPath(ctx, args[1])
 	if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
-		return err
+		return fmt.Errorf("download %s: %w", dst, err)
 	}
 	out, err := os.Create(dst)
 	if err != nil {
-		return err
+		return fmt.Errorf("download %s: %w", dst, err)
 	}
 	defer out.Close()
 	if e.quiet || !termIsTTY(os.Stdout) || resp.ContentLength <= 0 {
@@ -258,26 +262,26 @@ func (e *Executor) builtinExtract(ctx *execContext, args []string) error {
 	case strings.HasSuffix(lower, ".tar.gz") || strings.HasSuffix(lower, ".tgz"):
 		f, err := os.Open(archive)
 		if err != nil {
-			return err
+			return fmt.Errorf("extract %s: %w", archive, err)
 		}
 		defer f.Close()
 		gr, err := gzip.NewReader(f)
 		if err != nil {
-			return err
+			return fmt.Errorf("extract %s: %w", archive, err)
 		}
 		defer gr.Close()
 		return extractTar(gr, dir)
 	case strings.HasSuffix(lower, ".tar.bz2"):
 		f, err := os.Open(archive)
 		if err != nil {
-			return err
+			return fmt.Errorf("extract %s: %w", archive, err)
 		}
 		defer f.Close()
 		return extractTar(bzip2.NewReader(f), dir)
 	case strings.HasSuffix(lower, ".tar"):
 		f, err := os.Open(archive)
 		if err != nil {
-			return err
+			return fmt.Errorf("extract %s: %w", archive, err)
 		}
 		defer f.Close()
 		return extractTar(f, dir)
@@ -375,21 +379,24 @@ func extractTar(r io.Reader, dir string) error {
 func copyFile(src, dst string) error {
 	in, err := os.Open(src)
 	if err != nil {
-		return err
+		return fmt.Errorf("cp %s: %w", src, err)
 	}
 	defer in.Close()
 	if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
-		return err
+		return fmt.Errorf("cp %s: %w", dst, err)
 	}
 	out, err := os.Create(dst)
 	if err != nil {
-		return err
+		return fmt.Errorf("cp %s: %w", dst, err)
 	}
-	defer out.Close()
 	if _, err := io.Copy(out, in); err != nil {
-		return err
+		out.Close()
+		return fmt.Errorf("cp %s -> %s: %w", src, dst, err)
 	}
-	return out.Close()
+	if err := out.Close(); err != nil {
+		return fmt.Errorf("cp %s: %w", dst, err)
+	}
+	return nil
 }
 
 func copyDir(src, dst string) error {

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/subtle"
 	"embed"
 	"encoding/hex"
 	"encoding/json"
@@ -33,18 +34,10 @@ type uiServer struct {
 }
 
 func runUI(args []string, o *options) error {
-	var rest []string
-	for _, a := range args {
-		if strings.HasPrefix(a, "-") {
-			return exitAt(2, "unknown ui option %q", a)
-		}
-		rest = append(rest, a)
+	if err := rejectSubcommandFlags(args, "ui"); err != nil {
+		return err
 	}
-	fileName := defaultConstfileName()
-	if len(rest) > 0 && fileExists(rest[0]) {
-		fileName = rest[0]
-		rest = rest[1:]
-	}
+	fileName, rest := splitConstfileArgs(args)
 	if len(rest) > 0 {
 		return exitAt(2, "usage: construct ui [Constfile]")
 	}
@@ -83,6 +76,7 @@ func runUI(args []string, o *options) error {
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(sigCh)
 	<-sigCh
 	_ = httpSrv.Close()
 	return nil
@@ -115,7 +109,7 @@ func (s *uiServer) auth(next http.HandlerFunc) http.HandlerFunc {
 		if tok == "" {
 			tok = r.URL.Query().Get("t")
 		}
-		if tok != s.token {
+		if subtle.ConstantTimeCompare([]byte(tok), []byte(s.token)) != 1 {
 			http.Error(w, "forbidden", http.StatusForbidden)
 			return
 		}

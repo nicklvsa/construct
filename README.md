@@ -23,6 +23,8 @@ construct [options] [Constfile] [commands...]
 | `list` | List all available commands |
 | `init [template]` | Scaffold a Constfile (`minimal`, `go`, `python`, `node`, `rust`, `monorepo`; `--force` to overwrite) |
 | `import [Makefile] [out]` | Convert a Makefile to a Constfile (best-effort; `--force` to overwrite) |
+| `import update [specs...]` | Refresh remote recipe imports to their ref's latest commit |
+| `dev [services...]` | Supervise long-running `service` commands (restart, ports, Ctrl-C stops all) |
 | `shell [command]` | Start a shell with a command's env block, workdir, or container (`--container IMG` for ad-hoc) |
 | `doctor` | Diagnose the environment, Constfile, tools, and cloud file |
 | `stats` | Show per-command timing history from `.construct-cache/run-state.json` |
@@ -35,6 +37,10 @@ construct [options] [Constfile] [commands...]
 | `graph [targets...]` | Print the dependency tree (`--dot` for Graphviz, `--json` for tools) |
 | `completion <shell>` | Emit bash/zsh/fish completion (flags + your Constfile's commands) |
 | `fmt [files...]` | Canonicalize Constfile indentation (`--check` for CI) |
+| `runs [Constfile]` | Browse run history: `list`, `show <cmd> [n]`, `diff <cmd> [a b]` |
+| `mcp [Constfile]` | Serve build tools to MCP clients (AI agents) over stdio |
+| `learn [Constfile] [targets...]` | Discover file deps: trace reads under strace, or list unwatched files |
+| `install` | Install shell completions (`--hook NAME [--] targets` for git hooks; `--uninstall`) |
 | `ui [Constfile]` | Edit the Constfile (and its imports) in a drag-and-drop browser editor |
 
 ### Options
@@ -65,6 +71,7 @@ construct [options] [Constfile] [commands...]
 | `--yes` | Auto-approve `confirm` statements |
 | `--force`, `-f` | Overwrite files (`init`) |
 | `--notify` | Desktop notification when the run finishes (works with `--watch` and `--repeat`) |
+| `--since REF` | Only run targets affected by changes since a git ref (e.g. `origin/main`) |
 | `--tui` | Live dashboard for the run (`q` detaches, Ctrl-C cancels) |
 | `--container IMG` | `shell`: run in this container image instead of the command's |
 | `--strict` | `lint`: fail on warnings too |
@@ -150,6 +157,7 @@ Available in variable values, `env` blocks, `switch` expressions, and
 | `glob(pattern)` | matching files as a list |
 | `sort(list)`, `uniq(list)`, `join(list, sep)`, `split(s, sep)` | list helpers |
 | `env("NAME")` | an environment variable's value |
+| `os()` / `arch()` | the platform (`darwin`, `linux`, `windows`) and architecture (`amd64`, `arm64`) |
 | `state("name")` / `@state("name")` | a value persisted by a `state` declaration |
 | `exists(path)`, `missing(path)`, `require(tool)` | "true"/"false" checks |
 
@@ -261,6 +269,81 @@ deploy < lib.build {
   alone, so shadowing keeps working.
 - The same file may be imported twice under different namespaces.
 - Nested namespaces compose: `lib` importing `sub` as `sub` yields `lib.sub.*`.
+
+#### Conditional imports
+
+An import can carry a condition; when it evaluates false, the import is
+skipped entirely. `on` matches platforms (`darwin`, `linux`, `windows`,
+`macos` as an alias for darwin, comma-separated for several); `if` accepts the
+full condition language (`exists`, `glob`, `require`, `os("...")`,
+`arch("...")`, `@ENV` refs, and variables defined above the import):
+
+```
+import "mac.constfile" on macos
+import "linux.constfile" on linux, windows
+import "local.constfile" if exists("local.constfile")
+import "ci.constfile" if "@CI" == "true" && require("docker")
+```
+
+#### Remote recipe imports
+
+`import git` fetches a Constfile from a git repository — shared build recipes
+without a package manager:
+
+```
+import git "acme/const-recipes"                 # GitHub shorthand
+import git "github.com/acme/recipes/tools@v2"   # subdir + tag/branch/SHA pin
+import git "gitlab.com/acme/recipes" as recipes
+```
+
+- The repo's `Constfile` (at the root or the given subpath) is imported like a
+  local file, with all namespacing rules. Without `as`, the import is
+  namespaced by the repository name.
+- The first fetch records the commit in `.construct.lock` next to your
+  Constfile; after that, builds use the pinned copy from
+  `.construct-cache/imports/` and work offline. Commit the lock file.
+- `construct import update [specs...]` re-fetches at the pinned ref's latest
+  commit (or the default branch for unpinned imports) and rewrites the lock;
+  imports pinned to a commit SHA never move.
+- Private repos use your local git credentials (ssh remotes like
+  `git@github.com:acme/recipes.git` work as-is).
+
+### Services (construct dev)
+
+Commands declared with `service` are long-running processes that
+`construct dev` supervises — a Procfile runner built into the build tool:
+
+```
+service api {
+    port 8080
+    $ go run ./api
+}
+
+service web < api {
+    port 5173
+    onchange src/**.tsx
+    $ npm run dev
+}
+
+dev < api, web {
+    $ docker compose up -d      # runs once as setup
+}
+```
+
+- `construct dev` runs the aggregator's (or services') non-service
+  prerequisites to completion first, runs the aggregator body once as setup,
+  then starts the services in dependency order.
+- `port N` marks readiness: dependents start only once the port accepts
+  connections (90s timeout, then a warning).
+- Crashed services restart with backoff (1s doubling to 10s, reset after a
+  30s run); `onchange` globs restart a service the moment its inputs change.
+- Output is interleaved with `[service]` prefixes. Ctrl-C stops everything
+  (twice to force).
+- `construct dev api` starts a subset; `construct dev <cmd>` treats any
+  non-service command as the aggregator (its service prereqs are supervised,
+  its body is the setup). A regular command that depends on a service is an
+  error — invert the dependency. Running a service directly
+  (`construct api`) still just runs it once.
 
 ### Doc Comments
 
@@ -441,6 +524,24 @@ build produces dist/app < src/*.go {
 ```
 
 The produced files may be globs, and the check is mtime-based like `make`.
+
+### Affected Runs (--since)
+
+`--since REF` runs only the requested targets whose inputs changed since a git
+ref — tracked modifications (staged or not), deletions, and untracked files
+all count:
+
+```bash
+construct --since origin/main build test   # run build/test only if affected
+construct --since HEAD~2 --dry-run build    # preview what a change would trigger
+```
+
+A target is affected when any changed file matches its file deps, `onchange`
+globs, or `produces`, when its declaring Constfile changed, or when any
+prerequisite is affected. Unaffected requested targets are skipped with a
+note (`(build not affected since origin/main — skipping)`); with no explicit
+targets the default command's closure is filtered. `--since` composes with
+`--dry-run`, `--explain`, `--watch`, `--resume`, and `--choose`.
 
 ### Environment Files
 
@@ -778,6 +879,29 @@ manual build-construct {
 }
 ```
 
+### Dependency Discovery (learn)
+
+The classic make-likes failure is a forgotten file dep: the command runs
+stale because the cache never sees the file it actually reads. `construct
+learn` finds those gaps:
+
+```bash
+construct learn build        # run 'build' traced, report uncovered reads
+construct learn              # no tracer: list files nothing watches
+construct learn --json       # machine-readable
+```
+
+- On Linux with `strace` available, learn re-runs the targets under
+  `strace -f -e trace=%file`, collects successful file reads (and `execve`)
+  inside the repo, and reports — per command that ran — files read but not
+  covered by that command's file deps. `.git`, `.construct-cache`, and other
+  commands' `produces` artifacts are excluded.
+- Without a tracer (macOS, or Linux without strace), learn falls back to
+  static analysis: repo files matched by no command's deps, `onchange`, or
+  `produces` — files whose edits trigger nothing.
+
+Suggestions are prints only; learn never edits the Constfile.
+
 ### Cleaning
 
 `construct clean [targets...]` deletes the files a command declares in
@@ -798,11 +922,52 @@ trims trailing whitespace, and normalizes the trailing newline — statement
 text (shell lines especially) is preserved byte-for-byte. `construct fmt
 --check` exits non-zero on unformatted files for CI.
 
+### Run History
+
+Every run records per-command status, exit code, duration, and a bounded
+capture of the command's streamed output (statement headers included) in
+`.construct-cache/run-state.json`. Browse it with `construct runs`:
+
+```bash
+construct runs                       # recent records across all commands
+construct runs show build            # latest record for 'build', with its log
+construct runs show build 3          # third-most-recent record
+construct runs diff build            # diff the last two captured logs
+construct runs show test --json      # machine-readable
+```
+
+`diff` shows `+`/`-` line changes between two runs of the same command —
+handy for "did the failing output change?" Logs are capped per record, so
+history stays small.
+
 ### Shell Completions
 
 `construct completion bash|zsh|fish` prints a completion script that
 completes flags and your Constfile's command names (via a hidden
-`construct __targets` helper). Source it from your shell profile.
+`construct __targets` helper). Source it from your shell profile — or use
+`construct install` to do it for you:
+
+```bash
+construct install                    # completions for your $SHELL
+construct install --shell fish       # pick a shell explicitly
+construct install --uninstall        # remove them again
+```
+
+zsh/bash completions land in `~/.construct/completions/` with a source line
+appended to your rc (idempotently); fish completions go to
+`~/.config/fish/completions/` and load automatically.
+
+`install` also manages shared git hooks:
+
+```bash
+construct install --hook pre-push -- build test
+construct install --hook pre-commit          # runs the default command
+construct install --uninstall --hook pre-push
+```
+
+Hooks are scripts in `.construct-hooks/` at the repo root with
+`core.hooksPath` pointed at the directory — commit it and the whole team
+runs the same checks.
 
 ### Notifications
 
@@ -1052,6 +1217,28 @@ construct ui --no-open        # print the URL without launching a browser
   the printed URL; it refuses to overwrite files that changed on disk since
   they were loaded.
 
+## MCP Server
+
+`construct mcp` speaks the Model Context Protocol over stdio, so AI agents
+and editors can discover and drive the build without guessing:
+
+Register it with any MCP client by pointing it at the binary:
+
+```json
+{
+  "mcpServers": {
+    "construct": { "command": "/usr/local/bin/construct", "args": ["mcp"] }
+  }
+}
+```
+
+Tools exposed (each shells out to the construct binary in the workspace, so
+behavior matches the CLI exactly): `list_targets` (commands, descriptions,
+args, prereqs as JSON), `run_targets` (with `dry_run`, `explain`, `jobs`,
+`keep_going`, variable overrides, and a timeout), `graph`, `lint`, and
+`run_history`. All tools accept `file` and `cwd` arguments. The server is
+newline-delimited JSON-RPC 2.0 — no extra dependencies, one binary.
+
 ## Platform-Specific Files
 
 Construct automatically looks for platform-specific Constfiles:
@@ -1099,7 +1286,9 @@ The VSCode extension (`editor/vscode`) ships a language server with hover
 `&fail.*`/`&last.*` context refs), go-to-definition (variables, commands,
 prereqs, file deps, workdirs, and `state("...")` refs), completions
 (variables, command names, statement keywords, builtins, and functions),
-document symbols (commands and state declarations), and diagnostics
-(parse errors, duplicate prereqs, out-of-range output indexes, named-output
-hints). The TextMate grammar highlights all statements, blocks, list
-literals, and expressions.
+document symbols (commands — services marked with their port — and state
+declarations), and diagnostics (parse errors, duplicate prereqs,
+out-of-range output indexes, named-output hints). The TextMate grammar
+highlights all statements, blocks, list literals, and expressions,
+including `service`/`port` declarations and `import git` / conditional
+import lines.

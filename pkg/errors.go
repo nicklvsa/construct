@@ -123,7 +123,8 @@ func (e *KeepGoingError) Error() string {
 
 func (e *KeepGoingError) ExitCode() int {
 	for _, err := range e.Errs {
-		if ce, ok := err.(*CommandError); ok {
+		var ce *CommandError
+		if errors.As(err, &ce) {
 			return ce.ExitCode
 		}
 	}
@@ -135,15 +136,13 @@ func exitCodeOf(err error) int {
 	if err == nil {
 		return 0
 	}
-	if ee, ok := err.(*exec.ExitError); ok {
-		return ee.ExitCode()
-	}
-	return 1
-}
-
-func exitCodeOfErr(err error) int {
-	if ce, ok := err.(*CommandError); ok {
+	var ce *CommandError
+	if errors.As(err, &ce) {
 		return ce.ExitCode
+	}
+	var ee *exec.ExitError
+	if errors.As(err, &ee) {
+		return ee.ExitCode()
 	}
 	return 1
 }

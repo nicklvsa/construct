@@ -54,6 +54,9 @@ type options struct {
 	dash              *dashboard
 	uiPort            int
 	uiNoOpen          bool
+	since             string
+	hooks             []string
+	uninstall         bool
 }
 
 func printUsage() {
@@ -61,12 +64,14 @@ func printUsage() {
 
 Usage:
   construct [options] [Constfile] [commands...]
-  construct <init|import|shell|doctor|stats|cloud|clean|lint|graph|fmt|completion|ui> [args...]
+  construct <init|import|shell|doctor|stats|cloud|clean|lint|graph|fmt|completion|ui|runs|mcp|learn|install> [args...]
 
 Commands:
   list              List all available commands
   init [template]   Scaffold a Constfile (minimal, go, python, node, rust, monorepo)
   import [FILE] [OUT]  Convert a Makefile to a Constfile (best-effort, --force)
+  import update     Refresh remote recipe imports to their ref's latest commit
+  dev [services...] Supervise long-running service commands (ports, restarts)
   shell [FILE] [cmd]  Start a shell with a command's env, workdir, or container
   doctor            Diagnose the environment, Constfile, tools, and cloud file
   stats             Show per-command timing history
@@ -76,6 +81,10 @@ Commands:
   fmt [files]       Canonicalize Constfile indentation (--check for CI)
   completion SHELL  Emit bash/zsh/fish completions
   ui [Constfile]    Edit the Constfile in the browser (drag and drop; --port, --no-open)
+  runs [FILE]       Show run history: list, show <cmd> [n], diff <cmd> [a b]
+  mcp [FILE]        Serve build tools to MCP clients over stdio (for AI agents)
+  learn [FILE] [targets]  Discover file deps: trace reads (strace) or unwatched files
+  install           Install shell completions (--hook NAME for git hooks, --uninstall)
   cloud             Manage cloud commands and GitHub Actions jobs (see below)
 
 Options:
@@ -105,10 +114,17 @@ Options:
   --tui             Live dashboard for the run (q detaches, Ctrl-C cancels)
   --container IMG   shell: run in this container image instead of the command's
   --force, -f       Overwrite existing files (init, import)
+  --doctor          Diagnose the environment, Constfile, tools, and cloud file
+  --template NAME   init: template to scaffold (minimal, go, python, node, rust, monorepo)
+  --file PATH       Target file (init, cloud push)
+  --output PATH     Output file (cloud pull)
   --repo OWNER/REPO GitHub repository for cloud jobs (default: git remote)
   --ref BRANCH      Git ref to dispatch cloud jobs on (default: current branch)
+  --workflow NAME   Workflow file name (cloud submit, default: construct.yml)
+  --no-init         cloud submit: don't create the workflow file
   --wait            Follow a cloud job and stream its logs
   --notify          Desktop notification when the run finishes
+  --since REF       Only run targets affected by changes since a git ref
   --port N          ui: serve on this port (default: random free port)
   --no-open         ui: print the URL without opening a browser
 
@@ -127,6 +143,10 @@ Examples:
   construct cloud submit --wait test     Run 'test' on GitHub Actions
   construct import Makefile  Convert a Makefile to ./Constfile
   construct shell dev        Drop into the 'dev' command's environment
+  construct --since origin/main build  Run 'build' only if affected since origin/main
+  construct dev              Supervise service commands (Ctrl-C stops all)
+  construct install          Install shell completions
+  construct install --hook pre-push -- build test  Install a git hook
 `)
 }
 
@@ -176,8 +196,11 @@ func defineFlags(fs *flag.FlagSet, o *options) {
 	fs.BoolVar(&o.tui, "tui", false, "Live dashboard for the run (requires a terminal)")
 	fs.IntVar(&o.uiPort, "port", 0, "`ui`: port to serve on (default: random)")
 	fs.BoolVar(&o.uiNoOpen, "no-open", false, "`ui`: print the URL instead of opening a browser")
-	fs.StringVar(&o.shell, "shell", "", "Shell to run statements with (default: $SHELL)")
+	fs.StringVar(&o.shell, "shell", "", "Shell to run statements with (default: $SHELL; `install`: shell to install completions for)")
 	fs.StringArrayVarP(&o.overrides, "env", "e", []string{}, "Override variable (key=value)")
+	fs.StringVar(&o.since, "since", "", "Only run targets affected by changes since a git ref (e.g. origin/main)")
+	fs.StringArrayVar(&o.hooks, "hook", []string{}, "install: git hook(s) to install (pre-commit, pre-push, ...); targets follow `--`")
+	fs.BoolVar(&o.uninstall, "uninstall", false, "install: remove installed completions or hooks")
 }
 
 func flagList() [][2]string {

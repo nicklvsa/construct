@@ -9,6 +9,9 @@ func EmitHeader(c *Command) string {
 	if c.Manual {
 		b.WriteString("manual ")
 	}
+	if c.IsService {
+		b.WriteString("service ")
+	}
 	switch {
 	case c.IsDefault:
 		b.WriteString("_")

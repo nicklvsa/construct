@@ -88,7 +88,7 @@ func (p *Parser) parseBodyStatements(raw []rawLine, scope string) ([]BodyStateme
 		}
 
 		if strings.HasPrefix(line, "parallel") {
-			stmt, consumed, handled, err := p.parseParallelBlock(line, raw[i:], scope, lineNum)
+			stmt, consumed, handled, err := p.parseParallelBlock(line, raw[i:], scope)
 			if err != nil {
 				return nil, err
 			}
@@ -156,7 +156,6 @@ func (p *Parser) parseBodyStatements(raw []rawLine, scope string) ([]BodyStateme
 			continue
 		}
 
-		// `global name = value` writes a global from inside a command body.
 		if strings.HasPrefix(line, "global ") || strings.HasPrefix(line, "global\t") {
 			if err := p.parseVar("var "+strings.TrimSpace(strings.TrimPrefix(line, "global")), "global", lineNum); err != nil {
 				return nil, err
@@ -165,7 +164,6 @@ func (p *Parser) parseBodyStatements(raw []rawLine, scope string) ([]BodyStateme
 			continue
 		}
 
-		// `require_env KEY` fails the command when the env var is unset.
 		if strings.HasPrefix(line, "require_env ") {
 			rest := strings.TrimSpace(strings.TrimPrefix(line, "require_env"))
 			key, msg := rest, ""
@@ -179,6 +177,15 @@ func (p *Parser) parseBodyStatements(raw []rawLine, scope string) ([]BodyStateme
 			stmts = append(stmts, BodyStatement{Type: StmtRequireEnv, Shell: key, Message: msg, SourceLine: lineNum})
 			i++
 			continue
+		}
+
+		if strings.HasPrefix(line, "port ") {
+			rest := strings.Trim(strings.TrimSpace(strings.TrimPrefix(line, "port")), `"`)
+			if n, err := strconv.Atoi(rest); err == nil && n >= 1 && n <= 65535 {
+				stmts = append(stmts, BodyStatement{Type: StmtPort, Shell: rest, SourceLine: lineNum})
+				i++
+				continue
+			}
 		}
 
 		// `retry<N> $ cmd` / `retry<N, 2s> $ cmd` rerun a statement up to N extra times.
@@ -359,7 +366,6 @@ func (p *Parser) parseBodyStatements(raw []rawLine, scope string) ([]BodyStateme
 			timeoutDur = mod
 			line = strings.TrimSpace(rest2)
 		} else if strings.HasPrefix(line, "timeout ") {
-			// old space form: hard error so leftover files fail loudly
 			rest := strings.TrimSpace(strings.TrimPrefix(line, "timeout"))
 			if sp := strings.IndexAny(rest, " \t"); sp > 0 {
 				tail := strings.TrimSpace(rest[sp:])
@@ -997,7 +1003,7 @@ func parseInvokeArgs(s string) (name string, args []string) {
 	return name, pairs
 }
 
-func (p *Parser) parseParallelBlock(line string, raw []rawLine, scope string, lineNum int) (BodyStatement, int, bool, error) {
+func (p *Parser) parseParallelBlock(line string, raw []rawLine, scope string) (BodyStatement, int, bool, error) {
 	rest := strings.TrimLeft(line[len("parallel"):], " \t")
 	if rest == "" {
 		return BodyStatement{}, 0, false, nil

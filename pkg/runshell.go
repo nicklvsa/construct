@@ -72,23 +72,23 @@ func (e *Executor) SetShell(name string) {
 	}
 }
 
-func (e *Executor) shellArgsFor(ctx *execContext, script string) (argv []string, display string, cleanup func()) {
+func (e *Executor) shellArgsFor(ctx *execContext, script string) (argv []string, display string, cleanup func(), err error) {
 	noop := func() {}
 	if ctx.container == "" {
 		if f, ok := e.scriptFile(script); ok {
-			return f, e.shellName + " " + script, func() { os.Remove(f[1]) }
+			return f, e.shellName + " " + script, func() { os.Remove(f[1]) }, nil
 		}
 		argv = append([]string{e.shellName}, slices.Clone(e.shellArgs)...)
 		argv = append(argv, script)
-		return argv, e.shellName + " " + strings.Join(argv[1:], " "), noop
+		return argv, e.shellName + " " + strings.Join(argv[1:], " "), noop, nil
 	}
 	fields := strings.Fields(ctx.container)
 	if len(fields) != 2 {
-		return nil, ctx.container, noop
+		return nil, ctx.container, noop, fmt.Errorf("malformed container spec %q (expected \"<runtime> <image>\")", ctx.container)
 	}
 	rt, image := fields[0], fields[1]
 	if rt == "none" {
-		return nil, image, noop
+		return nil, image, noop, fmt.Errorf("command needs container runtime but neither docker nor podman was found")
 	}
 	argv = []string{rt, "run", "--rm"}
 	if ctx.envFile != "" {
@@ -103,7 +103,7 @@ func (e *Executor) shellArgsFor(ctx *execContext, script string) (argv []string,
 		argv = append(argv, "-w", "/work/"+filepath.ToSlash(ctx.workDir))
 	}
 	argv = append(argv, image, "/bin/sh", "-c", script)
-	return argv, rt + " run " + image + " /bin/sh -c " + script, noop
+	return argv, rt + " run " + image + " /bin/sh -c " + script, noop, nil
 }
 
 func (e *Executor) scriptFile(script string) ([]string, bool) {
@@ -202,6 +202,9 @@ func shellLineBody(line string) string {
 }
 
 func (e *Executor) runShellBatch(ctx *execContext, stmts []BodyStatement) error {
+	if len(stmts) == 0 {
+		return nil
+	}
 	type group struct {
 		lines    []string
 		strict   bool
@@ -245,49 +248,72 @@ func (e *Executor) runShellBatch(ctx *execContext, stmts []BodyStatement) error 
 		if len(g.lines) == 0 {
 			continue
 		}
-		script := strings.Join(g.lines, "\n")
-		if g.strict {
-			script = "set -e\n" + script
+		if err := e.runShellGroup(ctx, g.lines, g.strict, g.sourceLn); err != nil {
+			return err
 		}
-		if supportsPipefail(e.shellName) {
-			script = "set -o pipefail\n" + script
-		}
-		argv, fullCommand, cleanup := e.shellArgsFor(ctx, script)
-		if argv == nil {
-			return fmt.Errorf("command %q needs container runtime but neither docker nor podman was found", ctx.target.Name)
-		}
-		defer cleanup()
-		cmd := e.command(ctx, argv)
+	}
+	return nil
+}
 
-		var buf bytes.Buffer
-		sink := io.Writer(e.outSink())
-		if e.quiet || ctx.isPrereq {
-			sink = io.Discard // prereq stdout is captured, not streamed
-		} else if oc, ok := e.observer.(OutputCollector); ok {
-			sink = oc.OutputWriter(ctx.target.Name)
-		} else if e.prefixOutput || ctx.forcePrefix {
-			sink = &linePrefixWriter{w: e.outSink(), prefix: "[" + ctx.target.Name + "] "}
-		}
-		cmd.Stdout = io.MultiWriter(sink, &buf)
-		cmd.Stderr = e.errSinkFor(ctx)
+// streamSink picks where a streamed command's stdout goes. prereqDiscards is
+// set for batches, where prereq stdout is captured instead of streamed.
+func (e *Executor) streamSink(ctx *execContext, prereqDiscards bool) io.Writer {
+	if e.quiet || (prereqDiscards && ctx.isPrereq) {
+		return io.Discard
+	}
+	e.mu.Lock()
+	observer := e.observer
+	e.mu.Unlock()
+	if oc, ok := observer.(OutputCollector); ok {
+		return oc.OutputWriter(ctx.target.Name)
+	}
+	if e.prefixOutput || ctx.forcePrefix {
+		return &linePrefixWriter{w: e.outSink(), prefix: "[" + ctx.target.Name + "] "}
+	}
+	return e.outSink()
+}
 
-		e.debugf("Running command %s (batched): %s\n", ctx.target.Name, fullCommand)
+func (e *Executor) runShellGroup(ctx *execContext, lines []string, strict bool, sourceLn int) error {
+	script := strings.Join(lines, "\n")
+	if strict {
+		script = "set -e\n" + script
+	}
+	if supportsPipefail(e.shellName) {
+		script = "set -o pipefail\n" + script
+	}
+	argv, fullCommand, cleanup, err := e.shellArgsFor(ctx, script)
+	if err != nil {
+		return fmt.Errorf("command %q: %w", ctx.target.Name, err)
+	}
+	defer cleanup() // scoped to this group: Windows temp scripts go away promptly
+	cmd := e.command(ctx, argv)
 
-		release := e.acquire()
-		err := cmd.Run()
-		release()
-		if pw, ok := sink.(*linePrefixWriter); ok {
-			pw.flush()
-		}
-		e.setLastResult(ctx, exitCodeOf(err), buf.String())
-		if ctx.isPrereq {
-			e.mu.Lock()
-			ctx.target.PrereqOutput = append(ctx.target.PrereqOutput, strings.TrimSpace(buf.String()))
-			e.mu.Unlock()
-		}
-		if err != nil {
-			return e.commandError(fullCommand, ctx, BodyStatement{SourceLine: g.sourceLn}, err, "")
-		}
+	var buf bytes.Buffer
+	sink := e.streamSink(ctx, true)
+	rec := e.logRecorder(ctx.target.Name)
+	e.appendRunLog(ctx.target.Name, "$ "+strings.Join(lines, "\n$ ")+"\n")
+	cmd.Stdout = io.MultiWriter(sink, &buf, rec)
+	cmd.Stderr = io.MultiWriter(e.errSinkFor(ctx), rec)
+
+	e.debugf("Running command %s (batched): %s\n", ctx.target.Name, fullCommand)
+
+	release := e.acquire()
+	defer release()
+	err = cmd.Run()
+	if pw, ok := sink.(*linePrefixWriter); ok {
+		pw.flush()
+	}
+	if err != nil {
+		e.appendRunLog(ctx.target.Name, fmt.Sprintf("(exit %d)\n", exitCodeOf(err)))
+	}
+	e.setLastResult(ctx, exitCodeOf(err), buf.String())
+	if ctx.isPrereq {
+		e.mu.Lock()
+		ctx.target.PrereqOutput = append(ctx.target.PrereqOutput, strings.TrimSpace(buf.String()))
+		e.mu.Unlock()
+	}
+	if err != nil {
+		return e.commandError(fullCommand, ctx, BodyStatement{SourceLine: sourceLn}, err, "")
 	}
 	return nil
 }
@@ -309,8 +335,10 @@ func (p *linePrefixWriter) Write(b []byte) (int, error) {
 			break
 		}
 		line := p.buf[:idx+1]
-		p.w.Write(append([]byte(p.prefix), line...))
 		p.buf = p.buf[idx+1:]
+		if _, err := p.w.Write(append([]byte(p.prefix), line...)); err != nil {
+			return 0, err
+		}
 	}
 	return len(b), nil
 }
@@ -319,7 +347,9 @@ func (p *linePrefixWriter) flush() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if len(p.buf) > 0 {
-		p.w.Write(append([]byte(p.prefix), p.buf...))
+		if _, err := p.w.Write(append([]byte(p.prefix), p.buf...)); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: could not write prefixed output: %v\n", err)
+		}
 		p.buf = nil
 	}
 }
@@ -333,7 +363,8 @@ func (e *Executor) runShell(ctx *execContext, stmt BodyStatement) error {
 			return lastErr
 		}
 		if backoff > 0 {
-			wait := backoff * time.Duration(1<<attempt)
+			// Cap the exponent: 1<<attempt overflows long before attempt 63.
+			wait := backoff * time.Duration(1<<min(attempt, 16))
 			fmt.Fprintf(os.Stderr, "(!) %s failed, retrying in %s (attempt %d/%d)\n", stmt.Shell, wait, attempt+1, stmt.Retry+1)
 			select {
 			case <-e.effectiveRunCtx(ctx).Done():
@@ -362,15 +393,16 @@ func (e *Executor) runShellOnce(ctx *execContext, stmt BodyStatement) error {
 	if cmdLine == "" {
 		return nil
 	}
+	display := cmdLine
 	if supportsPipefail(e.shellName) {
 		cmdLine = "set -o pipefail\n" + cmdLine
 	}
 
 	stmtCtx, cancel := e.statementCtx(ctx, stmt.Timeout)
 	defer cancel()
-	argv, fullCommand, cleanup := e.shellArgsFor(ctx, cmdLine)
-	if argv == nil {
-		return fmt.Errorf("command %q needs container runtime but neither docker nor podman was found", ctx.target.Name)
+	argv, fullCommand, cleanup, err := e.shellArgsFor(ctx, cmdLine)
+	if err != nil {
+		return fmt.Errorf("command %q: %w", ctx.target.Name, err)
 	}
 	defer cleanup()
 	cmd := e.command(stmtCtx, argv)
@@ -386,23 +418,21 @@ func (e *Executor) runShellOnce(ctx *execContext, stmt BodyStatement) error {
 	}
 
 	release := e.acquire()
+	defer release()
 	stream := !e.debug && !ctx.isPrereq && ctx.target.LazyEval == nil && ctx.out == nil
 	if stream {
 		var buf bytes.Buffer
-		sink := io.Writer(e.outSink())
-		if e.quiet {
-			sink = io.Discard
-		} else if oc, ok := e.observer.(OutputCollector); ok {
-			sink = oc.OutputWriter(ctx.target.Name)
-		} else if e.prefixOutput || ctx.forcePrefix {
-			sink = &linePrefixWriter{w: e.outSink(), prefix: "[" + ctx.target.Name + "] "}
-		}
-		cmd.Stdout = io.MultiWriter(sink, &buf)
-		cmd.Stderr = e.errSinkFor(ctx)
+		sink := e.streamSink(ctx, false)
+		rec := e.logRecorder(ctx.target.Name)
+		e.appendRunLog(ctx.target.Name, "$ "+display+"\n")
+		cmd.Stdout = io.MultiWriter(sink, &buf, rec)
+		cmd.Stderr = io.MultiWriter(e.errSinkFor(ctx), rec)
 		err := cmd.Run()
-		release()
 		if pw, ok := sink.(*linePrefixWriter); ok {
 			pw.flush()
+		}
+		if err != nil {
+			e.appendRunLog(ctx.target.Name, fmt.Sprintf("(exit %d)\n", exitCodeOf(err)))
 		}
 		e.setLastResult(ctx, exitCodeOf(err), buf.String())
 		if err != nil && !ignoreErr {
@@ -412,16 +442,15 @@ func (e *Executor) runShellOnce(ctx *execContext, stmt BodyStatement) error {
 	}
 
 	var stdout, stderr []byte
-	var err error
 	if e.debug {
 		stdout, stderr, err = capture(cmd)
 	} else {
 		stdout, err = cmd.Output()
-		if ee, ok := err.(*exec.ExitError); ok && len(ee.Stderr) > 0 {
+		var ee *exec.ExitError
+		if errors.As(err, &ee) && len(ee.Stderr) > 0 {
 			stderr = ee.Stderr
 		}
 	}
-	release()
 
 	output := stdout
 	if len(stderr) > 0 {
@@ -430,6 +459,8 @@ func (e *Executor) runShellOnce(ctx *execContext, stmt BodyStatement) error {
 		}
 		output = append(output, stderr...)
 	}
+
+	e.appendRunLog(ctx.target.Name, "$ "+display+"\n"+string(output)+"\n")
 
 	e.setLastResult(ctx, exitCodeOf(err), string(output))
 
@@ -517,6 +548,14 @@ func capture(cmd *exec.Cmd) (stdout, stderr []byte, err error) {
 		return nil, nil, fmt.Errorf("failed to start command: %w", err)
 	}
 
+	// Always Wait to reap the child, even when a pipe read fails;
+	// otherwise the process is left running as a zombie.
+	defer func() {
+		if werr := cmd.Wait(); err == nil {
+			err = werr
+		}
+	}()
+
 	var stdoutBytes, stderrBytes []byte
 	var stdoutErr, stderrErr error
 	var wg sync.WaitGroup
@@ -535,14 +574,10 @@ func capture(cmd *exec.Cmd) (stdout, stderr []byte, err error) {
 	wg.Wait()
 
 	if stdoutErr != nil {
-		return nil, nil, fmt.Errorf("failed to read stdout: %w", stdoutErr)
+		return stdoutBytes, stderrBytes, fmt.Errorf("failed to read stdout: %w", stdoutErr)
 	}
 	if stderrErr != nil {
-		return nil, nil, fmt.Errorf("failed to read stderr: %w", stderrErr)
-	}
-
-	if err := cmd.Wait(); err != nil {
-		return stdoutBytes, stderrBytes, err
+		return stdoutBytes, stderrBytes, fmt.Errorf("failed to read stderr: %w", stderrErr)
 	}
 
 	return stdoutBytes, stderrBytes, nil

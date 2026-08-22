@@ -1,0 +1,9 @@
+# Loaded on darwin only (import ... on macos).
+
+darwin-greet {
+    $ echo "hello from the darwin side"
+}
+
+platform-info-extra {
+    $ echo "darwin-specific tooling would run here"
+}

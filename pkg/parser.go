@@ -222,7 +222,7 @@ func (p *Parser) parseVar(line string, scope string, lineNum int) error {
 	return nil
 }
 
-func (p *Parser) parseCommand(idx int, line string, isDefault, manual bool, lineNum int, description string) (int, error) {
+func (p *Parser) parseCommand(idx int, line string, isDefault, manual, service bool, lineNum int, description string) (int, error) {
 	trimmedLine := strings.TrimSpace(line)
 	if !strings.Contains(trimmedLine, "{") {
 		return 0, nil
@@ -273,6 +273,12 @@ func (p *Parser) parseCommand(idx int, line string, isDefault, manual bool, line
 	}
 
 	if commandName != "" {
+		port := ""
+		for _, stmt := range commandBody {
+			if stmt.Type == StmtPort {
+				port = stmt.Shell
+			}
+		}
 		p.Data.addCommand(&Command{
 			Name:            commandName,
 			SourceFile:      p.InputFile,
@@ -280,6 +286,8 @@ func (p *Parser) parseCommand(idx int, line string, isDefault, manual bool, line
 			Description:     description,
 			CloudAccessible: cloudAccessible,
 			IsDefault:       isDefault,
+			IsService:       service,
+			Port:            port,
 			Arguments:       commandArgs,
 			Prereqs:         prereqs,
 			PrereqDirs:      prereqDirs,
@@ -391,12 +399,13 @@ func (p *Parser) parseLines() error {
 		}
 
 		header, manual := StripManual(line)
+		header, service := StripService(header)
 		cmdLine := strings.TrimSpace(header)
 		isDefault := strings.HasPrefix(cmdLine, "_") &&
 			(len(cmdLine) == 1 || cmdLine[1] == ' ' || cmdLine[1] == '\t' ||
 				cmdLine[1] == '(' || cmdLine[1] == '<' || cmdLine[1] == '{')
 
-		consumed, err := p.parseCommand(idx, header, isDefault, manual, lineNum, strings.Join(pendingComment, "\n"))
+		consumed, err := p.parseCommand(idx, header, isDefault, manual, service, lineNum, strings.Join(pendingComment, "\n"))
 		if err != nil {
 			return p.parseErr(lineNum, err, line)
 		}

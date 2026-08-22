@@ -16,6 +16,25 @@ import (
 //go:embed init-templates/*
 var initTemplates embed.FS
 
+// rejectSubcommandFlags errors when a subcommand's positional args contain
+// flags; subcommands only accept global flags before their name.
+func rejectSubcommandFlags(args []string, label string) error {
+	for _, a := range args {
+		if strings.HasPrefix(a, "-") {
+			return exitAt(2, "unknown %s option %q", label, a)
+		}
+	}
+	return nil
+}
+
+// splitConstfileArgs peels a leading Constfile path off a subcommand's args.
+func splitConstfileArgs(args []string) (fileName string, rest []string) {
+	if len(args) > 0 && fileExists(args[0]) {
+		return args[0], args[1:]
+	}
+	return defaultConstfileName(), args
+}
+
 func runInit(args []string, o *options) error {
 	template := o.template
 	fileName := o.fileName
@@ -26,10 +45,10 @@ func runInit(args []string, o *options) error {
 	if fileName == "" {
 		fileName = "Constfile"
 	}
+	if err := rejectSubcommandFlags(args, "init"); err != nil {
+		return err
+	}
 	for _, a := range args {
-		if strings.HasPrefix(a, "-") {
-			return exitAt(2, "unknown init option %q", a)
-		}
 		template = a
 	}
 	if _, err := os.Stat(fileName); err == nil && !force {
@@ -49,10 +68,8 @@ func runInit(args []string, o *options) error {
 
 func runLint(args []string, o *options) error {
 	fileName := defaultConstfileName()
-	if len(args) > 0 {
-		if fileExists(args[0]) {
-			fileName = args[0]
-		}
+	if len(args) > 0 && fileExists(args[0]) {
+		fileName = args[0]
 	}
 
 	p, err := pkg.NewParser(fileName)
@@ -107,21 +124,31 @@ func readFileOr(path string) string {
 func runImport(args []string, o *options) error {
 	input := "Makefile"
 	output := "Constfile"
-	var rest []string
-	for _, a := range args {
-		if strings.HasPrefix(a, "-") {
-			return exitAt(2, "unknown import option %q", a)
+	if err := rejectSubcommandFlags(args, "import"); err != nil {
+		return err
+	}
+
+	// `construct import update [specs...]` refreshes remote (git) imports;
+	// a Makefile literally named "update" still converts via an explicit path.
+	if len(args) > 0 && args[0] == "update" && !fileExists("update") {
+		baseDir := "."
+		if fileName := defaultConstfileName(); fileExists(fileName) {
+			baseDir = filepath.Dir(fileName)
 		}
-		rest = append(rest, a)
+		if _, err := pkg.UpdateGitImports(baseDir, args[1:]); err != nil {
+			return exitAt(1, "%v", err)
+		}
+		return nil
 	}
-	if len(rest) > 0 {
-		input = rest[0]
+
+	if len(args) > 0 {
+		input = args[0]
 	}
-	if len(rest) > 1 {
-		output = rest[1]
+	if len(args) > 1 {
+		output = args[1]
 	}
-	if len(rest) > 2 {
-		return exitAt(2, "usage: construct import [Makefile] [output]")
+	if len(args) > 2 {
+		return exitAt(2, "usage: construct import [Makefile] [output] | construct import update [specs...]")
 	}
 
 	content, err := os.ReadFile(input)
@@ -149,22 +176,14 @@ func runImport(args []string, o *options) error {
 }
 
 func runShellCmd(args []string, o *options) error {
-	fileName := defaultConstfileName()
-	target := ""
-	var rest []string
-	for _, a := range args {
-		if strings.HasPrefix(a, "-") {
-			return exitAt(2, "unknown shell option %q", a)
-		}
-		rest = append(rest, a)
+	if err := rejectSubcommandFlags(args, "shell"); err != nil {
+		return err
 	}
-	if len(rest) > 0 && fileExists(rest[0]) {
-		fileName = rest[0]
-		rest = rest[1:]
-	}
+	fileName, rest := splitConstfileArgs(args)
 	if len(rest) > 1 {
 		return exitAt(2, "usage: construct shell [Constfile] [command]")
 	}
+	target := ""
 	if len(rest) == 1 {
 		target = rest[0]
 	}
@@ -196,14 +215,7 @@ func runShellCmd(args []string, o *options) error {
 }
 
 func runClean(args []string, o *options) error {
-	fileName := defaultConstfileName()
-	var targets []string
-	if len(args) > 0 && fileExists(args[0]) {
-		fileName = args[0]
-		targets = args[1:]
-	} else {
-		targets = args
-	}
+	fileName, targets := splitConstfileArgs(args)
 	p, err := pkg.NewParser(fileName)
 	if err != nil {
 		return err
@@ -294,14 +306,7 @@ func withinDir(path, dir string) bool {
 }
 
 func runGraph(args []string, o *options) error {
-	fileName := defaultConstfileName()
-	var targets []string
-	if len(args) > 0 && fileExists(args[0]) {
-		fileName = args[0]
-		targets = args[1:]
-	} else {
-		targets = args
-	}
+	fileName, targets := splitConstfileArgs(args)
 	p, err := pkg.NewParser(fileName)
 	if err != nil {
 		return err
@@ -481,30 +486,28 @@ func runTargets() error {
 	return nil
 }
 
-func runCompletion(args []string, o *options) error {
+func runCompletion(args []string) error {
 	if len(args) == 0 {
 		return exitAt(2, "usage: construct completion <bash|zsh|fish>")
 	}
-	var err error
+	var script string
 	switch args[0] {
 	case "bash":
-		err = completionBash()
+		script = completionBash()
 	case "zsh":
-		err = completionZsh()
+		script = completionZsh()
 	case "fish":
-		err = completionFish()
+		script = completionFish()
 	default:
 		return exitAt(2, "unknown shell %q (bash, zsh, fish)", args[0])
 	}
-	if err != nil {
-		return err
-	}
+	fmt.Print(script)
 	fmt.Fprintf(os.Stderr, "# install: source the script from your shell profile\n")
 	return nil
 }
 
-func completionBash() error {
-	fmt.Printf(`_construct() {
+func completionBash() string {
+	return fmt.Sprintf(`_construct() {
     local cur commands flags
     COMPREPLY=()
     cur="${COMP_WORDS[COMP_CWORD]}"
@@ -518,11 +521,10 @@ func completionBash() error {
 }
 complete -F _construct construct
 `, flagWords())
-	return nil
 }
 
-func completionZsh() error {
-	fmt.Printf(`#compdef construct
+func completionZsh() string {
+	return fmt.Sprintf(`#compdef construct
 _construct() {
     local -a commands flags
     commands=(${(f)"$(construct __targets 2>/dev/null)"})
@@ -534,23 +536,23 @@ _construct() {
 }
 _construct "$@"
 `, zshFlagArgs())
-	return nil
 }
 
-func completionFish() error {
-	fmt.Println("complete -c construct -f")
-	fmt.Println(`complete -c construct -a '(construct __targets 2>/dev/null)' -d command`)
+func completionFish() string {
+	var b strings.Builder
+	b.WriteString("complete -c construct -f\n")
+	b.WriteString("complete -c construct -a '(construct __targets 2>/dev/null)' -d command\n")
 	for _, f := range flagList() {
 		name, _, _ := strings.Cut(f[0], "/")
-		fmt.Printf("complete -c construct -l %s -d %q\n", strings.TrimPrefix(name, "--"), f[1])
+		fmt.Fprintf(&b, "complete -c construct -l %s -d %q\n", strings.TrimPrefix(name, "--"), f[1])
 	}
-	return nil
+	return b.String()
 }
 
 func flagWords() string {
 	var words []string
 	for _, f := range flagList() {
-		for _, w := range strings.Split(f[0], "/") {
+		for w := range strings.SplitSeq(f[0], "/") {
 			words = append(words, w)
 		}
 	}
@@ -560,7 +562,7 @@ func flagWords() string {
 func zshFlagArgs() string {
 	var parts []string
 	for _, f := range flagList() {
-		long := strings.SplitN(f[0], "/", 2)[0]
+		long, _, _ := strings.Cut(f[0], "/")
 		parts = append(parts, fmt.Sprintf("%q[%q]", long, f[1]))
 	}
 	return strings.Join(parts, " ")
